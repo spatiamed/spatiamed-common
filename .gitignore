@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*
+
+# Ralph logs/generated
+.ralph/logs/
+.ralph/docs/generated/
+
+# Beads local DB (JSONL files are tracked)
+.beads/*.db
+.beads/*.db-shm
+.beads/*.db-wal
+.beads/daemon.*
+.beads/*.sock
