@@ -1,9 +1,13 @@
 from datetime import datetime
 
 import pytz
-import pytest
 
-from sm_common.compliance import is_within_allowed_hours, IST, TCCCPR_RULES
+from sm_common.compliance import (
+    IST,
+    MAX_CALLS_PER_DAY,
+    MAX_CALLS_PER_WEEK,
+    is_within_allowed_hours,
+)
 
 
 class TestIsWithinAllowedHours:
@@ -54,5 +58,5 @@ class TestIsWithinAllowedHours:
 
 class TestTCCCPRRules:
     def test_rules_values(self):
-        assert TCCCPR_RULES["max_calls_per_day"] == 1
-        assert TCCCPR_RULES["max_calls_per_week"] == 3
+        assert MAX_CALLS_PER_DAY == 1
+        assert MAX_CALLS_PER_WEEK == 3

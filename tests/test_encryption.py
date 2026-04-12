@@ -1,7 +1,8 @@
 import os
 
 import pytest
-from cryptography.fernet import Fernet
+from cryptography.exceptions import InvalidTag
+from cryptography.fernet import Fernet, InvalidToken
 
 from sm_common.encryption import (
     decrypt_field,
@@ -32,7 +33,7 @@ class TestFieldEncryption:
     def test_wrong_key_fails(self):
         encrypted = encrypt_field("test", self.key)
         wrong_key = os.urandom(32)
-        with pytest.raises(Exception):
+        with pytest.raises(InvalidTag):
             decrypt_field(encrypted, wrong_key)
 
     def test_unknown_version_raises(self):
@@ -61,7 +62,7 @@ class TestTransportEncryption:
     def test_wrong_key_fails(self):
         encrypted = encrypt_for_transport("test", self.transport_key)
         wrong_key = Fernet.generate_key().decode()
-        with pytest.raises(Exception):
+        with pytest.raises(InvalidToken):
             decrypt_from_transport(encrypted, wrong_key)
 
     def test_unicode_round_trip(self):

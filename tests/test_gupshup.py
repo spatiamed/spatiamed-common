@@ -1,6 +1,7 @@
-import pytest
-import httpx
 from unittest.mock import AsyncMock, patch
+
+import httpx
+import pytest
 
 from sm_common.gupshup import GupshupClient, GupshupConfig
 
@@ -19,7 +20,9 @@ def client(config):
 
 @pytest.mark.asyncio
 async def test_send_template(client):
-    mock_response = httpx.Response(200, json={"status": "submitted", "messageId": "abc123"}, request=DUMMY_REQUEST)
+    mock_response = httpx.Response(
+        200, json={"status": "submitted", "messageId": "abc123"}, request=DUMMY_REQUEST
+    )
     with patch.object(client._client, "post", new_callable=AsyncMock, return_value=mock_response):
         result = await client.send_template(
             to="9876543210",
@@ -33,7 +36,9 @@ async def test_send_template(client):
 @pytest.mark.asyncio
 async def test_send_template_custom_app_name(client):
     mock_response = httpx.Response(200, json={"status": "submitted"}, request=DUMMY_REQUEST)
-    with patch.object(client._client, "post", new_callable=AsyncMock, return_value=mock_response) as mock_post:
+    with patch.object(
+        client._client, "post", new_callable=AsyncMock, return_value=mock_response
+    ) as mock_post:
         await client.send_template(
             to="9876543210",
             template_id="tmpl_123",
@@ -48,9 +53,14 @@ async def test_send_template_custom_app_name(client):
 @pytest.mark.asyncio
 async def test_send_template_destination_prefix(client):
     mock_response = httpx.Response(200, json={"status": "ok"}, request=DUMMY_REQUEST)
-    with patch.object(client._client, "post", new_callable=AsyncMock, return_value=mock_response) as mock_post:
+    with patch.object(
+        client._client, "post", new_callable=AsyncMock, return_value=mock_response
+    ) as mock_post:
         await client.send_template(
-            to="9876543210", template_id="t", params=[], source="s",
+            to="9876543210",
+            template_id="t",
+            params=[],
+            source="s",
         )
     assert mock_post.call_args.kwargs["data"]["destination"] == "919876543210"
 
@@ -60,7 +70,9 @@ async def test_send_session_message(client):
     mock_response = httpx.Response(200, json={"status": "submitted"}, request=DUMMY_REQUEST)
     with patch.object(client._client, "post", new_callable=AsyncMock, return_value=mock_response):
         result = await client.send_session_message(
-            to="9876543210", text="Hello!", source="91XXXXX",
+            to="9876543210",
+            text="Hello!",
+            source="91XXXXX",
         )
     assert result["status"] == "submitted"
 
@@ -68,11 +80,16 @@ async def test_send_session_message(client):
 @pytest.mark.asyncio
 async def test_send_template_raises_on_error(client):
     mock_response = httpx.Response(401, json={"error": "unauthorized"}, request=DUMMY_REQUEST)
-    with patch.object(client._client, "post", new_callable=AsyncMock, return_value=mock_response):
-        with pytest.raises(httpx.HTTPStatusError):
-            await client.send_template(
-                to="9876543210", template_id="t", params=[], source="s",
-            )
+    with (
+        patch.object(client._client, "post", new_callable=AsyncMock, return_value=mock_response),
+        pytest.raises(httpx.HTTPStatusError),
+    ):
+        await client.send_template(
+            to="9876543210",
+            template_id="t",
+            params=[],
+            source="s",
+        )
 
 
 @pytest.mark.asyncio

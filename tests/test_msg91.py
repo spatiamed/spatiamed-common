@@ -1,6 +1,7 @@
-import pytest
-import httpx
 from unittest.mock import AsyncMock, patch
+
+import httpx
+import pytest
 
 from sm_common.msg91 import MSG91Client, MSG91Config
 
@@ -33,7 +34,9 @@ async def test_send_sms(client):
 @pytest.mark.asyncio
 async def test_send_sms_request_format(client):
     mock_response = httpx.Response(200, json={"type": "success"}, request=DUMMY_REQUEST)
-    with patch.object(client._client, "post", new_callable=AsyncMock, return_value=mock_response) as mock_post:
+    with patch.object(
+        client._client, "post", new_callable=AsyncMock, return_value=mock_response
+    ) as mock_post:
         await client.send_sms(
             to="9876543210",
             template_id="tmpl_123",
@@ -52,11 +55,16 @@ async def test_send_sms_request_format(client):
 @pytest.mark.asyncio
 async def test_send_sms_raises_on_error(client):
     mock_response = httpx.Response(401, json={"error": "unauthorized"}, request=DUMMY_REQUEST)
-    with patch.object(client._client, "post", new_callable=AsyncMock, return_value=mock_response):
-        with pytest.raises(httpx.HTTPStatusError):
-            await client.send_sms(
-                to="9876543210", template_id="t", params={}, sender_id="CITYGH",
-            )
+    with (
+        patch.object(client._client, "post", new_callable=AsyncMock, return_value=mock_response),
+        pytest.raises(httpx.HTTPStatusError),
+    ):
+        await client.send_sms(
+            to="9876543210",
+            template_id="t",
+            params={},
+            sender_id="CITYGH",
+        )
 
 
 @pytest.mark.asyncio

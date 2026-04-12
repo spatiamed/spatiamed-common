@@ -1,10 +1,12 @@
-import httpx
 from dataclasses import dataclass
+from typing import Any
+
+import httpx
 
 
 @dataclass
 class MSG91Config:
-    auth_key: str         # Platform-level MSG91 auth key
+    auth_key: str  # Platform-level MSG91 auth key
     base_url: str = "https://control.msg91.com/api/v5"
 
 
@@ -16,9 +18,12 @@ class MSG91Client:
         self._client = httpx.AsyncClient(timeout=30.0)
 
     async def send_sms(
-        self, to: str, template_id: str, params: dict[str, str],
+        self,
+        to: str,
+        template_id: str,
+        params: dict[str, str],
         sender_id: str,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Send a DLT-registered SMS.
 
         Args:
@@ -37,7 +42,8 @@ class MSG91Client:
             },
         )
         response.raise_for_status()
-        return response.json()
+        data: dict[str, Any] = response.json()
+        return data
 
-    async def close(self):
+    async def close(self) -> None:
         await self._client.aclose()

@@ -1,10 +1,12 @@
-import httpx
 from dataclasses import dataclass
+from typing import Any
+
+import httpx
 
 
 @dataclass
 class TruecallerConfig:
-    partner_key: str      # Truecaller Business partner key
+    partner_key: str  # Truecaller Business partner key
     base_url: str = "https://api.truecaller.com/v1/business"
 
 
@@ -16,9 +18,12 @@ class TruecallerClient:
         self._client = httpx.AsyncClient(timeout=30.0)
 
     async def register_numbers(
-        self, numbers: list[str], business_name: str,
-        category: str = "Hospital", logo_url: str | None = None,
-    ) -> dict:
+        self,
+        numbers: list[str],
+        business_name: str,
+        category: str = "Hospital",
+        logo_url: str | None = None,
+    ) -> dict[str, Any]:
         """Register DIDs with Truecaller so calls show hospital name."""
         response = await self._client.post(
             f"{self.config.base_url}/register",
@@ -31,7 +36,8 @@ class TruecallerClient:
             },
         )
         response.raise_for_status()
-        return response.json()
+        data: dict[str, Any] = response.json()
+        return data
 
-    async def close(self):
+    async def close(self) -> None:
         await self._client.aclose()

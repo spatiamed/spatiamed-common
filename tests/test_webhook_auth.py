@@ -2,7 +2,6 @@ import json
 import time
 from unittest.mock import patch
 
-import pytest
 from sm_common.webhook_auth import sign_webhook, verify_webhook
 
 
@@ -55,7 +54,9 @@ class TestVerifyWebhook:
         old_ts = int(time.time()) - 600  # 10 minutes ago
         body = json.dumps(payload, separators=(",", ":"), sort_keys=True)
         message = f"{old_ts}.{body}"
-        import hashlib, hmac as hmac_mod
+        import hashlib
+        import hmac as hmac_mod
+
         sig = hmac_mod.new(secret.encode(), message.encode(), hashlib.sha256).hexdigest()
         assert not verify_webhook(body.encode(), f"sha256={sig}", str(old_ts), secret)
 

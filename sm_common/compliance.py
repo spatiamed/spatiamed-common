@@ -4,12 +4,11 @@ import pytz
 
 IST = pytz.timezone("Asia/Kolkata")
 
-TCCCPR_RULES = {
-    "allowed_start": time(9, 0),    # 9:00 AM IST
-    "allowed_end": time(21, 0),     # 9:00 PM IST
-    "max_calls_per_day": 1,
-    "max_calls_per_week": 3,
-}
+# TCCCPR (Telecom Commercial Communications Customer Preference Regulations)
+ALLOWED_START = time(9, 0)  # 9:00 AM IST
+ALLOWED_END = time(21, 0)  # 9:00 PM IST
+MAX_CALLS_PER_DAY = 1
+MAX_CALLS_PER_WEEK = 3
 
 
 def is_within_allowed_hours(now: datetime | None = None) -> bool:
@@ -22,4 +21,4 @@ def is_within_allowed_hours(now: datetime | None = None) -> bool:
         now = now.astimezone(IST)
 
     current_time = now.time()
-    return TCCCPR_RULES["allowed_start"] <= current_time <= TCCCPR_RULES["allowed_end"]
+    return ALLOWED_START <= current_time <= ALLOWED_END

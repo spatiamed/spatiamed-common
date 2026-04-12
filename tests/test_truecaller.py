@@ -1,6 +1,7 @@
-import pytest
-import httpx
 from unittest.mock import AsyncMock, patch
+
+import httpx
+import pytest
 
 from sm_common.truecaller import TruecallerClient, TruecallerConfig
 
@@ -31,7 +32,9 @@ async def test_register_numbers(client):
 @pytest.mark.asyncio
 async def test_register_numbers_request_format(client):
     mock_response = httpx.Response(200, json={"status": "ok"}, request=DUMMY_REQUEST)
-    with patch.object(client._client, "post", new_callable=AsyncMock, return_value=mock_response) as mock_post:
+    with patch.object(
+        client._client, "post", new_callable=AsyncMock, return_value=mock_response
+    ) as mock_post:
         await client.register_numbers(
             numbers=["+919876543210", "+919876543211"],
             business_name="City General Hospital",
@@ -50,7 +53,9 @@ async def test_register_numbers_request_format(client):
 @pytest.mark.asyncio
 async def test_register_numbers_default_category(client):
     mock_response = httpx.Response(200, json={"status": "ok"}, request=DUMMY_REQUEST)
-    with patch.object(client._client, "post", new_callable=AsyncMock, return_value=mock_response) as mock_post:
+    with patch.object(
+        client._client, "post", new_callable=AsyncMock, return_value=mock_response
+    ) as mock_post:
         await client.register_numbers(
             numbers=["+919876543210"],
             business_name="Test Hospital",
@@ -63,12 +68,14 @@ async def test_register_numbers_default_category(client):
 @pytest.mark.asyncio
 async def test_register_numbers_raises_on_error(client):
     mock_response = httpx.Response(403, json={"error": "forbidden"}, request=DUMMY_REQUEST)
-    with patch.object(client._client, "post", new_callable=AsyncMock, return_value=mock_response):
-        with pytest.raises(httpx.HTTPStatusError):
-            await client.register_numbers(
-                numbers=["+919876543210"],
-                business_name="Test",
-            )
+    with (
+        patch.object(client._client, "post", new_callable=AsyncMock, return_value=mock_response),
+        pytest.raises(httpx.HTTPStatusError),
+    ):
+        await client.register_numbers(
+            numbers=["+919876543210"],
+            business_name="Test",
+        )
 
 
 @pytest.mark.asyncio

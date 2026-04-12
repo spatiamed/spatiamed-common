@@ -4,7 +4,6 @@ import os
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-
 # --- Field-level encryption (for storage) ---
 
 

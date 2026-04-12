@@ -1,11 +1,13 @@
-import httpx
 from dataclasses import dataclass
+from typing import Any
+
+import httpx
 
 
 @dataclass
 class GupshupConfig:
-    api_key: str          # Platform-level Gupshup API key
-    app_name: str         # "spatiamed" or tenant-specific sub-app
+    api_key: str  # Platform-level Gupshup API key
+    app_name: str  # "spatiamed" or tenant-specific sub-app
     base_url: str = "https://api.gupshup.io/wa/api/v1"
 
 
@@ -21,9 +23,13 @@ class GupshupClient:
         self._client = httpx.AsyncClient(timeout=30.0)
 
     async def send_template(
-        self, to: str, template_id: str, params: list[str],
-        source: str, app_name: str | None = None,
-    ) -> dict:
+        self,
+        to: str,
+        template_id: str,
+        params: list[str],
+        source: str,
+        app_name: str | None = None,
+    ) -> dict[str, Any]:
         """Send a pre-approved DLT template message.
 
         Args:
@@ -46,12 +52,16 @@ class GupshupClient:
             },
         )
         response.raise_for_status()
-        return response.json()
+        data: dict[str, Any] = response.json()
+        return data
 
     async def send_session_message(
-        self, to: str, text: str, source: str,
+        self,
+        to: str,
+        text: str,
+        source: str,
         app_name: str | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Send a free-form session message (within 24h window)."""
         response = await self._client.post(
             f"{self.config.base_url}/msg",
@@ -65,7 +75,8 @@ class GupshupClient:
             },
         )
         response.raise_for_status()
-        return response.json()
+        data: dict[str, Any] = response.json()
+        return data
 
-    async def close(self):
+    async def close(self) -> None:
         await self._client.aclose()

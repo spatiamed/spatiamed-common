@@ -1,5 +1,6 @@
 import pytest
-from sm_common.phone import normalize_phone, hash_phone
+
+from sm_common.phone import hash_phone, normalize_phone
 
 
 class TestNormalizePhone:
