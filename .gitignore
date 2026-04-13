@@ -27,17 +27,16 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Environment
+# Environment files
 .env
 .env.*
+!.env.example
 
-# Ralph logs/generated
-.ralph/logs/
-.ralph/docs/generated/
-
-# Beads local DB (JSONL files are tracked)
-.beads/*.db
-.beads/*.db-shm
-.beads/*.db-wal
-.beads/daemon.*
-.beads/*.sock
+# Internal development workflow — not for public consumption.
+# These directories contain task planning, agent steering, and tool
+# configuration that reveal how the team works but aren't part of the
+# package API. Kept local-only.
+.beads/
+.ralph/
+.claude/
+.ralphrc
