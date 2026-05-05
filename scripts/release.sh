@@ -35,14 +35,18 @@ echo "Monorepo root: $MONOREPO"
 
 run() { if [[ "$DRY_RUN" == "--dry-run" ]]; then echo "DRY: $*"; else eval "$@"; fi; }
 
-# 1. Bump pyproject.toml in spatiamed-common
+# 1. Bump pyproject.toml and sm_common/__init__.py in spatiamed-common
 echo "--- bumping spatiamed-common/pyproject.toml ---"
 run "sed -i.bak 's|^version = \".*\"|version = \"${NEW_VERSION}\"|' \"$ROOT_REPO/pyproject.toml\""
 run "rm -f \"$ROOT_REPO/pyproject.toml.bak\""
 
+echo "--- bumping sm_common/__init__.py ---"
+run "sed -i.bak 's|^__version__ = \".*\"|__version__ = \"${NEW_VERSION}\"|' \"$ROOT_REPO/sm_common/__init__.py\""
+run "rm -f \"$ROOT_REPO/sm_common/__init__.py.bak\""
+
 # 2. Commit + tag
 echo "--- committing + tagging ---"
-run "git -C \"$ROOT_REPO\" add pyproject.toml"
+run "git -C \"$ROOT_REPO\" add pyproject.toml sm_common/__init__.py"
 run "git -C \"$ROOT_REPO\" commit -m \"release: v${NEW_VERSION}\""
 run "git -C \"$ROOT_REPO\" tag \"v${NEW_VERSION}\""
 
