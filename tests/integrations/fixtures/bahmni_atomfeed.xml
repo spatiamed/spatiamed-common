@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Bahmni Appointment Feed</title>
+  <updated>2026-05-06T10:00:00Z</updated>
+  <id>urn:bahmni:appointment-feed</id>
+  <entry>
+    <id>urn:uuid:a1b2c3d4-0000-0000-0000-000000000001</id>
+    <title>Appointment APT-001</title>
+    <updated>2026-05-06T09:30:00Z</updated>
+    <content type="application/vnd.atomfeed+xml">
+      <![CDATA[
+        <appointment>
+          <uuid>a1b2c3d4-0000-0000-0000-000000000001</uuid>
+          <appointmentNumber>APT-001</appointmentNumber>
+          <startDateTime>2026-05-07T09:30:00.000+0530</startDateTime>
+          <endDateTime>2026-05-07T09:45:00.000+0530</endDateTime>
+          <status>Scheduled</status>
+          <patient>
+            <identifier>MRN-00123</identifier>
+            <phoneNumber>9876543210</phoneNumber>
+          </patient>
+          <provider>
+            <uuid>DR-001</uuid>
+          </provider>
+          <service>
+            <uuid>DEPT-001</uuid>
+          </service>
+          <version>1</version>
+        </appointment>
+      ]]>
+    </content>
+  </entry>
+</feed>
