@@ -6,7 +6,7 @@ Shared Python utilities for SpatiaMed platform services (Platform API, QueueCare
 
 ```bash
 # From GitHub (pinned to tag)
-pip install spatiamed-common @ git+https://github.com/spatiamed/spatiamed-common.git@v0.1.0
+pip install spatiamed-common @ git+https://github.com/spatiamed/spatiamed-common.git@v0.2.1
 
 # Local development
 git clone https://github.com/spatiamed/spatiamed-common.git
@@ -38,9 +38,10 @@ from sm_common.nmc_guardrails import check_content, has_blocking_violation
 | `gupshup.py` | WhatsApp Business API client (Gupshup) |
 | `msg91.py` | SMS API client (MSG91) |
 | `truecaller.py` | Truecaller Business caller ID registration |
-| `dlt.py` | TRAI DLT template ID validation |
+| `dlt.py` | TRAI DLT template ID validation + template registration |
 | `compliance.py` | TCCCPR call timing rules |
 | `nmc_guardrails.py` | NMC advertising content checker |
+| `integrations/` | HMS integration layer: `HmsAdapter` interface, canonical types, vendor adapters |
 
 ## Testing
 

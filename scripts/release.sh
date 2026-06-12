@@ -28,6 +28,7 @@ CONSUMERS=(
     "$MONOREPO/CareLoop/pyproject.toml"
     "$MONOREPO/QueueCare/server/pyproject.toml"
     "$MONOREPO/QueueCare/notification_service/requirements.txt"
+    "$MONOREPO/hms-connector-agent/pyproject.toml"
 )
 
 echo "=== spatiamed-common release: $NEW_VERSION ==="
