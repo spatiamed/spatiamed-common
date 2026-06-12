@@ -157,7 +157,6 @@ One pip package consumed by every Python service:
 | `webhook_auth` | HMAC-SHA256 signing/verification with replay protection |
 | `gupshup` / `msg91` / `truecaller` | WhatsApp, SMS, verified-caller-ID clients |
 | `dlt` / `nmc_guardrails` / `compliance` | DLT template validation, NMC content scanning, TCCCPR call-window rules |
-| `jwt_blacklist_cache` | In-process LRU for JWT revocation lookups |
 | `integrations` | HMS canonical types, `HmsAdapter` interface, Bahmni / MocDoc / generic-REST / CSV adapters, typed error hierarchy |
 
 **AI stack (platform-wide, June 2026):** **Gemini is the primary LLM everywhere** (`gemini-3.1-flash-lite` for the voice agent's low-latency loop, `gemini-3.5-flash` for clinical extraction); **Claude (`claude-sonnet-4-6` / `claude-haiku-4-5`) is the fallback** when Gemini is unreachable, and powers CareLoop's Haiku-tier tasks (sentiment, drafts, templates, compliance pass-2, referral classification). Voice: Sarvam (`saarika:v2.5` STT, `bulbul:v3` TTS) for Indian languages; Deepgram `nova-3` + ElevenLabs `flash_v2_5` for international. Video: Daily.co (embedded, captions) with Google Meet as the per-tenant free tier. Every AI feature is **recommend-only**: drafts and suggestions are surfaced to staff; a human approves, signs, or sends.

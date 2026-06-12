@@ -1,8 +1,8 @@
 """Truecaller Business caller-ID registration client.
 
-STATUS (2026-06-12): no service consumes this yet. CareLoop's
-external/caller_id_provisioner.py is the planned integration point.
-Delete this module if caller-ID provisioning is dropped from the roadmap.
+STATUS (verified 2026-06-12): no service imports this module. CareLoop's
+external/caller_id_provisioner.py implements the same Truecaller API inline —
+consolidate there or delete this module if caller-ID provisioning is dropped.
 """
 from dataclasses import dataclass
 from typing import Any
