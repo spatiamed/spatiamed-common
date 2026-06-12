@@ -15,6 +15,10 @@ class CsvImportAdapter(HmsAdapter):
     """CSV batch import adapter for Tier 4 HMS (eHospital@NIC, manual bridges).
 
     Implement when a signed pilot requires CSV ingestion.
+
+    STATUS (2026-06-12): placeholder — no service consumes this yet and all
+    methods raise NotImplementedError. Implement when a pilot contract requires
+    CSV import; delete if CSV ingestion is dropped from the roadmap.
     """
 
     vendor_name = "csv_import"

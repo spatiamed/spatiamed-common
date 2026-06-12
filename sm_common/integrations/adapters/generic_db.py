@@ -16,6 +16,11 @@ class GenericDirectDbAdapter(HmsAdapter):
 
     Implement when a signed pilot requires direct DB access.
     Until then, install via hms_integrations.tier = 't3' routes through connector agent.
+
+    STATUS (2026-06-12): placeholder — no service consumes this yet and all
+    methods raise NotImplementedError. Implement when a signed pilot requires
+    Tier-3 direct DB access; until then the connector-agent (hms-connector-agent)
+    handles Tier-3 integration. Delete if direct DB access is dropped from the roadmap.
     """
 
     vendor_name = "generic_db"

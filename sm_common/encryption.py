@@ -57,6 +57,13 @@ def encrypt_for_transport(plaintext: str, transport_key: str) -> str:
     Used only in patient.pre_registered events (CareLoop → QueueCare).
     Receiver decrypts immediately and re-encrypts with their own storage key.
 
+    NOTE (2026-06-12): The CareLoop→QueueCare webhook transport flow
+    (WEBHOOK_TRANSPORT_KEY) is the intended consumer of these two functions.
+    That flow currently implements Fernet directly in QueueCare's
+    careloop_handlers.py rather than calling encrypt_for_transport /
+    decrypt_from_transport. If that flow is ever refactored to call these
+    helpers, the direct Fernet usage in careloop_handlers.py should be removed.
+
     Args:
         plaintext: PII value to send
         transport_key: WEBHOOK_TRANSPORT_KEY (shared Fernet key)
@@ -66,7 +73,10 @@ def encrypt_for_transport(plaintext: str, transport_key: str) -> str:
 
 
 def decrypt_from_transport(ciphertext: str, transport_key: str) -> str:
-    """Decrypt PII received via webhook. Then re-encrypt with local storage key."""
+    """Decrypt PII received via webhook. Then re-encrypt with local storage key.
+
+    See encrypt_for_transport docstring for the current consumer status note.
+    """
     f = Fernet(transport_key.encode())
     return f.decrypt(ciphertext.encode()).decode()
 
