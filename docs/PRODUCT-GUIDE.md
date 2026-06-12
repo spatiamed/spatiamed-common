@@ -193,20 +193,19 @@ One pip package consumed by every Python service:
 - **Platform API**: full PRD-001 — auth/JWT, onboarding, billing (Razorpay), staff, limits, admin console, number pool.
 - **QueueCare core**: full PRD-005 — token engine, kiosk, display boards, notifications sidecar, ABDM/DigiLocker/Razorpay, RLS Phase B.
 - **CareLoop**: full PRD-002 — campaigns, sequences, AI voice agent (incl. international voice tier), Smart Templates with compliance scan + adaptive approvals, reviews, referrals, attribution.
+- **CareLoop acquisition gaps G1–G4** (PRD-addendum-acquisition): missed-call → 60s AI-callback lead capture, health-camp QR/form registration (`/camp/{slug}`, tenant-gated), `profile.lead_created` event + `pre_visit_welcome` nurture sequence, ad-click session stitching (`attribution_sessions` + `tracking_id`, `/attribution/ack`). Migrations 0030–0033. Only the portal lead-source filter (addendum §2.8, "minimal UI") remains.
+- **Live-video call path end-to-end**: call-start orchestration (room.started → consent gate → caption pipeline), patient consent + language pick, transcript handoff → extraction, fallback tiers, dedicated transcription bot worker (Redis-stream dispatched), **real daily-python side-car binding**, and one-tap **switch-to-audio** (video → Exotel PSTN, patient resolved via phone-hash at provision time).
 - **Hospital-portal**: all 10 build phases — dashboards, settings, role gating, tenant theming; HMS Activity Strip + Review Later Inbox (Plan G).
 - **HMS integration Plans A–G**: sm-common adapters, QueueCare sync/slot/decision engines, Temporal sagas, portal UX — implemented; **connector agent (Plan E)** built, tested, and published (`spatiamed/hms-connector-agent`).
 - **Telemedicine**: encounters + provider abstraction, patient-web consult UI with consent + live captions/translation, transcript capture, LLM extraction → draft note + draft Rx, e-prescription compliance engine, PDF render + report delivery, clinical sign-off gates, per-tenant Google Meet OAuth (tenant_credentials).
 - **Marketing site**: shipped, maintenance mode.
 
 ### 🔄 In progress / partially wired
-- **Live-video orchestration wiring**: the real-time caption pipeline exists end-to-end but nothing starts it on call-start yet (consent → `run_transcription` trigger); decision pending on demo-now vs. go-live wiring. (`docs/superpowers/EXECUTION-LEDGER-live-video.md`)
-- **`switch_to_audio`** endpoint: service ready; patient-phone resolution wiring is a go-live item (frontend already guards).
 - **Smart Template Stage 3**: multi-level approval *rollout* to hospitals (code complete; enablement per tenant pending).
 - **Platform-auth Phase A cutover**: dual-JWT validation shipped; `PLATFORM_AUTH_ENABLED` flip is a deployment step.
-- **Hospital-portal**: setup-wizard file-upload step; Smart-Template editor screens (`portal-qez.3–7`).
+- **Hospital-portal**: setup-wizard file-upload step; Smart-Template editor screens (`portal-qez.3–7`); lead-source filter (acquisition addendum §2.8).
 
 ### 🗓 Planned (not started)
-- **CareLoop acquisition gaps (G1–G4, Q3 2026)**: missed-call → 60s AI callback lead capture, health-camp QR/IVR registration, `profile.lead_created` pre-visit nurture trigger, ad-click session stitching (`attribution_sessions` + tracking IDs).
 - **Per-tenant usage metering for billing** of video/AI minutes (spec'd as follow-up in tenant-credentials spec).
 - **BYO enterprise vendor keys** (same `tenant_credentials` table, reserved provider values).
 - **Self-hosted LiveKit provider** for video at scale (>~500–1,000 consults/month; flat-cost infra replaces per-minute Daily pricing).
