@@ -61,7 +61,7 @@ async def test_register_template_returns_dlt_id():
 @respx.mock
 @pytest.mark.asyncio
 async def test_register_template_sends_expected_form_fields():
-    respx.post("https://api.gupshup.io/wa/api/v1/template").mock(
+    route = respx.post("https://api.gupshup.io/wa/api/v1/template").mock(
         return_value=Response(
             200, json={"status": "success", "template": {"id": "1107160000000012345"}}
         )
@@ -73,7 +73,7 @@ async def test_register_template_sends_expected_form_fields():
         api_key="k",
         app_name="spatiamed",
     )
-    content = respx.calls[0].request.content.decode()
+    content = route.calls[0].request.content.decode()
     assert "elementName=greeting" in content
     assert "appName=spatiamed" in content
     assert "channel=sms" in content
@@ -114,6 +114,45 @@ async def test_register_template_raises_on_http_error():
 async def test_register_template_raises_on_missing_id():
     respx.post("https://api.gupshup.io/wa/api/v1/template").mock(
         return_value=Response(200, json={"status": "success", "template": {}})
+    )
+    with pytest.raises(ValueError, match="missing id"):
+        await register_template(
+            body="b", template_name="t", channel="sms", api_key="k", app_name="a"
+        )
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_register_template_raises_on_template_null():
+    """{"template": null} must raise ValueError, not AttributeError."""
+    respx.post("https://api.gupshup.io/wa/api/v1/template").mock(
+        return_value=Response(200, json={"status": "success", "template": None})
+    )
+    with pytest.raises(ValueError, match="missing id"):
+        await register_template(
+            body="b", template_name="t", channel="sms", api_key="k", app_name="a"
+        )
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_register_template_raises_on_json_list():
+    """A JSON list body (non-dict) must raise ValueError, not AttributeError."""
+    respx.post("https://api.gupshup.io/wa/api/v1/template").mock(
+        return_value=Response(200, json=[])
+    )
+    with pytest.raises(ValueError, match="missing id"):
+        await register_template(
+            body="b", template_name="t", channel="sms", api_key="k", app_name="a"
+        )
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_register_template_raises_on_null_id():
+    """{"template": {"id": null}} must raise ValueError, not return the string "None"."""
+    respx.post("https://api.gupshup.io/wa/api/v1/template").mock(
+        return_value=Response(200, json={"status": "success", "template": {"id": None}})
     )
     with pytest.raises(ValueError, match="missing id"):
         await register_template(

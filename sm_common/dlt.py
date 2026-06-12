@@ -25,6 +25,7 @@ async def register_template(
 
     Returns the registered DLT template id. Raises httpx.HTTPStatusError on
     non-2xx and ValueError if the response lacks a template id.
+    Registers with category=UTILITY and templateType=TEXT.
 
     Endpoint note (verified against Gupshup docs 2026-06-12): Gupshup's
     currently *documented* template-creation API is the Partner API
@@ -53,7 +54,9 @@ async def register_template(
         )
         response.raise_for_status()
         data = response.json()
-        dlt_id = str(data.get("template", {}).get("id", ""))
-        if not dlt_id:
-            raise ValueError(f"Gupshup template response missing id: {data}")
-        return dlt_id
+        template = data.get("template") if isinstance(data, dict) else None
+        dlt_id = template.get("id") if isinstance(template, dict) else None
+        if isinstance(dlt_id, bool) or not isinstance(dlt_id, (str, int)) or not str(dlt_id):
+            detail = sorted(data) if isinstance(data, dict) else type(data).__name__
+            raise ValueError(f"Gupshup template response missing id (keys: {detail})")
+        return str(dlt_id)
