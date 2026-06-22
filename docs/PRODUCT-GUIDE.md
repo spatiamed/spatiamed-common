@@ -29,14 +29,14 @@ SpatiaMed is a multi-tenant SaaS suite for Indian hospitals, sold as one plan (*
      │  QueueCare │◀──▶│  CareLoop  │      │ Hospital-    │  staff frontend
      │  (+ kiosk) │    │            │      │ portal       │  for both products
      └─────┬──────┘    └────────────┘      └──────────────┘
-           │ webhooks / long-poll                 patient-web (video consults)
+           │ webhooks / long-poll                 telemedicine-web (video consults)
            ▼                                      display boards · token tracker
      hms-connector-agent (on-prem, inside hospital network)
            ▼
      Hospital HMS (Bahmni · MocDoc · generic REST)
 ```
 
-**Repos:** `platform-api`, `QueueCare` (server + notification_service + kiosk), `CareLoop`, `Hospital-portal`, `patient-web`, `SpatiaMed-web` (marketing), `spatiamed-common` (shared library), `hms-connector-agent` (on-prem agent).
+**Repos:** `platform-api`, `QueueCare` (server + notification_service + kiosk), `CareLoop`, `Hospital-portal`, `telemedicine-web`, `SpatiaMed-web` (marketing), `spatiamed-common` (shared library), `hms-connector-agent` (on-prem agent).
 
 ---
 
@@ -49,7 +49,7 @@ The control plane. Issues the JWTs every other service validates; owns tenants, 
 - **14-day free trial** with reminder emails (4 days / 1 day left) and automatic suspension on expiry; paid path via **Razorpay** (checkout, recurring billing, webhook-driven lifecycle: active → past_due → suspended → churned).
 - **Staff management**: email invites, roles (`owner` / `admin` / `staff`), password reset, deactivation. Per-staff product access flags.
 - **Usage metering & plan limits**: departments, doctors, monthly AI calls / WhatsApp / SMS — counted in Redis, reported by products, enforced before expensive operations.
-- **Brand assets**: logo/favicon uploads to Cloudflare R2; portal theming flows from these.
+- **Brand assets**: logo/favicon uploads to AWS S3; portal theming flows from these.
 - **Per-tenant journey config**: workflow "knobs" (approval levels, routing prefs) the products consume.
 - **Super-admin console** (internal): tenant list/suspend/reactivate/extend-trial, WhatsApp/SMS **number-pool** management, MRR metrics.
 
@@ -88,9 +88,9 @@ Appointment booking + pre-registration promotion, **Razorpay** payments, **ABDM*
 
 ### 3.6 Telemedicine (separate SKU on the shared backend)
 - **Consultation encounters**: scheduled video consults tied to bookings; provider-agnostic (Daily.co, Google Meet, CareLoop RTC, stub) behind one `VideoProvider` interface.
-- **Patient experience** (`patient-web`): join via tokenized link → **consent gate** (transcription consent, 11 languages) → full-screen video with a **live caption rail** (speaker-labelled captions + source text, translation across EN/HI/BN/TA/RU/JA/ES/FR/AR/PT/ZH).
+- **Patient experience** (`telemedicine-web`): join via tokenized link → **consent gate** (transcription consent, 11 languages) → full-screen video with a **live caption rail** (speaker-labelled captions + source text, translation across EN/HI/BN/TA/RU/JA/ES/FR/AR/PT/ZH).
 - **Doctor experience**: consultation room inside the Hospital-portal with the same live captions.
-- **AI clinical scribe**: after the call, the transcript is captured (encrypted, R2-stored), and a Temporal saga runs LLM extraction → **draft clinical note + draft prescription** for the doctor to review and sign. Drafts only — the system never signs or sends anything autonomously (platform-wide human-in-the-loop posture).
+- **AI clinical scribe**: after the call, the transcript is captured (encrypted, S3-stored), and a Temporal saga runs LLM extraction → **draft clinical note + draft prescription** for the doctor to review and sign. Drafts only — the system never signs or sends anything autonomously (platform-wide human-in-the-loop posture).
 - **e-Prescription compliance engine**: allopathy/ayurveda regime rules evaluate every prescription (block/warn violations) before sign-off; PDF rendering for signed notes; WhatsApp/email delivery of clinical reports via CareLoop.
 - **Per-tenant Google Meet OAuth** (free/degraded tier): hospitals connect their own Google account from the portal; refresh tokens stored encrypted under RLS (`tenant_credentials` table); Meet links are created on the hospital's calendar. Daily.co remains the embedded, captions-capable primary.
 
@@ -139,7 +139,7 @@ Inbound and outbound calls handled by a LangGraph agent over a real-time pipelin
 | **Kiosk** (tablet) | Patients at reception | §3.2 — 6-language self-check-in, offline-capable. |
 | **Display board** (TV) | Waiting room | §3.3 — public, real-time. |
 | **Token tracker** (phone) | Patients | §3.3 — public link per token. |
-| **patient-web** | Patients (telemedicine) | §3.6 — video consult + consent + live multilingual captions. |
+| **telemedicine-web** | Patients (telemedicine) | §3.6 — video consult + consent + live multilingual captions. |
 | **SpatiaMed-web** | Prospects | Marketing site, pricing, product pages, blog (12 articles), demo scheduling, 3-step signup. |
 
 **Role matrix (portal):** owner → billing + everything; admin → settings + analytics; doctor → doctor queue + consultations; receptionist → reception queue; marketing manager → CareLoop; compliance officer → review/template approvals.
@@ -196,7 +196,7 @@ One pip package consumed by every Python service:
 - **Live-video call path end-to-end**: call-start orchestration (room.started → consent gate → caption pipeline), patient consent + language pick, transcript handoff → extraction, fallback tiers, dedicated transcription bot worker (Redis-stream dispatched), **real daily-python side-car binding**, and one-tap **switch-to-audio** (video → Exotel PSTN, patient resolved via phone-hash at provision time).
 - **Hospital-portal**: all 10 build phases — dashboards, settings, role gating, tenant theming; HMS Activity Strip + Review Later Inbox (Plan G).
 - **HMS integration Plans A–G**: sm-common adapters, QueueCare sync/slot/decision engines, Temporal sagas, portal UX — implemented; **connector agent (Plan E)** built, tested, and published (`spatiamed/hms-connector-agent`).
-- **Telemedicine**: encounters + provider abstraction, patient-web consult UI with consent + live captions/translation, transcript capture, LLM extraction → draft note + draft Rx, e-prescription compliance engine, PDF render + report delivery, clinical sign-off gates, per-tenant Google Meet OAuth (tenant_credentials).
+- **Telemedicine**: encounters + provider abstraction, telemedicine-web consult UI with consent + live captions/translation, transcript capture, LLM extraction → draft note + draft Rx, e-prescription compliance engine, PDF render + report delivery, clinical sign-off gates, per-tenant Google Meet OAuth (tenant_credentials).
 - **Marketing site**: shipped, maintenance mode.
 
 ### 🔄 In progress / partially wired
@@ -224,13 +224,13 @@ One pip package consumed by every Python service:
 
 | Repo | What lives there | Stack |
 |---|---|---|
-| `platform-api` | Identity, billing, onboarding, admin | FastAPI · PG(RLS) · Redis · Razorpay · R2 |
+| `platform-api` | Identity, billing, onboarding, admin | FastAPI · PG(RLS) · Redis · Razorpay · S3 |
 | `QueueCare/server` | Queue engine, telemedicine, HMS sync, clinical notes/Rx | FastAPI · PG(RLS) · Redis · RabbitMQ · Temporal |
 | `QueueCare/notification_service` | Notification consumer (WhatsApp/SMS/voice) | FastAPI · RabbitMQ · Gupshup/MSG91/Exotel+Sarvam |
 | `QueueCare/kiosk` | Patient check-in tablet app | Expo SDK 55 · RN 0.83 · SQLite offline |
 | `CareLoop` | Engagement engine, AI voice agent, compliance | FastAPI · Celery · LangGraph · pipecat · Temporal |
 | `Hospital-portal` | Staff web frontend (both products) | React 19 · Vite · TanStack Query · WebSocket/SSE |
-| `patient-web` | Telemedicine patient UI | React 19 · Daily.co SDK |
+| `telemedicine-web` | Telemedicine patient UI | React 19 · Daily.co SDK |
 | `SpatiaMed-web` | Marketing site + signup wizard | Next.js 15 · Razorpay · Resend |
 | `spatiamed-common` | Shared library (this repo) | Python pkg, v0.2.0 |
 | `hms-connector-agent` | On-prem HMS bridge | Python 3.12 · asyncio · Docker |
