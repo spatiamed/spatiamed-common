@@ -317,6 +317,36 @@ async def test_fetch_recent_bookings_http_error_returns_empty():
     assert result == []
 
 
+@pytest.mark.asyncio
+async def test_fetch_recent_bookings_follows_next_link():
+    """fetch_recent_bookings follows FHIR pagination next links."""
+    page2_url = "https://hms.example/fhir/Appointment?page=2"
+
+    page1 = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "link": [{"relation": "next", "url": page2_url}],
+        "entry": [{"resource": _appointment_resource(resource_id="appt-1")}],
+    }
+    page2 = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "entry": [{"resource": _appointment_resource(resource_id="appt-2")}],
+    }
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if "page=2" in str(req.url):
+            return httpx.Response(200, json=page2)
+        return httpx.Response(200, json=page1)
+
+    a = _adapter(handler)
+    bookings = await a.fetch_recent_bookings(hospital_id=uuid4(), lookback_minutes=30)
+    ids = {b.appointment_id for b in bookings}
+    assert "appt-1" in ids
+    assert "appt-2" in ids
+    assert len(bookings) == 2
+
+
 # ─── write_back_idempotent tests ─────────────────────────────────────────────
 
 

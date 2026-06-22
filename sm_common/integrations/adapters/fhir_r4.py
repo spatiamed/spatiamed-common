@@ -299,6 +299,18 @@ class FhirR4Adapter(HmsAdapter):
         )
 
     async def fetch_doctor_roster(self, as_of_date: date) -> list[CanonicalDoctor]:
+        """Fetch all active Practitioners from the FHIR server.
+
+        Note: ``as_of_date`` is accepted for interface compatibility but is NOT
+        forwarded to the server — FHIR R4 Practitioner has no standard
+        ``_lastUpdated`` date filter that is reliably implemented across vendors.
+        A full roster is always returned.
+        """
+        logger.debug(
+            "FhirR4Adapter.fetch_doctor_roster: as_of_date=%s is not applied "
+            "(FHIR R4 Practitioner has no standard date filter); returning full roster.",
+            as_of_date,
+        )
         headers = await self._headers()
         try:
             resp = await self._client.get(
@@ -345,12 +357,24 @@ class FhirR4Adapter(HmsAdapter):
         try:
             slot_start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
         except (ValueError, AttributeError):
+            logger.warning(
+                "FhirR4Adapter._booking_to_external: could not parse slot start %r "
+                "for appointment %s; falling back to datetime.now(UTC).",
+                start_str,
+                resource.get("id", "<unknown>"),
+            )
             slot_start = datetime.now(UTC)
 
         updated_str = resource.get("meta", {}).get("lastUpdated", "")
         try:
             updated_at = datetime.fromisoformat(updated_str.replace("Z", "+00:00"))
         except (ValueError, AttributeError):
+            logger.warning(
+                "FhirR4Adapter._booking_to_external: could not parse meta.lastUpdated %r "
+                "for appointment %s; falling back to datetime.now(UTC).",
+                updated_str,
+                resource.get("id", "<unknown>"),
+            )
             updated_at = datetime.now(UTC)
 
         return ExternalBooking(
