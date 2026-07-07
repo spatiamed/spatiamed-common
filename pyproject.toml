@@ -8,6 +8,7 @@ dependencies = [
     "httpx>=0.27",
     "pytz>=2024.1",
     "feedparser>=6.0",
+    "pydantic>=2.10",
 ]
 
 [project.optional-dependencies]
@@ -56,6 +57,7 @@ testpaths = ["tests"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
+plugins = ["pydantic.mypy"]
 
 # Pre-existing strict-mode debt in the HMS integrations subtree (untyped adapter
 # signatures, feedparser lacking stubs). Mirrors the `ignore_errors` pattern the
