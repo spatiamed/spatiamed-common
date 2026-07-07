@@ -2,7 +2,7 @@ import json
 import time
 from unittest.mock import patch
 
-from sm_common.webhook_auth import sign_webhook, verify_webhook
+from sm_common.webhook_auth import build_signed_request, sign_webhook, verify_webhook
 
 
 class TestSignWebhook:
@@ -74,3 +74,49 @@ class TestVerifyWebhook:
         body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
         # Pass raw sig without prefix - removeprefix("sha256=") is a no-op
         assert verify_webhook(body, sig, str(ts), secret)
+
+
+class TestBuildSignedRequest:
+    def test_returns_headers_and_body_bytes(self):
+        headers, body = build_signed_request({"event": "test"}, "secret")
+        assert isinstance(body, bytes)
+        assert headers["X-Webhook-Signature"].startswith("sha256=")
+        assert headers["X-Webhook-Timestamp"].isdigit()
+        assert headers["Content-Type"] == "application/json"
+
+    def test_body_is_compact_sorted_json(self):
+        headers, body = build_signed_request({"b": 2, "a": 1}, "secret")
+        assert body == b'{"a":1,"b":2}'
+
+    def test_round_trips_with_verify_webhook(self):
+        """The exact bytes + headers produced must verify — this is the contract."""
+        secret = "shared-webhook-secret"
+        headers, body = build_signed_request({"event": "visit.completed", "id": "x"}, secret)
+        assert verify_webhook(
+            body,
+            headers["X-Webhook-Signature"],
+            headers["X-Webhook-Timestamp"],
+            secret,
+        )
+
+    def test_verify_fails_with_wrong_secret(self):
+        headers, body = build_signed_request({"event": "test"}, "right")
+        assert not verify_webhook(
+            body, headers["X-Webhook-Signature"], headers["X-Webhook-Timestamp"], "wrong"
+        )
+
+    def test_verify_fails_if_body_tampered(self):
+        headers, _ = build_signed_request({"event": "test"}, "secret")
+        tampered = b'{"event":"hacked"}'
+        assert not verify_webhook(
+            tampered, headers["X-Webhook-Signature"], headers["X-Webhook-Timestamp"], "secret"
+        )
+
+    def test_signature_matches_sign_webhook_for_same_timestamp(self):
+        """build_signed_request and sign_webhook are the same scheme."""
+        with patch("sm_common.webhook_auth.time") as mock_time:
+            mock_time.time.return_value = 1000000
+            headers, body = build_signed_request({"a": 1}, "secret")
+            sig, ts = sign_webhook({"a": 1}, "secret")
+        assert headers["X-Webhook-Signature"] == f"sha256={sig}"
+        assert headers["X-Webhook-Timestamp"] == str(ts)

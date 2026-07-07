@@ -7,11 +7,6 @@ DLT_TEMPLATE_PATTERN = re.compile(r"^\d{10,19}$")
 _GUPSHUP_BASE_URL = "https://api.gupshup.io/wa/api/v1"
 
 
-def validate_dlt_template_id(template_id: str) -> bool:
-    """Validate that a template ID matches TRAI DLT format."""
-    return bool(DLT_TEMPLATE_PATTERN.match(template_id))
-
-
 async def register_template(
     *,
     body: str,

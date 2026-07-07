@@ -17,7 +17,7 @@ class AppointmentCreated:
     mrn: str
     abha_id: str | None
     phone_hash: str
-    patient_name_token: str   # Fernet-encrypted via sm_common.encryption.encrypt_for_transport
+    patient_name_token: str   # opaque encrypted token (consumer-side field encryption)
     patient_age: int | None
     patient_gender: Literal["M", "F", "O"] | None
     slot_start: datetime

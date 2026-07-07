@@ -2,14 +2,11 @@ import os
 
 import pytest
 from cryptography.exceptions import InvalidTag
-from cryptography.fernet import Fernet, InvalidToken
 
 from sm_common.encryption import (
     FieldEncryptor,
     decrypt_field,
-    decrypt_from_transport,
     encrypt_field,
-    encrypt_for_transport,
 )
 
 
@@ -49,27 +46,6 @@ class TestFieldEncryption:
     def test_empty_string_round_trip(self):
         encrypted = encrypt_field("", self.key)
         assert decrypt_field(encrypted, self.key) == ""
-
-
-class TestTransportEncryption:
-    def setup_method(self):
-        self.transport_key = Fernet.generate_key().decode()
-
-    def test_round_trip(self):
-        plaintext = "+91 98765 43210"
-        encrypted = encrypt_for_transport(plaintext, self.transport_key)
-        assert decrypt_from_transport(encrypted, self.transport_key) == plaintext
-
-    def test_wrong_key_fails(self):
-        encrypted = encrypt_for_transport("test", self.transport_key)
-        wrong_key = Fernet.generate_key().decode()
-        with pytest.raises(InvalidToken):
-            decrypt_from_transport(encrypted, wrong_key)
-
-    def test_unicode_round_trip(self):
-        plaintext = "राहुल शर्मा"
-        encrypted = encrypt_for_transport(plaintext, self.transport_key)
-        assert decrypt_from_transport(encrypted, self.transport_key) == plaintext
 
 
 class TestFieldEncryptor:
@@ -141,6 +117,7 @@ class TestFieldEncryptor:
         )
         # Produce a real v1: Fernet token using the same PBKDF2 derivation
         import base64
+
         from cryptography.fernet import Fernet as _Fernet
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
