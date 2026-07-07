@@ -46,11 +46,11 @@ from sm_common.events import (
 
 VISIT_TOKEN_ISSUED_SAMPLE = {
     "phone_hash": "abc123hash",
-    "token_number": 42,
+    "token_number": "CARD-001",
     "department_code": "CARDIO",
     "department_name": "Cardiology",
     "doctor_name": "Dr. Rao",
-    "priority": 0,
+    "priority": "normal",
     "queue_position": 3,
     "estimated_wait_minutes": 30,
     "visit_id": str(uuid.uuid4()),
@@ -60,7 +60,7 @@ VISIT_TOKEN_ISSUED_SAMPLE = {
 
 VISIT_COMPLETED_SAMPLE = {
     "phone_hash": "abc123hash",
-    "token_number": 42,
+    "token_number": "CARD-001",
     "department": "Cardiology",
     "doctor": "Dr. Rao",
     "department_code": "CARDIO",
@@ -73,7 +73,7 @@ VISIT_COMPLETED_SAMPLE = {
 
 VISIT_NO_SHOW_SAMPLE = {
     "phone_hash": "abc123hash",
-    "token_number": 42,
+    "token_number": "CARD-001",
     "department_code": "CARDIO",
     "doctor_name": "Dr. Rao",
     "was_pre_registered": False,
@@ -134,7 +134,7 @@ SAMPLES: dict[EventType, dict] = {
     EventType.VISIT_TOKEN_ISSUED: VISIT_TOKEN_ISSUED_SAMPLE,
     EventType.VISIT_COMPLETED: VISIT_COMPLETED_SAMPLE,
     EventType.VISIT_NO_SHOW: VISIT_NO_SHOW_SAMPLE,
-    EventType.VISIT_CANCELLED: {"phone_hash": "abc123hash", "token_number": 42},
+    EventType.VISIT_CANCELLED: {"phone_hash": "abc123hash", "token_number": "CARD-001"},
     EventType.REPORT_READY: REPORT_READY_SAMPLE,
     EventType.REPORT_REVOKED: REPORT_REVOKED_SAMPLE,
     EventType.CONSULTATION_SCHEDULED: CONSULTATION_SCHEDULED_SAMPLE,
@@ -239,9 +239,39 @@ def test_unknown_field_is_rejected_extra_forbid() -> None:
 
 def test_wrong_type_raises() -> None:
     bad = dict(VISIT_TOKEN_ISSUED_SAMPLE)
-    bad["token_number"] = "not-an-int"
+    bad["queue_position"] = "not-an-int"  # int field given a non-numeric str
     with pytest.raises(ValidationError):
         VisitTokenIssuedPayload.model_validate(bad)
+
+
+def test_token_number_and_priority_are_strings() -> None:
+    """Regression for #15 (v0.5.1): the live QueueCare producer emits
+    ``Token.token_number`` (``String(20)``, e.g. ``"CARD-001"``) and
+    ``Token.priority`` (``String``, e.g. ``"normal"``). Typing them as ``int``
+    made the models raise ValidationError on real payloads, so the flagship
+    revenue event (visit.completed) could not be built via the registry.
+    """
+    # The real string shapes validate cleanly.
+    token = VisitTokenIssuedPayload.model_validate(VISIT_TOKEN_ISSUED_SAMPLE)
+    assert token.token_number == "CARD-001"
+    assert token.priority == "normal"
+
+    completed = VisitCompletedPayload.model_validate(VISIT_COMPLETED_SAMPLE)
+    assert completed.token_number == "CARD-001"
+
+    noshow = VisitNoShowPayload.model_validate(VISIT_NO_SHOW_SAMPLE)
+    assert noshow.token_number == "CARD-001"
+
+    cancelled = VisitCancelledPayload.model_validate(SAMPLES[EventType.VISIT_CANCELLED])
+    assert cancelled.token_number == "CARD-001"
+
+    # And integers are now rejected (pydantic v2 does not coerce int -> str),
+    # pinning the fields as str so an accidental revert is caught.
+    for field in ("token_number", "priority"):
+        bad = dict(VISIT_TOKEN_ISSUED_SAMPLE)
+        bad[field] = 42
+        with pytest.raises(ValidationError):
+            VisitTokenIssuedPayload.model_validate(bad)
 
 
 # --- envelope round-trip with envelope_version ------------------------------
