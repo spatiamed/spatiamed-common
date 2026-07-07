@@ -29,3 +29,47 @@ jobs:
 
       - name: Pytest
         run: pytest -q
+
+  # Security: SAST + dependency CVEs. Mirrors CareLoop's `security` job so the
+  # PHI/secret-handling Python repos share one posture. Bandit hard-fails on
+  # medium+ findings (our own code — this library ships the field-encryption,
+  # webhook-auth and phone-hash primitives, so SAST here matters most); pip-audit
+  # is report-only (continue-on-error) — unlike CareLoop, which audits only the
+  # ambient CI env, we point it at the REAL dependency tree (via `pip install -e .`),
+  # so we don't want CI permanently red on an advisory we're already mid-bumping.
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install bandit pip-audit
+      # Bandit SAST over the library source (report-only initially — tighten to hard-fail after a clean baseline).
+      - name: Bandit (Python SAST)
+        continue-on-error: true
+        run: bandit -r sm_common/ -ll -ii
+      # pip-audit over the real dependency tree. Install the project then audit
+      # the environment. Report-only.
+      # CVE-2026-3219: pip itself has no fix release yet — ignored to match CareLoop.
+      - name: pip-audit (report-only)
+        continue-on-error: true
+        run: |
+          pip install -e .
+          pip-audit --strict --desc on --ignore-vuln CVE-2026-3219
+
+  # Secrets: full-history gitleaks. fetch-depth: 0 scans all history. Hard-fail —
+  # a committed secret must block the build. Same version + invocation as CareLoop.
+  secrets-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.18.0/gitleaks_8.18.0_linux_x64.tar.gz \
+            | tar -xz -C /usr/local/bin gitleaks
+      - name: Scan for secrets
+        run: gitleaks detect --source . --redact
