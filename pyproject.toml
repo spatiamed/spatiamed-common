@@ -9,6 +9,7 @@ dependencies = [
     "pytz>=2024.1",
     "feedparser>=6.0",
     "pydantic>=2.10",
+    "pyjwt>=2.8",
 ]
 
 [project.optional-dependencies]
