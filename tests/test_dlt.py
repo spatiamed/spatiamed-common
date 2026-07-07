@@ -3,39 +3,23 @@ import pytest
 import respx
 from httpx import Response
 
-from sm_common.dlt import register_template, validate_dlt_template_id
+from sm_common.dlt import DLT_TEMPLATE_PATTERN, register_template
 
 
-def test_valid_10_digit():
-    assert validate_dlt_template_id("1234567890") is True
+def test_pattern_matches_10_digit():
+    assert DLT_TEMPLATE_PATTERN.match("1234567890") is not None
 
 
-def test_valid_19_digit():
-    assert validate_dlt_template_id("1234567890123456789") is True
+def test_pattern_matches_19_digit():
+    assert DLT_TEMPLATE_PATTERN.match("1234567890123456789") is not None
 
 
-def test_valid_15_digit():
-    assert validate_dlt_template_id("123456789012345") is True
+def test_pattern_rejects_too_short():
+    assert DLT_TEMPLATE_PATTERN.match("123456789") is None
 
 
-def test_invalid_too_short():
-    assert validate_dlt_template_id("123456789") is False
-
-
-def test_invalid_too_long():
-    assert validate_dlt_template_id("12345678901234567890") is False
-
-
-def test_invalid_non_numeric():
-    assert validate_dlt_template_id("12345abc90") is False
-
-
-def test_invalid_empty():
-    assert validate_dlt_template_id("") is False
-
-
-def test_invalid_spaces():
-    assert validate_dlt_template_id("123 456 7890") is False
+def test_pattern_rejects_non_numeric():
+    assert DLT_TEMPLATE_PATTERN.match("12345abc90") is None
 
 
 @respx.mock

@@ -24,6 +24,39 @@ def sign_webhook(payload: dict[str, Any], secret: str) -> tuple[str, int]:
     return signature, timestamp
 
 
+def build_signed_request(payload: dict[str, Any], secret: str) -> tuple[dict[str, str], bytes]:
+    """Sign a webhook payload for OUTBOUND delivery, returning (headers, body_bytes).
+
+    Serializes the payload exactly ONCE and signs those exact bytes, then returns
+    both the headers and the serialized body so the caller can POST the identical
+    bytes it signed. Never re-serialize the payload separately (e.g. via
+    ``httpx.post(json=payload)``) or the signature will not match the wire body.
+
+    This is the canonical outbound counterpart to ``verify_webhook``:
+      - X-Webhook-Signature: sha256=<hex>
+      - X-Webhook-Timestamp: <unix-seconds>
+      - signed message = f"{timestamp}.{body}" over the exact wire bytes
+
+    Args:
+        payload: The JSON-serializable webhook body.
+        secret: WEBHOOK_SECRET (shared between sender and receiver).
+
+    Returns:
+        (headers, body_bytes) — send ``body_bytes`` as the request content with
+        ``headers`` attached; the receiver's ``verify_webhook`` will validate.
+    """
+    timestamp = int(time.time())
+    body_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    message = f"{timestamp}.".encode() + body_bytes
+    signature = hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
+    headers = {
+        "X-Webhook-Signature": f"sha256={signature}",
+        "X-Webhook-Timestamp": str(timestamp),
+        "Content-Type": "application/json",
+    }
+    return headers, body_bytes
+
+
 def verify_webhook(
     body_bytes: bytes,
     signature_header: str,

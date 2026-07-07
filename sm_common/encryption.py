@@ -48,38 +48,6 @@ def decrypt_field(encrypted: str, key: bytes) -> str:
     return aesgcm.decrypt(nonce, ciphertext, None).decode()
 
 
-# --- Transport encryption (for webhooks between services) ---
-
-
-def encrypt_for_transport(plaintext: str, transport_key: str) -> str:
-    """Fernet-encrypt PII for webhook transit between services.
-
-    Used only in patient.pre_registered events (CareLoop → QueueCare).
-    Receiver decrypts immediately and re-encrypts with their own storage key.
-
-    NOTE (verified 2026-06-12): no service calls this yet; QueueCare's
-    careloop_handlers.py implements the Fernet transport flow directly.
-    See decrypt_from_transport for the paired function.
-
-    Args:
-        plaintext: PII value to send
-        transport_key: WEBHOOK_TRANSPORT_KEY (shared Fernet key)
-    """
-    f = Fernet(transport_key.encode())
-    return f.encrypt(plaintext.encode()).decode()
-
-
-def decrypt_from_transport(ciphertext: str, transport_key: str) -> str:
-    """Decrypt PII received via webhook. Then re-encrypt with local storage key.
-
-    NOTE (verified 2026-06-12): no service calls this yet; QueueCare's
-    careloop_handlers.py implements the Fernet transport flow directly.
-    See encrypt_for_transport for details.
-    """
-    f = Fernet(transport_key.encode())
-    return f.decrypt(ciphertext.encode()).decode()
-
-
 # --- FieldEncryptor: OOP key-versioned AES-256-GCM (for services that need rotation) ---
 #
 # IMPORTANT — v1: prefix collision:
@@ -90,7 +58,7 @@ def decrypt_from_transport(ciphertext: str, transport_key: str) -> str:
 
 
 class FieldEncryptor:
-    """AES-256-GCM field encryption with key versioning, legacy Fernet migration, and lookup hashing.
+    """AES-256-GCM field encryption with key versioning, legacy Fernet migration, and hashing.
 
     Ciphertext format: v{version}:{nonce_b64}:{ciphertext_b64}
 
