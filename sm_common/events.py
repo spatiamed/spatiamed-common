@@ -121,14 +121,19 @@ class VisitTokenIssuedPayload(EventPayload):
     (``queue_event("visit.token_issued", ...)``). Consumer:
     CareLoop ``app/routers/webhooks.py::_handle_visit_token_issued`` (reads only
     ``visit_id`` + ``phone_hash``; ``tenant_id`` comes from the envelope).
+
+    v0.5.1: ``token_number`` and ``priority`` are **strings** — the producer
+    emits ``Token.token_number`` (``String(20)``, e.g. ``"CARD-001"``) and
+    ``Token.priority`` (``String``, e.g. ``"normal"``), NOT integers. Typing
+    them as ``int`` was the XR-05 adoption blocker (#15).
     """
 
     phone_hash: str
-    token_number: int
+    token_number: str
     department_code: str
     department_name: str
     doctor_name: str = ""
-    priority: int
+    priority: str
     queue_position: int
     estimated_wait_minutes: int
     visit_id: str
@@ -153,7 +158,7 @@ class VisitCompletedPayload(EventPayload):
     """
 
     phone_hash: str
-    token_number: int
+    token_number: str
     visit_id: str
     revenue_paise: int
     department: str = ""
@@ -175,7 +180,7 @@ class VisitNoShowPayload(EventPayload):
     """
 
     phone_hash: str
-    token_number: int
+    token_number: str
     department_code: str = ""
     doctor_name: str = ""
     was_pre_registered: bool = False
@@ -195,7 +200,7 @@ class VisitCancelledPayload(EventPayload):
     """
 
     phone_hash: str
-    token_number: int | None = None
+    token_number: str | None = None
     reason: str | None = None
 
 
