@@ -89,3 +89,38 @@ def verify_webhook(
     message = f"{timestamp}.{body_bytes.decode()}"
     computed = hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected_sig, computed)
+
+
+def self_check(secret: str) -> bool:
+    """Boot-time self-check for a webhook-HMAC secret (XR-06).
+
+    Signs a throwaway canary payload with ``secret`` and verifies it with the
+    SAME secret. Returns ``False`` for an empty or whitespace-only secret, or if
+    the local ``build_signed_request`` -> ``verify_webhook`` roundtrip does not
+    validate (a wiring/serialization regression); ``True`` otherwise.
+
+    Intended to run at service startup so a missing / empty / whitespace-only
+    secret fails LOUDLY at boot instead of silently 401ing the first real
+    webhook. Example::
+
+        from sm_common.webhook_auth import self_check
+
+        if not self_check(settings.resolved_webhook_hmac_secret):
+            raise RuntimeError("webhook-HMAC secret failed boot self-check")
+
+    HONEST LIMIT: this is a LOCAL roundtrip. Signing and verifying with one
+    secret always agree, so it can NOT detect a cross-service value mismatch
+    (e.g. ``queuecare/WEBHOOK_SECRET != careloop/WEBHOOK_HMAC_SECRET``) — that
+    needs a real network call and is out of scope. It catches empty/whitespace/
+    unrenderable secrets and proves the local sign/verify code path is intact.
+    """
+    if not secret or not secret.strip():
+        return False
+    payload = {"__canary__": "sm_common.webhook_auth.self_check"}
+    headers, body = build_signed_request(payload, secret)
+    return verify_webhook(
+        body,
+        headers["X-Webhook-Signature"],
+        headers["X-Webhook-Timestamp"],
+        secret,
+    )
