@@ -152,9 +152,15 @@ class VisitCompletedPayload(EventPayload):
 
     XR-01 / XR-08: the consumer-expected fields are ``revenue_paise`` (paise,
     int), ``department`` and ``doctor`` (human-readable). This is the migration
-    target. The legacy ``*_code`` / ``*_name`` fields below are still emitted by
-    the current producer for "any other consumer" but NO live consumer reads
-    them — they are drift-debt to remove once producers adopt this model.
+    target.
+
+    v0.6.0: the legacy ``department_code`` / ``department_name`` / ``doctor_name``
+    fields (``""``-defaults, no producer emits them since QueueCare #99, no
+    consumer ever read them) have been **removed**. Because ``build_envelope``
+    does an unconditional ``model_dump``, their presence forced QueueCare to
+    ``exclude=`` the trio at every ``visit.completed`` emit site; dropping them
+    lets producers call ``build_envelope`` directly. The drift-debt is now
+    cleared for this event.
     """
 
     phone_hash: str
@@ -164,10 +170,6 @@ class VisitCompletedPayload(EventPayload):
     department: str = ""
     doctor: str = ""
     consultation_duration_minutes: int = 0
-    # --- legacy / drifted, no live consumer reads these (XR-08) ---
-    department_code: str = ""
-    department_name: str = ""
-    doctor_name: str = ""
 
 
 class VisitNoShowPayload(EventPayload):

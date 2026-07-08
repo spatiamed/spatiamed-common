@@ -63,9 +63,6 @@ VISIT_COMPLETED_SAMPLE = {
     "token_number": "CARD-001",
     "department": "Cardiology",
     "doctor": "Dr. Rao",
-    "department_code": "CARDIO",
-    "department_name": "Cardiology",
-    "doctor_name": "Dr. Rao",
     "consultation_duration_minutes": 12,
     "revenue_paise": 50000,
     "visit_id": str(uuid.uuid4()),
@@ -217,6 +214,27 @@ def test_specific_model_fields() -> None:
 
     cancelled_visit = VisitCancelledPayload.model_validate(SAMPLES[EventType.VISIT_CANCELLED])
     assert cancelled_visit.phone_hash == "abc123hash"
+
+
+def test_visit_completed_legacy_trio_removed() -> None:
+    """Regression for #17 (v0.6.0): the legacy ``department_code`` /
+    ``department_name`` / ``doctor_name`` fields are GONE from
+    ``VisitCompletedPayload``. They were ``""``-defaults no producer emitted
+    (since QueueCare #99) and no consumer ever read, but their presence forced
+    QueueCare to ``exclude=`` them at every ``visit.completed`` emit site because
+    ``build_envelope`` does an unconditional ``model_dump``. Pinning their
+    absence here so the trio cannot quietly return.
+    """
+    fields = VisitCompletedPayload.model_fields
+    for gone in ("department_code", "department_name", "doctor_name"):
+        assert gone not in fields, f"{gone} must stay removed from VisitCompletedPayload"
+
+    # And because the model is extra="forbid", a producer still emitting the
+    # trio (the pre-#99 shape) is now rejected rather than silently accepted.
+    bad = dict(VISIT_COMPLETED_SAMPLE)
+    bad["department_code"] = "CARDIO"
+    with pytest.raises(ValidationError):
+        VisitCompletedPayload.model_validate(bad)
 
 
 # --- mismatch => validation error -------------------------------------------
