@@ -105,6 +105,73 @@ which retries the previous secret on `InvalidTokenError` without relaxing any ot
 validation. Rotate by promoting current → previous, then removing previous once the
 old TTL window has elapsed.
 
+## Secret domains & naming contract
+
+SpatiaMed services use several HMAC/auth secrets. Historically CareLoop's
+`INTERNAL_SECRET` was overloaded as the service-auth key **and** the
+QueueCare-webhook HMAC key **and** the URL-signing key, so one rotation touched
+three unrelated trust domains at once (audit XR-06). They are now **split** into
+four independent domains with the canonical SSM key names below.
+
+| # | Trust domain | Canonical key (per service) | Signer / verifier | Coupling |
+|---|--------------|-----------------------------|-------------------|----------|
+| a | Service-to-service auth (`X-Internal-Secret`) | `INTERNAL_SECRET` (shared, same value across platform-api / QueueCare / CareLoop) | `InternalClient` presents it; `verify_internal_secret` checks it | **Shared** across all services — one value everywhere |
+| b | QueueCare → CareLoop webhook HMAC | `queuecare/WEBHOOK_SECRET` **==** `careloop/WEBHOOK_HMAC_SECRET` | QueueCare signs (`build_signed_request`); CareLoop verifies (`verify_webhook`) | **Value-coupled PAIR** — two differently-named keys that MUST hold the identical value |
+| c | Review-link URL signing (CareLoop ↔ portal) | `careloop/SIGNED_URL_SECRET` | CareLoop signs + verifies (portal may verify) | **Independent**, CareLoop-local |
+| d | Caption-token URL signing | `careloop/SIGNED_URL_SECRET` (shares domain **c**) | CareLoop signs + verifies | **Independent**, CareLoop-local |
+
+Notes:
+
+- **(b) is the historical footgun.** QueueCare signs with an env var named
+  `WEBHOOK_SECRET`; CareLoop verifies with `WEBHOOK_HMAC_SECRET`. They are
+  **different names for the same value**, coupled only by SSM seeding discipline
+  (the exact class of bug that already bit prod once — "CARELOOP_WEBHOOK_URL had
+  never been seeded"). We deliberately did **not** rename QueueCare's env var (an
+  env rename is a coordinated multi-service deploy); instead the pairing is
+  documented here and enforced at boot by a self-check (below).
+- **(c) and (d) share one `SIGNED_URL_SECRET`** because both are CareLoop-local
+  URL/token signatures that no peer service verifies — collapsing them into one
+  URL-signing domain is safe and keeps rotation simple. Split them into separate
+  keys only if a caption token ever has to be verified by a different service.
+- **Safe-increment fallback.** CareLoop's `WEBHOOK_HMAC_SECRET` and
+  `SIGNED_URL_SECRET` each **fall back to `INTERNAL_SECRET` when unset**, with a
+  loud one-time startup warning naming the unseeded key. So a deploy is
+  behavior-identical until ops seeds a distinct value — no coordinated deploy,
+  no lockstep. Once seeded, that domain rotates on its own.
+
+### Boot self-check (canary)
+
+`webhook_auth.self_check(secret)` signs a canary payload and verifies it with the
+**same** secret at startup, so an empty / whitespace-only / unrenderable secret
+fails **loudly at boot** instead of silently 401ing the first real webhook:
+
+```python
+from sm_common.webhook_auth import self_check
+
+if not self_check(settings.resolved_webhook_hmac_secret):
+    raise RuntimeError("webhook-HMAC secret failed boot self-check (XR-06)")
+```
+
+**Honest limit:** this is a *local* roundtrip — signing and verifying with one
+secret always agree, so it can **not** detect a cross-service value mismatch
+(domain **b**: `queuecare/WEBHOOK_SECRET != careloop/WEBHOOK_HMAC_SECRET`). A true
+cross-service canary needs a network call and is out of scope. Symptom of a
+value mismatch: the canary passes at boot but real webhooks 401 at runtime.
+
+### Rotation runbook
+
+- **`SIGNED_URL_SECRET` (c+d) — rotate freely.** No peer verifies it; the worst
+  case is in-flight review links / caption tokens signed with the old value stop
+  verifying (they re-mint on next send). Single-service change.
+- **`WEBHOOK_SECRET` ⟷ `WEBHOOK_HMAC_SECRET` (b) — rotate the PAIR together.**
+  Seed the new value on **both** QueueCare and CareLoop; because they are two
+  names for one value, updating only one side breaks webhook verification.
+  CareLoop's `verify_with_rotation` supports a grace window (previous secret
+  accepted for `DEFAULT_GRACE_HOURS`) to avoid a hard cutover.
+- **`INTERNAL_SECRET` (a) — rotate across ALL services.** It is shared platform-
+  wide; every service that presents or verifies `X-Internal-Secret` must get the
+  new value together.
+
 ## Modules
 
 | Module | Purpose |
@@ -113,7 +180,7 @@ old TTL window has elapsed.
 | `auth.py` | `decode_jwt_with_grace` — PyJWT decode with a previous-secret rotation grace window (no FastAPI dep) |
 | `identity.py` | Cross-service identity contract: `assert_distinct_salts` startup guard (see "Identity contract" below) |
 | `encryption.py` | AES-256-GCM field encryption (`encrypt_field`/`decrypt_field`, `FieldEncryptor`) |
-| `webhook_auth.py` | HMAC-SHA256 webhook signing + verification (`sign_webhook`, `verify_webhook`, `build_signed_request`) |
+| `webhook_auth.py` | HMAC-SHA256 webhook signing + verification (`sign_webhook`, `verify_webhook`, `build_signed_request`) + `self_check` boot canary (see "Secret domains & naming contract") |
 | `internal_http.py` | `InternalClient` — service-to-service httpx client (`X-Internal-Secret`) |
 | `config_fetch.py` | `resolve_config` — tenant config from platform-api HTTP + Redis cache + 7-day last-known-good, with a **caller-controlled fail-safe fallback** (no baked-in domain default) |
 | `fastapi_guard.py` | `verify_internal_secret` FastAPI dependency factory (optional `[fastapi]` extra) |

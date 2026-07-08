@@ -2,7 +2,12 @@ import json
 import time
 from unittest.mock import patch
 
-from sm_common.webhook_auth import build_signed_request, sign_webhook, verify_webhook
+from sm_common.webhook_auth import (
+    build_signed_request,
+    self_check,
+    sign_webhook,
+    verify_webhook,
+)
 
 
 class TestSignWebhook:
@@ -120,3 +125,30 @@ class TestBuildSignedRequest:
             sig, ts = sign_webhook({"a": 1}, "secret")
         assert headers["X-Webhook-Signature"] == f"sha256={sig}"
         assert headers["X-Webhook-Timestamp"] == str(ts)
+
+
+class TestSelfCheck:
+    def test_passes_for_a_real_secret(self):
+        assert self_check("a-real-webhook-secret") is True
+
+    def test_fails_for_empty_secret(self):
+        assert self_check("") is False
+
+    def test_fails_for_whitespace_only_secret(self):
+        assert self_check("   ") is False
+        assert self_check("\t\n") is False
+
+    def test_fails_loudly_on_roundtrip_regression(self):
+        # Simulate a verify_webhook wiring/serialization regression: even a good
+        # secret must report False so the caller fails at boot.
+        with patch("sm_common.webhook_auth.verify_webhook", return_value=False):
+            assert self_check("a-real-webhook-secret") is False
+
+    def test_is_local_only_not_cross_secret(self):
+        # Documented limit: self_check signs+verifies with ONE secret, so it can
+        # only ever prove the local roundtrip — it does not compare two secrets.
+        # A canary body signed with secret A does not verify under secret B.
+        headers, body = build_signed_request({"__canary__": "x"}, "secret-A")
+        assert not verify_webhook(
+            body, headers["X-Webhook-Signature"], headers["X-Webhook-Timestamp"], "secret-B"
+        )
