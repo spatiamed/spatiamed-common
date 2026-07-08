@@ -6,10 +6,10 @@ Shared Python utilities for SpatiaMed platform services (Platform API, QueueCare
 
 ```bash
 # From GitHub (pinned to tag)
-pip install spatiamed-common @ git+https://github.com/spatiamed/spatiamed-common.git@v0.5.0
+pip install spatiamed-common @ git+https://github.com/spatiamed/spatiamed-common.git@v0.6.0
 
 # With the optional FastAPI server-side guard (sm_common.fastapi_guard)
-pip install "spatiamed-common[fastapi] @ git+https://github.com/spatiamed/spatiamed-common.git@v0.5.0"
+pip install "spatiamed-common[fastapi] @ git+https://github.com/spatiamed/spatiamed-common.git@v0.6.0"
 
 # Local development
 git clone https://github.com/spatiamed/spatiamed-common.git
@@ -142,6 +142,13 @@ mypy sm_common
 - pytz >= 2024.1
 - feedparser >= 6.0
 - fastapi >= 0.115 (optional, only for `sm_common.fastapi_guard`)
+
+### Removed in v0.6.0
+
+`VisitCompletedPayload` no longer carries the legacy `department_code` / `department_name` / `doctor_name`
+fields. They were `""`-defaults that no producer emitted (since QueueCare #99) and no consumer ever read;
+their presence forced QueueCare to `exclude=` the trio at every `visit.completed` emit site because
+`build_envelope` does an unconditional `model_dump`. Producers can now call `build_envelope` directly.
 
 ### Removed in v0.4.0
 
