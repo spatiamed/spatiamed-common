@@ -50,20 +50,25 @@ class TestGenericRestAdapterFieldMapping:
     @respx.mock
     async def test_maps_vendor_fields_to_canonical(self):
         respx.get("https://api.medixcel.in/v2/appointments").mock(
-            return_value=httpx.Response(200, json={
-                "data": [{
-                    "apptId": "APT-MX-001",
-                    "version": 3,
-                    "docId": "DR-MX-001",
-                    "deptId": "DEPT-MX-001",
-                    "startTime": "2026-05-07T11:00:00Z",
-                    "duration": 20,
-                    "payerType": "INSURANCE",
-                    "apptStatus": "confirmed",
-                    "patientMrn": "MRN-MX-001",
-                }],
-                "lastModifiedCursor": "2026-05-07T11:00:00Z",
-            })
+            return_value=httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "apptId": "APT-MX-001",
+                            "version": 3,
+                            "docId": "DR-MX-001",
+                            "deptId": "DEPT-MX-001",
+                            "startTime": "2026-05-07T11:00:00Z",
+                            "duration": 20,
+                            "payerType": "INSURANCE",
+                            "apptStatus": "confirmed",
+                            "patientMrn": "MRN-MX-001",
+                        }
+                    ],
+                    "lastModifiedCursor": "2026-05-07T11:00:00Z",
+                },
+            )
         )
         adapter = GenericRestAdapter(MEDIXCEL_MAPPING)
         apts, cursor = await adapter.list_appointments_modified_since("", date(2026, 5, 8))
@@ -84,9 +89,7 @@ class TestGenericRestAdapterFieldMapping:
 
     @respx.mock
     async def test_500_raises_transient(self):
-        respx.get("https://api.medixcel.in/v2/appointments").mock(
-            return_value=httpx.Response(500)
-        )
+        respx.get("https://api.medixcel.in/v2/appointments").mock(return_value=httpx.Response(500))
         adapter = GenericRestAdapter(MEDIXCEL_MAPPING)
         with pytest.raises(TransientError):
             await adapter.list_appointments_modified_since("", date(2026, 5, 8))

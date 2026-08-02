@@ -9,7 +9,9 @@ import httpx
 
 from sm_common.integrations.adapters.bahmni import BahmniAdapter
 from sm_common.integrations.canonical_types import (
-    AdapterHealth, VisitCheckedIn, WriteBackResult,
+    AdapterHealth,
+    VisitCheckedIn,
+    WriteBackResult,
 )
 from sm_common.integrations.exceptions import ConflictError, TransientError
 
@@ -33,7 +35,9 @@ class TestBahmniAdapterAtomFeed:
     @respx.mock
     async def test_list_appointments_returns_canonical(self):
         respx.get("https://bahmni.example.com/openmrs/ws/atomfeed/appointment/recent").mock(
-            return_value=httpx.Response(200, text=ATOM_XML, headers={"Content-Type": "application/atom+xml"})
+            return_value=httpx.Response(
+                200, text=ATOM_XML, headers={"Content-Type": "application/atom+xml"}
+            )
         )
         adapter = make_adapter()
         appointments, new_cursor = await adapter.list_appointments_modified_since(
@@ -63,7 +67,9 @@ class TestBahmniAdapterWriteBack:
     @respx.mock
     async def test_write_back_success(self):
         respx.post("https://bahmni.example.com/openmrs/ws/rest/v1/appointment").mock(
-            return_value=httpx.Response(200, json={"uuid": "HB-001", "appointmentNumber": "APT-002"})
+            return_value=httpx.Response(
+                200, json={"uuid": "HB-001", "appointmentNumber": "APT-002"}
+            )
         )
         adapter = make_adapter()
         result = await adapter.write_back_idempotent(
@@ -77,9 +83,9 @@ class TestBahmniAdapterWriteBack:
     @respx.mock
     async def test_write_back_conflict_raises(self):
         respx.post("https://bahmni.example.com/openmrs/ws/rest/v1/appointment").mock(
-            return_value=httpx.Response(400, json={
-                "errorMessages": [{"message": "slot already booked for this time"}]
-            })
+            return_value=httpx.Response(
+                400, json={"errorMessages": [{"message": "slot already booked for this time"}]}
+            )
         )
         adapter = make_adapter()
         with pytest.raises(ConflictError):

@@ -8,6 +8,7 @@ from uuid import UUID
 
 # ─── Inbound: HMS → QueueCare ────────────────────────────────────────────────
 
+
 @dataclass
 class AppointmentCreated:
     event_uuid: UUID
@@ -17,7 +18,7 @@ class AppointmentCreated:
     mrn: str
     abha_id: str | None
     phone_hash: str
-    patient_name_token: str   # opaque encrypted token (consumer-side field encryption)
+    patient_name_token: str  # opaque encrypted token (consumer-side field encryption)
     patient_age: int | None
     patient_gender: Literal["M", "F", "O"] | None
     slot_start: datetime
@@ -53,6 +54,7 @@ class AppointmentCancelled:
 
 # ─── Outbound: QueueCare → HMS ────────────────────────────────────────────────
 
+
 @dataclass
 class VisitCheckedIn:
     event_uuid: UUID
@@ -80,12 +82,13 @@ class VisitFinalized:
 
 # ─── Supporting types ─────────────────────────────────────────────────────────
 
+
 @dataclass
 class CanonicalPatient:
     mrn: str
     abha_id: str | None
     phone_hash: str
-    name_token: str          # Fernet-encrypted
+    name_token: str  # Fernet-encrypted
     age: int | None
     gender: Literal["M", "F", "O"] | None
 

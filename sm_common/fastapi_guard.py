@@ -72,9 +72,7 @@ def verify_internal_secret(
     def _dependency(provided: str | None = Depends(header_scheme)) -> None:
         if not expected_secret:
             raise HTTPException(status_code=503, detail="internal_secret_not_configured")
-        if provided is None or not hmac.compare_digest(
-            provided.encode(), expected_secret.encode()
-        ):
+        if provided is None or not hmac.compare_digest(provided.encode(), expected_secret.encode()):
             raise HTTPException(status_code=status_code, detail="invalid_internal_secret")
 
     return _dependency

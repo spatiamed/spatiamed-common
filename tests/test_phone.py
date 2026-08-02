@@ -83,9 +83,9 @@ class TestHashPhone:
 
 class TestHashNormalized:
     def test_scheme_is_salt_then_value_sha256(self):
-        assert hash_normalized("9876543210", "salt") == hashlib.sha256(
-            b"salt9876543210"
-        ).hexdigest()
+        assert (
+            hash_normalized("9876543210", "salt") == hashlib.sha256(b"salt9876543210").hexdigest()
+        )
 
     def test_deterministic(self):
         assert hash_normalized("x", "s") == hash_normalized("x", "s")

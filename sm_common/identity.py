@@ -39,9 +39,7 @@ def assert_distinct_salts(*salts: str, names: Sequence[str] | None = None) -> No
     if len(salts) < 2:
         raise ValueError("assert_distinct_salts requires at least two salts")
     if names is not None and len(names) != len(salts):
-        raise ValueError(
-            f"names has {len(names)} labels but {len(salts)} salts were given"
-        )
+        raise ValueError(f"names has {len(names)} labels but {len(salts)} salts were given")
 
     seen: dict[str, int] = {}
     for i, salt in enumerate(salts):

@@ -3,10 +3,18 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from uuid import uuid4
 from sm_common.integrations.canonical_types import (
-    AppointmentCreated, AppointmentRescheduled, AppointmentCancelled,
-    VisitCheckedIn, VisitConsultationStarted, VisitFinalized,
-    CanonicalPatient, CanonicalDoctor, WriteBackResult, CancelResult,
-    AdapterHealth, ExternalBooking,
+    AppointmentCreated,
+    AppointmentRescheduled,
+    AppointmentCancelled,
+    VisitCheckedIn,
+    VisitConsultationStarted,
+    VisitFinalized,
+    CanonicalPatient,
+    CanonicalDoctor,
+    WriteBackResult,
+    CancelResult,
+    AdapterHealth,
+    ExternalBooking,
 )
 
 
@@ -40,20 +48,34 @@ class TestCanonicalTypes:
 
     def test_appointment_created_as_dict(self):
         evt = AppointmentCreated(
-            event_uuid=uuid4(), hms_vendor="mocdoc", appointment_id="A1",
-            hms_version=1, mrn="MRN1", abha_id="12-3456-7890-1234",
-            phone_hash="h1", patient_name_token="tok", patient_age=None,
-            patient_gender=None, slot_start=_now(), slot_duration_min=15,
-            doctor_external_id="D1", department_external_id="DEP1",
-            payer_type="CASH", reason_text=None, received_at=_now(),
+            event_uuid=uuid4(),
+            hms_vendor="mocdoc",
+            appointment_id="A1",
+            hms_version=1,
+            mrn="MRN1",
+            abha_id="12-3456-7890-1234",
+            phone_hash="h1",
+            patient_name_token="tok",
+            patient_age=None,
+            patient_gender=None,
+            slot_start=_now(),
+            slot_duration_min=15,
+            doctor_external_id="D1",
+            department_external_id="DEP1",
+            payer_type="CASH",
+            reason_text=None,
+            received_at=_now(),
         )
         d = asdict(evt)
         assert d["appointment_id"] == "A1"
 
     def test_visit_checked_in(self):
         v = VisitCheckedIn(
-            event_uuid=uuid4(), appointment_id="A1",
-            queuecare_visit_id=uuid4(), arrived_at=_now(), token_number="T-042",
+            event_uuid=uuid4(),
+            appointment_id="A1",
+            queuecare_visit_id=uuid4(),
+            arrived_at=_now(),
+            token_number="T-042",
         )
         assert v.token_number == "T-042"
 

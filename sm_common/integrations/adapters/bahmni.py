@@ -38,7 +38,7 @@ class BahmniAdapter(HmsAdapter):
     def __init__(
         self,
         base_url: str,
-        auth_scheme: str,        # "api_key" | "session"
+        auth_scheme: str,  # "api_key" | "session"
         hash_salt: str,
         transport_key: str,
         api_key: str = "",
@@ -123,8 +123,12 @@ class BahmniAdapter(HmsAdapter):
             hms_version = 0
 
         patient = CanonicalPatient(
-            mrn=mrn, abha_id=None, phone_hash="",
-            name_token="", age=None, gender=None,
+            mrn=mrn,
+            abha_id=None,
+            phone_hash="",
+            name_token="",
+            age=None,
+            gender=None,
         )
         return CanonicalAppointment(
             appointment_id=apt_num,
@@ -162,8 +166,7 @@ class BahmniAdapter(HmsAdapter):
         return appointments, new_cursor
 
     async def find_patient(
-        self, phone_hash: str | None = None,
-        mrn: str | None = None, abha_id: str | None = None
+        self, phone_hash: str | None = None, mrn: str | None = None, abha_id: str | None = None
     ) -> CanonicalPatient | None:
         headers = await self._get_headers()
         params: dict[str, str] = {}
@@ -173,7 +176,8 @@ class BahmniAdapter(HmsAdapter):
             params["phoneHash"] = phone_hash
         resp = await self._client.get(
             f"{self._base_url}/openmrs/ws/rest/v1/patient",
-            headers=headers, params=params,
+            headers=headers,
+            params=params,
         )
         if resp.status_code == 404:
             return None
@@ -186,15 +190,19 @@ class BahmniAdapter(HmsAdapter):
         p = results[0]
         return CanonicalPatient(
             mrn=p.get("identifiers", [{}])[0].get("identifier", ""),
-            abha_id=None, phone_hash=phone_hash or "",
-            name_token="", age=None, gender=None,
+            abha_id=None,
+            phone_hash=phone_hash or "",
+            name_token="",
+            age=None,
+            gender=None,
         )
 
     async def fetch_doctor_roster(self, as_of_date: date) -> list[CanonicalDoctor]:
         headers = await self._get_headers()
         resp = await self._client.get(
             f"{self._base_url}/openmrs/ws/rest/v1/provider",
-            headers=headers, params={"v": "full"},
+            headers=headers,
+            params={"v": "full"},
         )
         if resp.status_code >= 500:
             raise TransientError(f"Bahmni error: {resp.status_code}")
@@ -202,16 +210,18 @@ class BahmniAdapter(HmsAdapter):
         doctors = []
         for p in resp.json().get("results", []):
             attrs = {a["attributeType"]["display"]: a["value"] for a in p.get("attributes", [])}
-            doctors.append(CanonicalDoctor(
-                external_doctor_id=p.get("uuid", ""),
-                external_speciality_id=attrs.get("specialityUuid", ""),
-                external_department_id=attrs.get("departmentUuid", ""),
-                external_sub_dept_id=None,
-                speciality_label=attrs.get("speciality", ""),
-                department_label=attrs.get("department", ""),
-                consultation_fee_inr=None,
-                consultation_duration_min=15,
-            ))
+            doctors.append(
+                CanonicalDoctor(
+                    external_doctor_id=p.get("uuid", ""),
+                    external_speciality_id=attrs.get("specialityUuid", ""),
+                    external_department_id=attrs.get("departmentUuid", ""),
+                    external_sub_dept_id=None,
+                    speciality_label=attrs.get("speciality", ""),
+                    department_label=attrs.get("department", ""),
+                    consultation_fee_inr=None,
+                    consultation_duration_min=15,
+                )
+            )
         return doctors
 
     async def fetch_recent_bookings(
@@ -235,23 +245,29 @@ class BahmniAdapter(HmsAdapter):
                 )
             except (KeyError, ValueError):
                 continue
-            bookings.append(ExternalBooking(
-                appointment_id=b.get("appointmentNumber", ""),
-                doctor_external_id=(b.get("provider") or {}).get("uuid", ""),
-                slot_start=slot_start,
-                status=b.get("status", ""),
-                updated_at=updated_at,
-            ))
+            bookings.append(
+                ExternalBooking(
+                    appointment_id=b.get("appointmentNumber", ""),
+                    doctor_external_id=(b.get("provider") or {}).get("uuid", ""),
+                    slot_start=slot_start,
+                    status=b.get("status", ""),
+                    updated_at=updated_at,
+                )
+            )
         return bookings
 
     async def write_back_idempotent(
-        self, booking_id: UUID, payload: dict, idempotency_key: str  # type: ignore[type-arg]
+        self,
+        booking_id: UUID,
+        payload: dict,
+        idempotency_key: str,  # type: ignore[type-arg]
     ) -> WriteBackResult:
         headers = await self._get_headers()
         body = {**payload, "externalReference": idempotency_key}
         resp = await self._client.post(
             f"{self._base_url}/openmrs/ws/rest/v1/appointment",
-            headers=headers, json=body,
+            headers=headers,
+            json=body,
         )
         if resp.status_code == 400:
             data = resp.json()
@@ -303,7 +319,8 @@ class BahmniAdapter(HmsAdapter):
             }
         resp = await self._client.post(
             f"{self._base_url}/openmrs/ws/rest/v1/appointment/{event.appointment_id}/changeStatus",
-            headers=headers, json=payload,
+            headers=headers,
+            json=payload,
         )
         if resp.status_code >= 500:
             raise TransientError(f"Bahmni error: {resp.status_code}")
@@ -326,11 +343,15 @@ class BahmniAdapter(HmsAdapter):
                     message="OK",
                 )
             return AdapterHealth(
-                healthy=False, last_success_at=None,
-                latency_ms=latency_ms, message=f"HTTP {resp.status_code}",
+                healthy=False,
+                last_success_at=None,
+                latency_ms=latency_ms,
+                message=f"HTTP {resp.status_code}",
             )
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             return AdapterHealth(
-                healthy=False, last_success_at=None,
-                latency_ms=None, message=f"connection error: {exc}",
+                healthy=False,
+                last_success_at=None,
+                latency_ms=None,
+                message=f"connection error: {exc}",
             )

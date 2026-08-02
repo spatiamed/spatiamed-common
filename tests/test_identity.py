@@ -21,9 +21,7 @@ class TestAssertDistinctSalts:
 
     def test_error_uses_names(self):
         with pytest.raises(ValueError, match="'HASH_SALT'.*'PHONE_HASH_SALT'"):
-            assert_distinct_salts(
-                "dup", "dup", names=["HASH_SALT", "PHONE_HASH_SALT"]
-            )
+            assert_distinct_salts("dup", "dup", names=["HASH_SALT", "PHONE_HASH_SALT"])
 
     def test_names_length_mismatch_raises(self):
         with pytest.raises(ValueError, match="labels but"):

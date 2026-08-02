@@ -67,9 +67,7 @@ async def test_register_template_sends_expected_form_fields():
 @pytest.mark.asyncio
 async def test_register_template_custom_base_url():
     route = respx.post("https://example.test/v2/template").mock(
-        return_value=Response(
-            200, json={"status": "success", "template": {"id": "1234567890"}}
-        )
+        return_value=Response(200, json={"status": "success", "template": {"id": "1234567890"}})
     )
     dlt_id = await register_template(
         body="b",

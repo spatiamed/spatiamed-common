@@ -40,7 +40,9 @@ class TestMocDocAdapterAuth:
     @respx.mock
     async def test_request_has_hmac_signature(self):
         route = respx.get("https://api.mocdoc.in/api/v1/appointments").mock(
-            return_value=httpx.Response(200, json={"appointments": [], "cursor": "2026-05-06T10:00:00Z"})
+            return_value=httpx.Response(
+                200, json={"appointments": [], "cursor": "2026-05-06T10:00:00Z"}
+            )
         )
         adapter = make_adapter()
         await adapter.list_appointments_modified_since("", date(2026, 5, 8))
@@ -52,7 +54,9 @@ class TestMocDocAdapterAuth:
     @respx.mock
     async def test_hmac_signature_is_correct(self):
         route = respx.get("https://api.mocdoc.in/api/v1/appointments").mock(
-            return_value=httpx.Response(200, json={"appointments": [], "cursor": "2026-05-06T10:00:00Z"})
+            return_value=httpx.Response(
+                200, json={"appointments": [], "cursor": "2026-05-06T10:00:00Z"}
+            )
         )
         adapter = make_adapter()
         await adapter.list_appointments_modified_since("", date(2026, 5, 8))
@@ -64,20 +68,25 @@ class TestMocDocAdapterListAppointments:
     @respx.mock
     async def test_returns_canonical_appointments(self):
         respx.get("https://api.mocdoc.in/api/v1/appointments").mock(
-            return_value=httpx.Response(200, json={
-                "appointments": [{
-                    "id": "APT-MD-001",
-                    "version": 2,
-                    "patientMrn": "MRN-MD-001",
-                    "doctorId": "DR-MD-001",
-                    "departmentId": "DEPT-MD-001",
-                    "scheduledAt": "2026-05-07T10:00:00Z",
-                    "durationMinutes": 15,
-                    "payerType": "CASH",
-                    "status": "confirmed",
-                }],
-                "cursor": "2026-05-07T10:00:00Z",
-            })
+            return_value=httpx.Response(
+                200,
+                json={
+                    "appointments": [
+                        {
+                            "id": "APT-MD-001",
+                            "version": 2,
+                            "patientMrn": "MRN-MD-001",
+                            "doctorId": "DR-MD-001",
+                            "departmentId": "DEPT-MD-001",
+                            "scheduledAt": "2026-05-07T10:00:00Z",
+                            "durationMinutes": 15,
+                            "payerType": "CASH",
+                            "status": "confirmed",
+                        }
+                    ],
+                    "cursor": "2026-05-07T10:00:00Z",
+                },
+            )
         )
         adapter = make_adapter()
         apts, cursor = await adapter.list_appointments_modified_since("", date(2026, 5, 8))
