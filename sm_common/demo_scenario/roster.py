@@ -6,7 +6,9 @@ Two things here are load-bearing beyond "make up some names":
 * `patients.phone_hash` is globally unique with no `hospital_id` column, so the
   roster is deduplicated across the whole platform, not per tenant. A demo number
   that collides with a real patient's would merge the two records. The reserved
-  prefix below exists to make that collision impossible by construction.
+  prefix below guards against that collision — it does NOT make outbound messages
+  to these numbers safe to send. That is a separate guarantee owned by CareLoop's
+  `allowed_whatsapp_destinations` allowlist, which is not on CareLoop `main` yet.
 * Patient ids are `uuid5` of (tenant, index), so re-running the backfill reuses
   rows instead of creating a second roster.
 """
