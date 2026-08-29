@@ -7,6 +7,7 @@ databases, no shared state — agree on what happened without talking to each ot
 """
 
 from .calendar import day_rng, day_token_count, scenario_days
+from .days import generate_day
 from .roster import (
     DEMO_NAMESPACE,
     DEMO_PHONE_PREFIX,
@@ -40,6 +41,7 @@ __all__ = [
     "TokenPlan",
     "day_rng",
     "day_token_count",
+    "generate_day",
     "generate_roster",
     "patient_uuid",
     "pick_patient_index",
