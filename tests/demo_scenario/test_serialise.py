@@ -22,7 +22,9 @@ def test_top_level_shape():
     assert doc["tenant_id"] == str(CFG.tenant_id)
     assert doc["start"] == "2026-06-29"
     assert doc["end"] == "2026-07-05"
-    assert {"patients", "days"} <= set(doc)
+    assert set(doc) == {
+        "schema_version", "tenant_id", "seed", "start", "end", "patients", "days",
+    }
 
 
 def test_patient_records_carry_every_field_the_backfill_needs():
@@ -78,7 +80,7 @@ def test_scenario_is_byte_identical_across_interpreter_processes(tmp_path):
         result = subprocess.run(
             [sys.executable, "-c", script],
             capture_output=True, text=True, check=True,
-            env={"PYTHONHASHSEED": "random", "PATH": os.environ.get("PATH", "")},
+            env={**os.environ, "PYTHONHASHSEED": "random"},
         )
         digests.append(hashlib.sha256(result.stdout.encode()).hexdigest())
 
