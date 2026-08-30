@@ -1,6 +1,6 @@
 [project]
 name = "spatiamed-common"
-version = "0.6.0"
+version = "0.8.0"
 description = "Shared utilities for SpatiaMed platform services"
 requires-python = ">=3.12"
 dependencies = [
@@ -31,7 +31,7 @@ requires = ["setuptools>=75.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["sm_common", "sm_common.integrations", "sm_common.integrations.adapters"]
+packages = ["sm_common", "sm_common.demo_scenario", "sm_common.integrations", "sm_common.integrations.adapters"]
 
 [tool.setuptools.package-data]
 sm_common = ["py.typed"]
