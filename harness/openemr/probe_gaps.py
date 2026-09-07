@@ -32,9 +32,14 @@ def main() -> int:
     with httpx.Client(verify=False, timeout=30.0) as c:
         print("== 1. system token vs Standard API write route ==")
         appt = {
-            "pc_catid": "5", "pc_title": "role probe", "pc_duration": "900",
-            "pc_apptstatus": "-", "pc_eventDate": dt.date.today().isoformat(),
-            "pc_startTime": "11:00", "pc_facility": "3", "pc_billing_location": "3",
+            "pc_catid": "5",
+            "pc_title": "role probe",
+            "pc_duration": "900",
+            "pc_apptstatus": "-",
+            "pc_eventDate": dt.date.today().isoformat(),
+            "pc_startTime": "11:00",
+            "pc_facility": "3",
+            "pc_billing_location": "3",
             # Required: omitting it yields HTTP 200 and no record (finding 7.1).
             "pc_hometext": "harness probe",
         }
@@ -57,7 +62,9 @@ def main() -> int:
         # Seed enough appointments to exceed a small _count.
         made = 0
         for i in range(14):
-            a = dict(appt, pc_title=f"page probe {i}", pc_startTime=f"{9 + i % 8:02d}:{(i * 5) % 60:02d}")
+            a = dict(
+                appt, pc_title=f"page probe {i}", pc_startTime=f"{9 + i % 8:02d}:{(i * 5) % 60:02d}"
+            )
             rr = c.post(f"{STD}/patient/2/appointment", json=a, headers=useh)
             if rr.status_code < 400 and rr.json().get("id"):
                 made += 1
@@ -65,11 +72,15 @@ def main() -> int:
         r = c.get(f"{FHIR}/Appointment", params={"_count": "5"}, headers=sysh)
         b = r.json()
         n = len(b.get("entry", []))
-        links = [(l.get("relation"), l.get("url", "")[:60]) for l in b.get("link", [])]
-        print(f"  GET /Appointment?_count=5 -> {r.status_code}, {n} entries, total={b.get('total')}")
+        links = [(ln.get("relation"), ln.get("url", "")[:60]) for ln in b.get("link", [])]
+        print(
+            f"  GET /Appointment?_count=5 -> {r.status_code}, {n} entries, total={b.get('total')}"
+        )
         print(f"  bundle links: {links}")
-        print(f"  VERDICT: _count {'HONOURED' if n == 5 else 'IGNORED'}; "
-              f"next link {'PRESENT' if any(l[0] == 'next' for l in links) else 'ABSENT'}")
+        print(
+            f"  VERDICT: _count {'HONOURED' if n == 5 else 'IGNORED'}; "
+            f"next link {'PRESENT' if any(ln[0] == 'next' for ln in links) else 'ABSENT'}"
+        )
 
         print("\n== 4. create -> visible latency (inbound floor) ==")
         a = dict(appt, pc_title="latency probe", pc_startTime="15:30")
@@ -81,8 +92,11 @@ def main() -> int:
         print(f"  created appointment id={made_id}")
         seen = None
         for _ in range(30):
-            q = c.get(f"{FHIR}/Appointment",
-                      params={"_lastUpdated": "gt1970-01-01T00:00:00+00:00"}, headers=sysh)
+            q = c.get(
+                f"{FHIR}/Appointment",
+                params={"_lastUpdated": "gt1970-01-01T00:00:00+00:00"},
+                headers=sysh,
+            )
             titles = [e["resource"].get("description", "") for e in q.json().get("entry", [])]
             if any("latency probe" in (t or "") for t in titles):
                 seen = time.monotonic() - t_create
@@ -94,7 +108,11 @@ def main() -> int:
             print("  NOT visible within 30s")
 
         # What timestamp granularity does _lastUpdated carry?
-        q = c.get(f"{FHIR}/Appointment", params={"_lastUpdated": "gt1970-01-01T00:00:00+00:00"}, headers=sysh)
+        q = c.get(
+            f"{FHIR}/Appointment",
+            params={"_lastUpdated": "gt1970-01-01T00:00:00+00:00"},
+            headers=sysh,
+        )
         lus = {e["resource"].get("meta", {}).get("lastUpdated") for e in q.json().get("entry", [])}
         print(f"  distinct meta.lastUpdated values seen: {sorted(x for x in lus if x)[:4]}")
     return 0

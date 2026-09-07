@@ -24,7 +24,11 @@ STD = f"{BASE}/apis/default/api"
 OE_USER = "admin"
 OE_PASS = "SpatiaHarness#2026"
 
-SCOPES = "openid offline_access api:oemr api:fhir user/patient.write user/patient.read user/appointment.write user/appointment.read"
+SCOPES = (
+    "openid offline_access api:oemr api:fhir "
+    "user/patient.write user/patient.read "
+    "user/appointment.write user/appointment.read"
+)
 
 
 def register_user_client(client: httpx.Client) -> str:
@@ -41,9 +45,21 @@ def register_user_client(client: httpx.Client) -> str:
     data = r.json()
     (HERE / "seed_client.json").write_text(json.dumps(data, indent=2))
     subprocess.run(
-        ["docker", "compose", "exec", "-T", "mysql", "mariadb", "-uroot", "-popenemr_root",
-         "openemr", "-e", f"UPDATE oauth_clients SET is_enabled = 1 WHERE client_id = '{data['client_id']}';"],
-        cwd=HERE, check=True,
+        [
+            "docker",
+            "compose",
+            "exec",
+            "-T",
+            "mysql",
+            "mariadb",
+            "-uroot",
+            "-popenemr_root",
+            "openemr",
+            "-e",
+            f"UPDATE oauth_clients SET is_enabled = 1 WHERE client_id = '{data['client_id']}';",
+        ],
+        cwd=HERE,
+        check=True,
     )
     return data["client_id"], data.get("client_secret", "")
 
@@ -78,13 +94,17 @@ def main() -> int:
         h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
         patient = {
-            "fname": "Harness", "lname": "Patient", "sex": "Male",
-            "DOB": "1990-01-01", "phone_cell": "9000000001",
+            "fname": "Harness",
+            "lname": "Patient",
+            "sex": "Male",
+            "DOB": "1990-01-01",
+            "phone_cell": "9000000001",
         }
         r = client.post(f"{STD}/patient", json=patient, headers=h)
         print(f"POST /api/patient -> {r.status_code}")
         if r.status_code >= 400:
-            print(r.text[:400]); return 1
+            print(r.text[:400])
+            return 1
         pdata = r.json().get("data", {})
         pid = pdata.get("pid") or pdata.get("id")
         puuid = pdata.get("uuid")

@@ -13,6 +13,8 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
+from sm_common.integrations.exceptions import TransientError
+from sm_common.phone import hash_phone_for_lookup
 from sm_common.integrations.adapters.fhir_r4 import FhirR4Adapter
 
 
@@ -403,22 +405,6 @@ async def test_write_back_conflict_maps_to_conflict_status():
 
 
 @pytest.mark.asyncio
-async def test_write_back_server_error_maps_to_transient_error():
-    """5xx response → WriteBackResult(status='TRANSIENT_ERROR')."""
-
-    def handler(req: httpx.Request) -> httpx.Response:
-        return httpx.Response(500, text="Internal Server Error")
-
-    a = _adapter(handler)
-    result = await a.write_back_idempotent(
-        booking_id=uuid4(),
-        payload={"appointment_id": "appt-x"},
-        idempotency_key="idem-key-4",
-    )
-    assert result.status == "TRANSIENT_ERROR"
-
-
-@pytest.mark.asyncio
 async def test_write_back_idempotency_key_sent_as_header():
     """write_back_idempotent sends X-Idempotency-Key header."""
 
@@ -479,18 +465,6 @@ async def test_cancel_not_found():
     a = _adapter(handler)
     result = await a.cancel(hms_booking_id="appt-missing", reason="No show")
     assert result.status == "NOT_FOUND"
-
-
-@pytest.mark.asyncio
-async def test_cancel_server_error_maps_to_failed_status():
-    """5xx response → CancelResult(status='FAILED')."""
-
-    def handler(req: httpx.Request) -> httpx.Response:
-        return httpx.Response(500, text="Internal Server Error")
-
-    a = _adapter(handler)
-    result = await a.cancel(hms_booking_id="appt-x", reason="reason")
-    assert result.status == "FAILED"
 
 
 @pytest.mark.asyncio
@@ -559,8 +533,93 @@ async def test_push_visit_event_finalized_posts_encounter():
 
 
 @pytest.mark.asyncio
-async def test_push_visit_event_non_2xx_swallowed():
-    """push_visit_event swallows non-2xx responses (fire-and-forget)."""
+async def test_find_patient_hashes_the_telecom_phone():
+    """CanonicalPatient.phone_hash must hold a salted hash, never the raw number.
+
+    A live OpenEMR returned telecom [{"system": "phone", "value": "9000000001"}]
+    and the adapter passed that straight into phone_hash. Two consequences: the
+    value can never match a stored hash, and an unhashed number travels into logs
+    and storage under a name asserting it is hashed.
+    """
+    raw = "9000000001"
+    salt = "test-salt"
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        patient = _patient_resource(resource_id="pat-9", mrn="pat-9")
+        patient["telecom"] = [{"system": "phone", "value": raw, "use": "mobile"}]
+        return httpx.Response(200, json=_patient_bundle([{"resource": patient}]))
+
+    a = FhirR4Adapter(
+        base_url="https://hms.example/fhir",
+        auth_scheme="bearer",
+        auth_cfg={"bearer_token": "t"},
+        hash_salt=salt,
+    )
+    a._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    result = await a.find_patient(mrn="pat-9")
+    assert result is not None
+    assert result.phone_hash != raw, "raw phone number leaked into phone_hash"
+    assert result.phone_hash == hash_phone_for_lookup(raw, salt)
+
+
+# ─── outbound failures must escalate, not be absorbed ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_write_back_server_error_raises_so_the_router_falls_through():
+    """WriteBackRouter falls through tiers on a RAISED TransientError.
+
+    Returning WriteBackResult(status="TRANSIENT_ERROR") instead made the router
+    treat the outage as a terminal outcome and return a status outside its own
+    documented set, so a FHIR vendor outage never reached the agent or manual
+    tier. GenericRestAdapter already raises; this makes the two agree.
+    """
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="Internal Server Error")
+
+    with pytest.raises(TransientError):
+        await _adapter(handler).write_back_idempotent(
+            booking_id=uuid4(),
+            payload={"appointment_id": "appt-x"},
+            idempotency_key="idem-key-4",
+        )
+
+
+@pytest.mark.asyncio
+async def test_cancel_server_error_raises_so_compensation_retries():
+    """A failed compensation must retry, not report failure and move on.
+
+    Swallowing it leaves a live booking in QueueCare and nothing in the HMS —
+    the exact split-brain the saga exists to prevent.
+    """
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="Internal Server Error")
+
+    with pytest.raises(TransientError):
+        await _adapter(handler).cancel(hms_booking_id="appt-x", reason="reason")
+
+
+@pytest.mark.asyncio
+async def test_cancel_not_found_is_still_a_returned_outcome():
+    """Nothing to cancel is an answer, not an error — do not retry it."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="not found")
+
+    result = await _adapter(handler).cancel(hms_booking_id="gone", reason="r")
+    assert result.status == "NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_push_visit_event_non_2xx_raises():
+    """A visit event that never landed must not look like one that did.
+
+    Against OpenEMR this is a 404 on every call, previously logged at warning
+    and discarded, so the caller had no way to know the HMS never saw it.
+    """
     from sm_common.integrations.canonical_types import VisitConsultationStarted
 
     event = VisitConsultationStarted(
@@ -573,7 +632,21 @@ async def test_push_visit_event_non_2xx_swallowed():
     def handler(req: httpx.Request) -> httpx.Response:
         return httpx.Response(500, text="Error")
 
-    a = _adapter(handler)
-    # Must not raise
-    result = await a.push_visit_event(event)
-    assert result is None
+    with pytest.raises(TransientError):
+        await _adapter(handler).push_visit_event(event)
+
+
+@pytest.mark.asyncio
+async def test_cancel_permanent_4xx_is_returned_not_raised():
+    """A rejected cancel needs a human, not another attempt.
+
+    Documents the 4xx/5xx split: 5xx raises so compensation retries, a permanent
+    4xx comes back as FAILED so the saga stops hammering it.
+    """
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, text="cannot cancel a finished appointment")
+
+    result = await _adapter(handler).cancel(hms_booking_id="appt-x", reason="r")
+    assert result.status == "FAILED"
+    assert "422" in (result.error_detail or "")

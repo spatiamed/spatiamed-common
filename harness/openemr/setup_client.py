@@ -5,10 +5,15 @@ OpenEMR only grants ``system/*`` scopes to a client_credentials request carrying
 an RS384 ``private_key_jwt`` assertion, so this mints a keypair, publishes the
 public half through the ``jwks`` container, registers the client, enables it,
 and proves the whole chain by fetching a token.
+
+The token is fetched through ``sm_common.integrations.auth.build_auth_headers``
+— the same code path the adapters use — so this exercises the production
+implementation against a real server rather than a second copy of the logic.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import pathlib
@@ -18,9 +23,12 @@ import time
 import uuid
 
 import httpx
-import jwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+
+from sm_common.integrations.auth import build_auth_headers  # noqa: E402
 
 HERE = pathlib.Path(__file__).parent
 JWKS_DIR = HERE / "jwks"
@@ -128,52 +136,44 @@ def enable_client(client_id: str) -> None:
     A freshly registered OpenEMR client is inert until an admin enables it in
     Admin ▸ System ▸ API Clients; the harness must not need a human at a browser.
     """
-    sql = (
-        "UPDATE oauth_clients SET is_enabled = 1 "
-        f"WHERE client_id = '{client_id}';"
-    )
+    sql = f"UPDATE oauth_clients SET is_enabled = 1 WHERE client_id = '{client_id}';"
     subprocess.run(
         [
-            "docker", "compose", "exec", "-T", "mysql",
-            "mariadb", "-uroot", "-popenemr_root", "openemr", "-e", sql,
+            "docker",
+            "compose",
+            "exec",
+            "-T",
+            "mysql",
+            "mariadb",
+            "-uroot",
+            "-popenemr_root",
+            "openemr",
+            "-e",
+            sql,
         ],
-        cwd=HERE, check=True,
+        cwd=HERE,
+        check=True,
     )
     print("client enabled")
 
 
-def fetch_token(client: httpx.Client, client_id: str, pem: str, kid: str) -> str:
-    now = int(time.time())
-    assertion = jwt.encode(
+async def fetch_token(client: httpx.AsyncClient, client_id: str, pem: str, kid: str) -> str:
+    """Fetch a system-scoped token through the production auth path."""
+    headers = await build_auth_headers(
+        client,
+        "private_key_jwt",
         {
-            "iss": client_id,
-            "sub": client_id,
-            "aud": TOKEN_URL,
-            "jti": uuid.uuid4().hex,
-            "exp": now + 300,
-            "iat": now,
+            "token_url": TOKEN_URL,
+            "client_id": client_id,
+            "private_key_pem": pem,
+            "kid": kid,
+            "scopes": SCOPES,
         },
-        pem,
-        algorithm="RS384",
-        headers={"kid": kid},
     )
-    resp = client.post(
-        TOKEN_URL,
-        data={
-            "grant_type": "client_credentials",
-            "scope": SCOPES,
-            "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
-            "client_assertion": assertion,
-        },
-        timeout=30.0,
-    )
-    print(f"token → HTTP {resp.status_code}")
-    if resp.status_code != 200:
-        raise SystemExit(f"token request failed: {resp.text[:500]}")
-    return resp.json()["access_token"]
+    return headers["Authorization"].removeprefix("Bearer ")
 
 
-def main() -> int:
+async def main() -> int:
     pem, kid = ensure_keypair()
     # The harness serves a self-signed cert; this talks to localhost only.
     with httpx.Client(verify=False) as client:
@@ -181,7 +181,8 @@ def main() -> int:
         registration = register(client)
         client_id = registration["client_id"]
         enable_client(client_id)
-        token = fetch_token(client, client_id, pem, kid)
+    async with httpx.AsyncClient(verify=False, timeout=30.0) as aclient:
+        token = await fetch_token(aclient, client_id, pem, kid)
     (HERE / "token.txt").write_text(token)
     print(f"\nclient_id: {client_id}")
     print(f"access_token: {token[:40]}…")
@@ -189,4 +190,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(asyncio.run(main()))

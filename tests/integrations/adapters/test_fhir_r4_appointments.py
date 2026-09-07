@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from sm_common.integrations.adapters.fhir_r4 import FhirR4Adapter
+from sm_common.integrations.exceptions import TransientError
 
 BUNDLE = {
     "resourceType": "Bundle",
@@ -68,25 +69,6 @@ async def test_health_check_ok_on_metadata_200():
 
 
 # --- New tests for review findings ---
-
-
-@pytest.mark.asyncio
-async def test_until_date_sent_as_lt_upper_bound():
-    """until_date must be sent as a lt... _lastUpdated param alongside gt... (finding #1)."""
-
-    def handler(req: httpx.Request) -> httpx.Response:
-        lu_params = req.url.params.get_list("_lastUpdated")
-        gt_params = [p for p in lu_params if p.startswith("gt")]
-        lt_params = [p for p in lu_params if p.startswith("lt")]
-        assert gt_params, "Expected a gt... _lastUpdated param"
-        assert lt_params, "Expected a lt... _lastUpdated param (until_date upper bound)"
-        assert lt_params[0] == "lt2026-06-30"
-        return httpx.Response(200, json=BUNDLE)
-
-    appts, _cursor = await _adapter(handler).list_appointments_modified_since(
-        "2026-06-01T00:00:00+00:00", date(2026, 6, 30)
-    )
-    assert len(appts) == 1
 
 
 @pytest.mark.asyncio
@@ -165,3 +147,115 @@ async def test_pagination_follows_next_link():
     assert len(appts) == 2
     # cursor must be max lastUpdated across both pages
     assert cursor == "2026-06-22T11:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_until_date_bounds_appointment_date_not_modification_time():
+    """until_date is a clinic-day horizon on the appointment, not on _lastUpdated.
+
+    Sending it as a lt bound on _lastUpdated excludes everything modified today,
+    so the poller can never observe a same-day booking or cancellation. Verified
+    against a live OpenEMR 8.3.0: the adapter's own query returned 0 rows for an
+    appointment created that morning, and 1 row once the lt bound was dropped.
+    """
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        lu = req.url.params.get_list("_lastUpdated")
+        assert [p for p in lu if p.startswith("gt")], "expected a gt lower bound"
+        assert not [p for p in lu if p.startswith("lt")], (
+            f"_lastUpdated must carry no upper bound, got {lu}"
+        )
+        assert req.url.params.get_list("date") == ["le2026-06-30"], (
+            f"until_date belongs on the appointment date param, got {req.url.params}"
+        )
+        return httpx.Response(200, json=BUNDLE)
+
+    appts, _cursor = await _adapter(handler).list_appointments_modified_since(
+        "2026-06-01T00:00:00+00:00", date(2026, 6, 30)
+    )
+    assert len(appts) == 1
+
+
+def _appt(n: int) -> dict:
+    return {
+        "resource": {
+            "resourceType": "Appointment",
+            "id": f"appt-{n}",
+            "status": "booked",
+            "meta": {"versionId": "1", "lastUpdated": f"2026-06-22T10:{n % 60:02d}:00+00:00"},
+            "start": "2026-06-23T09:30:00+05:30",
+            "minutesDuration": 20,
+            "participant": [{"actor": {"reference": "Patient/pat-1"}}],
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_does_not_cap_the_result_set_with_count():
+    """Asking for _count is what lets a non-paging server truncate us.
+
+    OpenEMR 8.3.0 honours _count, reports `total` as the page size, and never
+    emits link[relation=next] — and it ignores _offset, so there is no way to
+    ask for the rest. Requesting 100 turns 132 matching rows into 100 with no
+    signal. Omitting _count, the same server returns all of them.
+    """
+    seen: dict[str, str] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.update(dict(req.url.params))
+        return httpx.Response(200, json=BUNDLE)
+
+    await _adapter(handler).list_appointments_modified_since("", date(2026, 6, 30))
+    assert "_count" not in seen, f"_count invites silent truncation, got {seen}"
+
+
+@pytest.mark.asyncio
+async def test_bundle_reporting_more_than_it_returned_is_an_error():
+    """total > entries with no next link means the server withheld records.
+
+    Standards-based and detectable, unlike guessing from a page being 'full'.
+    Advancing the cursor here would skip whatever was held back.
+    """
+    withheld = {"resourceType": "Bundle", "type": "searchset", "total": 250,
+                "entry": [_appt(i) for i in range(100)]}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=withheld)
+
+    with pytest.raises(TransientError, match="withheld"):
+        await _adapter(handler).list_appointments_modified_since("", date(2026, 6, 30))
+
+
+@pytest.mark.asyncio
+async def test_large_complete_result_is_not_an_error():
+    """A big single-page answer is normal, not truncation.
+
+    Guards the regression this fix caused first time round: keying the error off
+    'page looks full' stalled the poller permanently against OpenEMR, which
+    returns everything in one unpaginated bundle.
+    """
+    complete = {"resourceType": "Bundle", "type": "searchset", "total": 100,
+                "entry": [_appt(i) for i in range(100)]}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=complete)
+
+    appts, _ = await _adapter(handler).list_appointments_modified_since("", date(2026, 6, 30))
+    assert len(appts) == 100
+
+
+@pytest.mark.asyncio
+async def test_partial_page_without_next_link_is_the_normal_end():
+    """Fewer entries than requested means the server really did send everything."""
+    short_page = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "total": 2,
+        "entry": [_appt(i) for i in range(2)],
+    }
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=short_page)
+
+    appts, _ = await _adapter(handler).list_appointments_modified_since("", date(2026, 6, 30))
+    assert len(appts) == 2

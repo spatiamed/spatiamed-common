@@ -26,10 +26,11 @@ from sm_common.integrations.canonical_types import (
     VisitFinalized,
     WriteBackResult,
 )
+from sm_common.integrations.exceptions import TransientError
 from sm_common.integrations.hms_adapter import HmsAdapter
+from sm_common.phone import hash_phone_for_lookup
 
 logger = logging.getLogger(__name__)
-
 
 def _ref_id(participant_actor_ref: str) -> str:
     return participant_actor_ref.split("/")[-1] if participant_actor_ref else ""
@@ -113,12 +114,19 @@ class FhirR4Adapter(HmsAdapter):
         since = cursor or "1970-01-01T00:00:00+00:00"
         headers = await self._headers()
 
-        # Initial page — pass both gt (lower bound) and lt (upper bound) for _lastUpdated
+        # _lastUpdated carries only the cursor's lower bound. until_date is a
+        # clinic-day horizon on the appointment itself, so it belongs on `date` —
+        # as an upper bound on the MODIFICATION time it silently excluded
+        # everything changed today, which is precisely what the poll exists to see.
+        # No _count. A server that honours it without emitting next links (and
+        # without honouring _offset) turns the cap into silent truncation with no
+        # way to ask for the rest. Let the server pick its own page size and
+        # advertise the remainder through link[relation=next], as FHIR requires.
         resp = await self._client.get(
             f"{self._base}/Appointment",
             params={
-                "_lastUpdated": [f"gt{since}", f"lt{until_date.isoformat()}"],
-                "_count": "100",
+                "_lastUpdated": f"gt{since}",
+                "date": f"le{until_date.isoformat()}",
                 "_sort": "_lastUpdated",
             },
             headers=headers,
@@ -127,9 +135,12 @@ class FhirR4Adapter(HmsAdapter):
 
         appts: list[CanonicalAppointment] = []
         new_cursor = cursor
+        reported_total: int | None = None
 
         while True:
             bundle = resp.json()
+            if reported_total is None and isinstance(bundle.get("total"), int):
+                reported_total = bundle["total"]
             for entry in bundle.get("entry", []):
                 res = entry.get("resource", {})
                 if res.get("resourceType") != "Appointment":
@@ -146,6 +157,17 @@ class FhirR4Adapter(HmsAdapter):
             # Fetch the next page using the server-supplied URL (auth headers re-attached)
             resp = await self._client.get(next_url, headers=headers)
             resp.raise_for_status()
+
+        # The server said how many matched. Coming up short with nowhere left to
+        # page means it withheld records, and advancing the cursor would skip
+        # them permanently — not every server honours _sort, so they would not
+        # simply arrive late.
+        if reported_total is not None and len(appts) < reported_total:
+            raise TransientError(
+                f"Vendor withheld records: bundle reported total={reported_total} "
+                f"but returned {len(appts)} with no next link. "
+                "Cannot advance the cursor without losing the remainder."
+            )
 
         return appts, new_cursor
 
@@ -215,10 +237,14 @@ class FhirR4Adapter(HmsAdapter):
                 )
             )
 
+        # telecom carries the raw number. It has to be hashed into the shared
+        # lookup space before it leaves this method — the field is named
+        # phone_hash and every consumer compares it against stored hashes.
         phone_hash = ""
         for telecom in resource.get("telecom", []):
             if telecom.get("system") == "phone":
-                phone_hash = telecom.get("value", "")
+                raw_phone = telecom.get("value", "")
+                phone_hash = hash_phone_for_lookup(raw_phone, self._hash_salt) if raw_phone else ""
                 break
 
         return CanonicalPatient(
@@ -445,8 +471,9 @@ class FhirR4Adapter(HmsAdapter):
                 headers=headers,
             )
         except httpx.HTTPError as exc:
-            logger.warning("FhirR4Adapter.write_back_idempotent HTTP error: %s", exc)
-            return WriteBackResult(status="TRANSIENT_ERROR", error_detail=str(exc))
+            # Raised, not returned: WriteBackRouter only falls through to the
+            # next tier on a raised TransientError.
+            raise TransientError(f"write_back_idempotent HTTP error: {exc}") from exc
 
         if resp.status_code in (200, 201):
             body = resp.json()
@@ -457,11 +484,9 @@ class FhirR4Adapter(HmsAdapter):
         if resp.status_code == 409:
             return WriteBackResult(status="CONFLICT", error_detail=resp.text)
 
-        # 4xx (other) or 5xx
-        return WriteBackResult(
-            status="TRANSIENT_ERROR",
-            error_detail=f"HTTP {resp.status_code}: {resp.text[:200]}",
-        )
+        # 4xx (other) or 5xx — escalate so the router can try the agent or
+        # manual tier instead of recording a terminal non-status.
+        raise TransientError(f"write_back_idempotent HTTP {resp.status_code}: {resp.text[:200]}")
 
     async def cancel(self, hms_booking_id: str, reason: str) -> CancelResult:
         base_headers = await self._headers()
@@ -481,14 +506,20 @@ class FhirR4Adapter(HmsAdapter):
                 headers=base_headers,
             )
         except httpx.HTTPError as exc:
-            logger.warning("FhirR4Adapter.cancel HTTP error: %s", exc)
-            return CancelResult(status="FAILED", error_detail=str(exc))
+            # A compensation step that reports failure and moves on leaves a
+            # live booking here and nothing in the HMS. Raise so it retries.
+            raise TransientError(f"cancel HTTP error: {exc}") from exc
 
         if resp.status_code == 200:
             return CancelResult(status="SUCCESS")
         if resp.status_code == 404:
+            # Nothing to cancel is an answer, not a failure — do not retry.
             return CancelResult(status="NOT_FOUND", error_detail=resp.text)
 
+        if resp.status_code >= 500:
+            raise TransientError(f"cancel HTTP {resp.status_code}: {resp.text[:200]}")
+
+        # A permanent 4xx needs a human, not another attempt.
         return CancelResult(
             status="FAILED",
             error_detail=f"HTTP {resp.status_code}: {resp.text[:200]}",
@@ -530,15 +561,15 @@ class FhirR4Adapter(HmsAdapter):
                 json=encounter_body,
                 headers=headers,
             )
-            if resp.status_code >= 300:
-                logger.warning(
-                    "FhirR4Adapter.push_visit_event non-2xx response %s for event %s",
-                    resp.status_code,
-                    event.event_uuid,
-                )
         except httpx.HTTPError as exc:
-            logger.warning(
-                "FhirR4Adapter.push_visit_event HTTP error for event %s: %s",
-                event.event_uuid,
-                exc,
+            raise TransientError(
+                f"push_visit_event HTTP error for event {event.event_uuid}: {exc}"
+            ) from exc
+
+        if resp.status_code >= 300:
+            # Silently dropping this made an event that never reached the HMS
+            # indistinguishable from one that did.
+            raise TransientError(
+                f"push_visit_event HTTP {resp.status_code} for event {event.event_uuid}: "
+                f"{resp.text[:200]}"
             )

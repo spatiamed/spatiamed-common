@@ -6,6 +6,51 @@ Investigation date: 2026-09-07. Target: OpenEMR 8.3.0 (`v8_3_0`, released 2026-0
 measured against the running server; §2-§4 mix measurement with source reading
 and each claim says which.
 
+## Fixes applied 2026-09-07
+
+All six defects are fixed in `sm_common` on this branch, test-first. Suite: 287
+passed, ruff clean, strict mypy clean.
+
+| # | Defect | Fix |
+|---|---|---|
+| 4.1 / 7.1 | Same-day changes invisible | `until_date` moved off `_lastUpdated` onto the `date` param as `le` |
+| 7.5 | Raw phone in `phone_hash` | new `sm_common.phone.hash_phone_for_lookup`, applied in the adapter |
+| 7.3 | Silent truncation | `_count` dropped; raises only when the bundle's own `total` exceeds what it returned |
+| 7.2 | 2xx that created nothing | `GenericRest` raises when the response carries no booking id |
+| 4.3 | No SMART Backend Services | new `private_key_jwt` auth scheme (RS384, unique `jti`, cached token) — `setup_client.py` authenticates the harness through it, so the production path is live-exercised |
+| 4.4 / 7.8 | Outbound failures absorbed | `write_back_idempotent`, `cancel`, `push_visit_event` raise instead of returning or swallowing |
+
+Three tests asserting the old behaviour were removed — each locked in a defect.
+`test_until_date_sent_as_lt_upper_bound` is the clearest case: it asserted the
+exact filter that hid today's appointments.
+
+**Verified live, not just in mocks.** `verify_live.py` drives the real
+`FhirR4Adapter` against the running OpenEMR: it creates an appointment for today
+and the adapter returns it. Before the fix the same call returned 0 rows.
+
+```
+created appointment id=141 for 2026-09-07
+adapter returned 135 appointments; cursor=2026-09-07T10:00:24+00:00
+RESULT: PASS — same-day appointments are visible
+```
+
+Run with 135 rows on purpose. The first version of the 7.3 fix raised whenever a
+page came back "full", which against OpenEMR — which never emits a `next` link
+and ignores `_offset` — meant every poll past 100 rows raised forever: cursor
+frozen, no data at all. That is worse than the truncation it replaced, and only
+escaped notice because the first live run held 22 rows. The guard now keys off
+the bundle's own `total`, and `_count` is not sent, since asking for a cap is
+what let a non-paging server truncate us. `test_large_complete_result_is_not_an_error`
+holds that regression down.
+
+`phone_hash values present: 0` above is expected: the 7.5 fix applies to
+`find_patient`, and the appointment mapper does not carry a patient phone at all
+— a separate gap, not a failed fix.
+
+Note `cancel` keeps `NOT_FOUND` as a returned outcome — nothing to cancel is an
+answer, not a failure to retry. QueueCare's `WriteBackSaga` already treats an
+activity failure the same as `TRANSIENT_ERROR`, so raising needs no change there.
+
 ## Short answer
 
 OpenEMR is a good test HMS for the **adapter** layer, and it is the right tool for

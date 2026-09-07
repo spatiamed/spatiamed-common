@@ -9,7 +9,6 @@ copied from sm_common/integrations/adapters/fhir_r4.py rather than idealised.
 from __future__ import annotations
 
 import datetime as dt
-import json
 import sys
 
 import httpx
@@ -32,15 +31,27 @@ def probe_reads(client: httpx.Client, token: str) -> None:
 
     # health_check -> GET /metadata
     r = client.get(f"{FHIR}/metadata", headers=h)
-    record("health_check", f"GET /metadata -> {r.status_code}", "PASS" if r.status_code == 200 else "FAIL")
+    record(
+        "health_check",
+        f"GET /metadata -> {r.status_code}",
+        "PASS" if r.status_code == 200 else "FAIL",
+    )
 
     # find_patient -> GET /Patient?identifier=
     r = client.get(f"{FHIR}/Patient", params={"identifier": "test-mrn"}, headers=h)
-    record("find_patient", f"GET /Patient?identifier= -> {r.status_code}", "PASS" if r.status_code == 200 else "FAIL")
+    record(
+        "find_patient",
+        f"GET /Patient?identifier= -> {r.status_code}",
+        "PASS" if r.status_code == 200 else "FAIL",
+    )
 
     # fetch_doctor_roster -> GET /Practitioner
     r = client.get(f"{FHIR}/Practitioner", headers=h)
-    record("fetch_doctor_roster", f"GET /Practitioner -> {r.status_code}", "PASS" if r.status_code == 200 else "FAIL")
+    record(
+        "fetch_doctor_roster",
+        f"GET /Practitioner -> {r.status_code}",
+        "PASS" if r.status_code == 200 else "FAIL",
+    )
 
     # list_appointments_modified_since -> the adapter's literal query.
     # until_date is the tenant's clinic day, sent as an upper bound on the
@@ -74,15 +85,31 @@ def probe_writes(client: httpx.Client, token: str) -> None:
     h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
     # write_back_idempotent -> PUT /Appointment/{id}
-    r = client.put(f"{FHIR}/Appointment/probe-uuid", json={"resourceType": "Appointment", "status": "booked"}, headers=h)
-    record("write_back_idempotent", f"PUT /Appointment/{{id}} -> {r.status_code}", "FAIL" if r.status_code >= 400 else "PASS")
+    r = client.put(
+        f"{FHIR}/Appointment/probe-uuid",
+        json={"resourceType": "Appointment", "status": "booked"},
+        headers=h,
+    )
+    record(
+        "write_back_idempotent",
+        f"PUT /Appointment/{{id}} -> {r.status_code}",
+        "FAIL" if r.status_code >= 400 else "PASS",
+    )
 
     # cancel -> PUT /Appointment/{id}
-    record("cancel", "same route as write_back_idempotent", "FAIL" if r.status_code >= 400 else "PASS")
+    record(
+        "cancel", "same route as write_back_idempotent", "FAIL" if r.status_code >= 400 else "PASS"
+    )
 
     # push_visit_event -> POST /Encounter
-    r = client.post(f"{FHIR}/Encounter", json={"resourceType": "Encounter", "status": "arrived"}, headers=h)
-    record("push_visit_event", f"POST /Encounter -> {r.status_code}", "FAIL" if r.status_code >= 400 else "PASS")
+    r = client.post(
+        f"{FHIR}/Encounter", json={"resourceType": "Encounter", "status": "arrived"}, headers=h
+    )
+    record(
+        "push_visit_event",
+        f"POST /Encounter -> {r.status_code}",
+        "FAIL" if r.status_code >= 400 else "PASS",
+    )
 
 
 def main() -> int:
