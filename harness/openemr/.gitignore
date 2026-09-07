@@ -1,0 +1,6 @@
+private_key.pem
+jwks/jwks.json
+client.json
+seed_client.json
+token.txt
+user_token.txt
