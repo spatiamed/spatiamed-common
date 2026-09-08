@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import pathlib
 import ssl
 import sys
@@ -31,7 +32,7 @@ async def main() -> int:
     )
     adapter._client = httpx.AsyncClient(verify=ctx, timeout=30.0)
 
-    appts, _ = await adapter.list_appointments_modified_since("", __import__("datetime").date.today())
+    appts, _ = await adapter.list_appointments_modified_since("", dt.date.today())
     external_id = appts[0].patient.mrn
     patient = await adapter.get_patient(external_id)
     await adapter.close()
