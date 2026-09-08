@@ -650,3 +650,42 @@ async def test_cancel_permanent_4xx_is_returned_not_raised():
     result = await _adapter(handler).cancel(hms_booking_id="appt-x", reason="r")
     assert result.status == "FAILED"
     assert "422" in (result.error_detail or "")
+
+
+# ─── get_patient tests ───────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_patient_reads_by_resource_id():
+    """Resolution needs a direct read, not an identifier search.
+
+    Measured against OpenEMR 8.3.0: GET /Patient?identifier=<resource-uuid>
+    returns 0 entries because its identifier is the internal pid, while
+    GET /Patient/<resource-uuid> returns 200 with the telecom.
+    """
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert req.url.path.endswith("/Patient/pat-42"), f"expected a direct read, got {req.url}"
+        assert not req.url.params, f"a direct read takes no search params, got {req.url.params}"
+        return httpx.Response(200, json=_patient_resource(resource_id="pat-42", mrn="MRN-9"))
+
+    result = await _adapter(handler).get_patient("pat-42")
+    assert result is not None
+    assert result.mrn == "MRN-9"
+
+
+@pytest.mark.asyncio
+async def test_get_patient_returns_none_when_absent():
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="not found")
+
+    assert await _adapter(handler).get_patient("nope") is None
+
+
+@pytest.mark.asyncio
+async def test_get_patient_default_is_none_for_adapters_without_direct_read():
+    """bahmni/mocdoc/generic_rest/csv_import inherit the default rather than break."""
+    from sm_common.integrations.adapters.generic_rest import GenericRestAdapter
+
+    adapter = GenericRestAdapter({"base_url": "https://x", "list_appointments_path": "/a"})
+    assert await adapter.get_patient("anything") is None

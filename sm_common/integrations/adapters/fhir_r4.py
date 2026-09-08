@@ -32,6 +32,7 @@ from sm_common.phone import hash_phone_for_lookup
 
 logger = logging.getLogger(__name__)
 
+
 def _ref_id(participant_actor_ref: str) -> str:
     return participant_actor_ref.split("/")[-1] if participant_actor_ref else ""
 
@@ -292,6 +293,26 @@ class FhirR4Adapter(HmsAdapter):
             return None
 
         resource = entries[0].get("resource", {})
+        return self._patient_to_canonical(resource)
+
+    async def get_patient(self, external_id: str) -> CanonicalPatient | None:
+        if not external_id:
+            return None
+        try:
+            resp = await self._client.get(
+                f"{self._base}/Patient/{external_id}",
+                headers=await self._headers(),
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("FhirR4Adapter.get_patient HTTP error for %s: %s", external_id, exc)
+            return None
+
+        if resp.status_code != 200:
+            return None
+
+        resource = resp.json()
+        if resource.get("resourceType") != "Patient":
+            return None
         return self._patient_to_canonical(resource)
 
     def _practitioner_to_canonical(self, resource: dict) -> CanonicalDoctor:  # type: ignore[type-arg]

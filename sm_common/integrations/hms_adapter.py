@@ -34,6 +34,15 @@ class HmsAdapter(ABC):
     ) -> CanonicalPatient | None:
         """Return the patient record if HMS knows them, else None."""
 
+    async def get_patient(self, external_id: str) -> CanonicalPatient | None:
+        """Read a patient by the vendor's own resource id.
+
+        Deliberately not abstract: bahmni, mocdoc, generic_rest and csv_import
+        have no direct-read route and would all break. They inherit this default
+        and callers fall back to ``find_patient``.
+        """
+        return None
+
     @abstractmethod
     async def list_appointments_modified_since(
         self,
