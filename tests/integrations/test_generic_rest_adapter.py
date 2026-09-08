@@ -50,20 +50,25 @@ class TestGenericRestAdapterFieldMapping:
     @respx.mock
     async def test_maps_vendor_fields_to_canonical(self):
         respx.get("https://api.medixcel.in/v2/appointments").mock(
-            return_value=httpx.Response(200, json={
-                "data": [{
-                    "apptId": "APT-MX-001",
-                    "version": 3,
-                    "docId": "DR-MX-001",
-                    "deptId": "DEPT-MX-001",
-                    "startTime": "2026-05-07T11:00:00Z",
-                    "duration": 20,
-                    "payerType": "INSURANCE",
-                    "apptStatus": "confirmed",
-                    "patientMrn": "MRN-MX-001",
-                }],
-                "lastModifiedCursor": "2026-05-07T11:00:00Z",
-            })
+            return_value=httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "apptId": "APT-MX-001",
+                            "version": 3,
+                            "docId": "DR-MX-001",
+                            "deptId": "DEPT-MX-001",
+                            "startTime": "2026-05-07T11:00:00Z",
+                            "duration": 20,
+                            "payerType": "INSURANCE",
+                            "apptStatus": "confirmed",
+                            "patientMrn": "MRN-MX-001",
+                        }
+                    ],
+                    "lastModifiedCursor": "2026-05-07T11:00:00Z",
+                },
+            )
         )
         adapter = GenericRestAdapter(MEDIXCEL_MAPPING)
         apts, cursor = await adapter.list_appointments_modified_since("", date(2026, 5, 8))
@@ -84,9 +89,30 @@ class TestGenericRestAdapterFieldMapping:
 
     @respx.mock
     async def test_500_raises_transient(self):
-        respx.get("https://api.medixcel.in/v2/appointments").mock(
-            return_value=httpx.Response(500)
-        )
+        respx.get("https://api.medixcel.in/v2/appointments").mock(return_value=httpx.Response(500))
         adapter = GenericRestAdapter(MEDIXCEL_MAPPING)
         with pytest.raises(TransientError):
             await adapter.list_appointments_modified_since("", date(2026, 5, 8))
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_write_back_rejects_a_2xx_that_created_nothing():
+    """A 2xx carrying validation errors and no id is not a successful write.
+
+    Measured against a live OpenEMR 8.3.0: POST /api/patient/{pid}/appointment
+    with a required field missing answers HTTP 200 and
+    {"pc_hometext": {"Required::NON_EXISTENT_KEY": ...}}, creating nothing.
+    raise_for_status() passes on 200, so the adapter reported
+    WriteBackResult(status="SUCCESS", hms_booking_id=None) — a rejected booking
+    recorded as written, with no id to reconcile or cancel later.
+    """
+    respx.post("https://api.medixcel.in/v2/appointments").mock(
+        return_value=httpx.Response(
+            200, json={"pc_hometext": {"Required::NON_EXISTENT_KEY": "must be provided"}}
+        )
+    )
+    adapter = GenericRestAdapter(MEDIXCEL_MAPPING)
+
+    with pytest.raises(TransientError, match="no booking id"):
+        await adapter.write_back_idempotent(uuid4(), {"slot": "x"}, "idem-1")

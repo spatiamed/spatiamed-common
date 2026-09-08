@@ -98,3 +98,31 @@ def hash_phone_e164(phone: str, salt: str) -> str:
         64-char hex digest, byte-identical to ``sha256(f"{salt}{normalize_e164(phone)}")``.
     """
     return hash_normalized(normalize_e164(phone), salt)
+
+
+def hash_phone_for_lookup(phone: str, salt: str) -> str:
+    """Salted SHA-256 over whichever normalization the number actually fits.
+
+    The single join space shared by QueueCare, CareLoop and the HMS adapters.
+    Equal to :func:`hash_phone` for any valid Indian mobile, to
+    :func:`hash_phone_e164` for anything else normalizable, and to a raw salted
+    hash for input neither can parse — so lookup paths degrade instead of
+    raising.
+
+    Args:
+        phone: Raw phone number in any format.
+        salt: HASH_SALT (identical across every service sharing the join space).
+
+    Returns:
+        64-char hex digest.
+    """
+    try:
+        value = normalize_phone(phone)
+    except (ValueError, TypeError):
+        try:
+            # Keeps "+966…" and "966…" a single identity; the older raw-string
+            # fallback kept the "+" and split them into two.
+            return hash_phone_e164(phone, salt)
+        except (ValueError, TypeError):
+            value = (phone or "").strip().lower()
+    return hash_normalized(value, salt)

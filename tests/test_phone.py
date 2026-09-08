@@ -6,6 +6,7 @@ from sm_common.phone import (
     hash_normalized,
     hash_phone,
     hash_phone_e164,
+    hash_phone_for_lookup,
     normalize_e164,
     normalize_phone,
 )
@@ -83,9 +84,9 @@ class TestHashPhone:
 
 class TestHashNormalized:
     def test_scheme_is_salt_then_value_sha256(self):
-        assert hash_normalized("9876543210", "salt") == hashlib.sha256(
-            b"salt9876543210"
-        ).hexdigest()
+        assert (
+            hash_normalized("9876543210", "salt") == hashlib.sha256(b"salt9876543210").hexdigest()
+        )
 
     def test_deterministic(self):
         assert hash_normalized("x", "s") == hash_normalized("x", "s")
@@ -146,3 +147,31 @@ class TestHashPhoneE164:
         h = hash_phone_e164(self.SAMPLE, self.SALT)
         assert len(h) == 64
         assert all(c in "0123456789abcdef" for c in h)
+
+
+class TestHashPhoneForLookup:
+    """The join space every service must agree on.
+
+    QueueCare, CareLoop and the HMS adapters all hash phone numbers into one
+    shared lookup space. Indian mobiles go through normalize_phone; anything
+    else falls back to E.164; genuinely unhashable input degrades to a raw
+    salted hash rather than raising, so lookup paths never blow up.
+    """
+
+    def test_indian_mobile_matches_hash_phone(self):
+        assert hash_phone_for_lookup("9876543210", "s") == hash_phone("9876543210", "s")
+
+    def test_international_number_matches_e164(self):
+        assert hash_phone_for_lookup("+966501234567", "s") == hash_phone_e164("+966501234567", "s")
+
+    def test_plus_and_bare_international_agree(self):
+        """ "+966…" and "966…" must be one identity, not two."""
+        assert hash_phone_for_lookup("+966501234567", "s") == hash_phone_for_lookup(
+            "966501234567", "s"
+        )
+
+    def test_unhashable_input_degrades_instead_of_raising(self):
+        assert len(hash_phone_for_lookup("junk", "s")) == 64
+
+    def test_never_returns_the_input(self):
+        assert hash_phone_for_lookup("9876543210", "s") != "9876543210"

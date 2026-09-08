@@ -1,0 +1,60 @@
+# Live HMS test harness: a real OpenEMR instance to run HmsAdapter conformance
+# against, instead of respx mocks.
+#
+# The DB port is deliberately NOT published: a local mysqld already owns 3306 on
+# dev machines, and a published port would let the wrong database answer.
+services:
+  mysql:
+    image: mariadb:11.4
+    command:
+      - mariadbd
+      - --character-set-server=utf8mb4
+    environment:
+      MYSQL_ROOT_PASSWORD: openemr_root
+    volumes:
+      - openemr-db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # OpenEMR validates our private_key_jwt client assertion by fetching the
+  # client's jwks_uri. Registering an inline `jwks` object is broken upstream
+  # (openemr#8958), so the key set has to be served over HTTP on this network.
+  jwks:
+    image: python:3.13-alpine
+    working_dir: /srv
+    command: ["python", "-m", "http.server", "80"]
+    volumes:
+      - ./jwks:/srv:ro
+
+  openemr:
+    image: openemr/openemr:8.3.0
+    ports:
+      - "127.0.0.1:8300:80"
+      - "127.0.0.1:9300:443"
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_ROOT_PASS: openemr_root
+      MYSQL_USER: openemr
+      MYSQL_PASS: openemr
+      OE_USER: admin
+      OE_PASS: SpatiaHarness#2026
+      # OAuth2 + FHIR must be on for the adapter to authenticate at all.
+      OPENEMR_SETTING_rest_api: 1
+      OPENEMR_SETTING_rest_fhir_api: 1
+      OPENEMR_SETTING_rest_system_scopes_api: 1
+      OPENEMR_SETTING_oauth_password_grant: 3
+      OPENEMR_SETTING_site_addr_oath: "https://localhost:9300"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      jwks:
+        condition: service_started
+    volumes:
+      - openemr-sites:/var/www/localhost/htdocs/openemr/sites
+
+volumes:
+  openemr-db:
+  openemr-sites:

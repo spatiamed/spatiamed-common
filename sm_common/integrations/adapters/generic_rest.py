@@ -11,9 +11,16 @@ from uuid import UUID
 import httpx
 
 from sm_common.integrations.canonical_types import (
-    AdapterHealth, CancelResult, CanonicalAppointment, CanonicalDoctor,
-    CanonicalPatient, ExternalBooking, VisitCheckedIn,
-    VisitConsultationStarted, VisitFinalized, WriteBackResult,
+    AdapterHealth,
+    CancelResult,
+    CanonicalAppointment,
+    CanonicalDoctor,
+    CanonicalPatient,
+    ExternalBooking,
+    VisitCheckedIn,
+    VisitConsultationStarted,
+    VisitFinalized,
+    WriteBackResult,
 )
 from sm_common.integrations.exceptions import AuthError, ConflictError, TransientError
 from sm_common.integrations.hms_adapter import HmsAdapter
@@ -40,10 +47,14 @@ class GenericRestAdapter(HmsAdapter):
         if scheme == "hmac":
             date_str = formatdate(usegmt=True)
             secret = self._m.get("api_secret", "")
-            sig = hmac.new(secret.encode(), f"{date_str}\n{body}".encode(), hashlib.sha256).hexdigest()
+            sig = hmac.new(
+                secret.encode(), f"{date_str}\n{body}".encode(), hashlib.sha256
+            ).hexdigest()
             return {
                 self._m.get("api_key_header", "X-Api-Key"): self._m.get("api_key", ""),
-                "X-Signature": sig, "Date": date_str, "Content-Type": "application/json",
+                "X-Signature": sig,
+                "Date": date_str,
+                "Content-Type": "application/json",
             }
         return {"Content-Type": "application/json"}
 
@@ -59,7 +70,11 @@ class GenericRestAdapter(HmsAdapter):
             slot_start = datetime.now(timezone.utc)
         patient = CanonicalPatient(
             mrn=str(self._get_field(apt, "mrn") or ""),
-            abha_id=None, phone_hash="", name_token="", age=None, gender=None,
+            abha_id=None,
+            phone_hash="",
+            name_token="",
+            age=None,
+            gender=None,
         )
         duration = self._get_field(apt, "slot_duration_min")
         version = self._get_field(apt, "hms_version")
@@ -84,7 +99,8 @@ class GenericRestAdapter(HmsAdapter):
             params["modified_since"] = cursor
         resp = await self._client.get(
             f"{self._m['base_url']}{self._m['list_appointments_path']}",
-            headers=self._auth_headers(), params=params,
+            headers=self._auth_headers(),
+            params=params,
         )
         if resp.status_code in (401, 403):
             raise AuthError(f"GenericRest auth failed: {resp.status_code}")
@@ -98,15 +114,18 @@ class GenericRestAdapter(HmsAdapter):
         return apts, data.get(cursor_field, cursor)
 
     async def find_patient(
-        self, phone_hash: str | None = None,
-        mrn: str | None = None, abha_id: str | None = None,
+        self,
+        phone_hash: str | None = None,
+        mrn: str | None = None,
+        abha_id: str | None = None,
     ) -> CanonicalPatient | None:
         path = self._m.get("patient_lookup_path", "/patients")
         param_name = self._m.get("patient_lookup_param", "mrn")
         param_val = mrn or phone_hash or ""
         resp = await self._client.get(
             f"{self._m['base_url']}{path}",
-            headers=self._auth_headers(), params={param_name: param_val},
+            headers=self._auth_headers(),
+            params={param_name: param_val},
         )
         if resp.status_code == 404:
             return None
@@ -118,14 +137,19 @@ class GenericRestAdapter(HmsAdapter):
             return None
         p = patients[0]
         return CanonicalPatient(
-            mrn=p.get("mrn", ""), abha_id=None,
-            phone_hash=phone_hash or "", name_token="", age=None, gender=None,
+            mrn=p.get("mrn", ""),
+            abha_id=None,
+            phone_hash=phone_hash or "",
+            name_token="",
+            age=None,
+            gender=None,
         )
 
     async def fetch_doctor_roster(self, as_of_date: date) -> list[CanonicalDoctor]:
         path = self._m.get("doctor_roster_path", "/doctors")
         resp = await self._client.get(
-            f"{self._m['base_url']}{path}", headers=self._auth_headers(),
+            f"{self._m['base_url']}{path}",
+            headers=self._auth_headers(),
         )
         if resp.status_code >= 500:
             raise TransientError(f"GenericRest error: {resp.status_code}")
@@ -173,17 +197,22 @@ class GenericRestAdapter(HmsAdapter):
                 updated_at = datetime.now(timezone.utc)
             except ValueError:
                 continue
-            bookings.append(ExternalBooking(
-                appointment_id=str(self._get_field(b, "appointment_id") or ""),
-                doctor_external_id=str(self._get_field(b, "doctor_external_id") or ""),
-                slot_start=slot,
-                status=str(self._get_field(b, "status") or ""),
-                updated_at=updated_at,
-            ))
+            bookings.append(
+                ExternalBooking(
+                    appointment_id=str(self._get_field(b, "appointment_id") or ""),
+                    doctor_external_id=str(self._get_field(b, "doctor_external_id") or ""),
+                    slot_start=slot,
+                    status=str(self._get_field(b, "status") or ""),
+                    updated_at=updated_at,
+                )
+            )
         return bookings
 
     async def write_back_idempotent(
-        self, booking_id: UUID, payload: dict, idempotency_key: str  # type: ignore[type-arg]
+        self,
+        booking_id: UUID,
+        payload: dict,
+        idempotency_key: str,  # type: ignore[type-arg]
     ) -> WriteBackResult:
         idem_field = self._m.get("idempotency_field", "idempotencyKey")
         body = {**payload, idem_field: idempotency_key}
@@ -192,7 +221,8 @@ class GenericRestAdapter(HmsAdapter):
         conflict_code = self._m.get("conflict_status_code", 409)
         resp = await self._client.post(
             f"{self._m['base_url']}{path}",
-            headers=self._auth_headers(body_str), content=body_str,
+            headers=self._auth_headers(body_str),
+            content=body_str,
         )
         if resp.status_code == conflict_code:
             raise ConflictError(f"conflict: HTTP {resp.status_code}")
@@ -201,13 +231,24 @@ class GenericRestAdapter(HmsAdapter):
         resp.raise_for_status()
         data = resp.json()
         apt_id_field = self._m.get("appointment_fields", {}).get("appointment_id", "id")
-        return WriteBackResult(status="SUCCESS", hms_booking_id=data.get(apt_id_field))
+        booking_id = data.get(apt_id_field)
+        if not booking_id:
+            # Some vendors answer a rejected payload with 2xx and put the
+            # validation errors in the body, so the status line cannot be
+            # trusted on its own. Without an id there is nothing to reconcile
+            # or cancel later, so this is not a write we can call successful.
+            raise TransientError(
+                f"Write-back returned HTTP {resp.status_code} but no booking id "
+                f"in field {apt_id_field!r}: {resp.text[:200]}"
+            )
+        return WriteBackResult(status="SUCCESS", hms_booking_id=booking_id)
 
     async def cancel(self, hms_booking_id: str, reason: str) -> CancelResult:
         path = self._m.get("write_back_path", "/appointments")
         resp = await self._client.delete(
             f"{self._m['base_url']}{path}/{hms_booking_id}",
-            headers=self._auth_headers(), params={"reason": reason},
+            headers=self._auth_headers(),
+            params={"reason": reason},
         )
         if resp.status_code == 404:
             return CancelResult(status="NOT_FOUND")
@@ -217,7 +258,8 @@ class GenericRestAdapter(HmsAdapter):
         return CancelResult(status="SUCCESS")
 
     async def push_visit_event(
-        self, event: VisitCheckedIn | VisitConsultationStarted | VisitFinalized,
+        self,
+        event: VisitCheckedIn | VisitConsultationStarted | VisitFinalized,
     ) -> None:
         if isinstance(event, VisitCheckedIn):
             status = "arrived"
@@ -230,7 +272,8 @@ class GenericRestAdapter(HmsAdapter):
         path = self._m.get("write_back_path", "/appointments")
         resp = await self._client.patch(
             f"{self._m['base_url']}{path}/{event.appointment_id}/status",
-            headers=self._auth_headers(body_str), content=body_str,
+            headers=self._auth_headers(body_str),
+            content=body_str,
         )
         if resp.status_code >= 500:
             raise TransientError(f"GenericRest error: {resp.status_code}")
@@ -241,20 +284,27 @@ class GenericRestAdapter(HmsAdapter):
         start = time.monotonic()
         try:
             resp = await self._client.get(
-                f"{self._m['base_url']}{health_path}", headers=self._auth_headers(),
+                f"{self._m['base_url']}{health_path}",
+                headers=self._auth_headers(),
             )
             latency_ms = int((time.monotonic() - start) * 1000)
             if resp.status_code < 300:
                 return AdapterHealth(
-                    healthy=True, last_success_at=datetime.now(timezone.utc),
-                    latency_ms=latency_ms, message="OK",
+                    healthy=True,
+                    last_success_at=datetime.now(timezone.utc),
+                    latency_ms=latency_ms,
+                    message="OK",
                 )
             return AdapterHealth(
-                healthy=False, last_success_at=None,
-                latency_ms=latency_ms, message=f"HTTP {resp.status_code}",
+                healthy=False,
+                last_success_at=None,
+                latency_ms=latency_ms,
+                message=f"HTTP {resp.status_code}",
             )
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             return AdapterHealth(
-                healthy=False, last_success_at=None,
-                latency_ms=None, message=f"connection error: {exc}",
+                healthy=False,
+                last_success_at=None,
+                latency_ms=None,
+                message=f"connection error: {exc}",
             )
