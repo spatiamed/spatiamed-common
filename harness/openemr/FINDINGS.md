@@ -385,3 +385,30 @@ patient refs. Either `meta.lastUpdated`/the since-date filter in
 own accumulated appointment history (seeded across many prior runs, pid 1-6)
 legitimately clusters onto a handful of patients. Worth a look before trusting
 appointment counts as a proxy for patient counts elsewhere.
+
+
+### The 137 → 5 ratio is correct, not a defect
+
+The live round trip ingested 137 appointments and created 5 `external_patient_refs`
+rows, which looked like under-mapping. It is not. Queried directly:
+
+```
+appts  distinct_patients
+137    5
+
+pc_pid  n
+2       133
+6       1
+3       1
+4       1
+5       1
+```
+
+One patient holds 133 of the 137 appointments, because this harness was
+bulk-seeded with 110 appointments against a single patient earlier, while
+testing the `_count` truncation fix. One ref per distinct patient is exactly
+right — and the ratio actually demonstrates the map doing its job: many
+appointments resolving to one local patient without duplicating them, which is
+the case the ingest's map-first lookup exists to handle.
+
+Worth stating because the raw numbers invite the opposite conclusion.
