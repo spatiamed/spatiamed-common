@@ -346,3 +346,42 @@ then have to unpick.
 - `pc_hometext` is required on appointment create, and omitting it costs you a
   silent 200 (§7.2).
 - A local `mysqld` owns 3306; the harness DB port is deliberately unpublished.
+
+## 10. Live round trip — measured (2026-09-08)
+
+QueueCare-hmssync `server/tests/test_hms_live_round_trip.py`, run against this
+running harness with nothing mocked: a real `FhirR4Adapter` (sm_common editable
+overlay), a real `ingest_appointments`, and real Postgres rows checked with
+`DATABASE_URL_MIGRATIONS` (BYPASSRLS).
+
+Command:
+
+```bash
+cd QueueCare-hmssync/server
+uv run --no-sync pytest tests/test_hms_live_round_trip.py -q -s
+```
+
+Real output:
+
+```
+LIVE ROUND TRIP: 137 OpenEMR appointments -> 137 bookings, 5 patient refs; re-ingest created 0, skipped 137
+1 passed, 10 warnings in 4.49s
+```
+
+Second pass over the identical appointment set created zero new rows and
+skipped all 137 — the `(hospital_id, hms_booking_id)` unique partial index
+(migration 076) held under a real re-ingest, not a mocked one. Teardown verified
+by direct psql count of `patients` before/after (2643 -> 2643 unchanged) and
+`hospitals WHERE name='Live RT'` (0 after) — confirms `patients` has no
+`hospital_id` FK and must be deleted explicitly, which the test does.
+
+`uv run --no-sync pytest tests/ -q -k "hms" -m "not live"` deselects this test
+and leaves the rest of the HMS suite green (83 passed), confirming the `live`
+marker keeps ordinary CI unaffected.
+
+Open question, not chased here: 137 appointments resolved to only 5 distinct
+patient refs. Either `meta.lastUpdated`/the since-date filter in
+`list_appointments_modified_since` is broader than intended, or the harness's
+own accumulated appointment history (seeded across many prior runs, pid 1-6)
+legitimately clusters onto a handful of patients. Worth a look before trusting
+appointment counts as a proxy for patient counts elsewhere.
