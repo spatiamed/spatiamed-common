@@ -20,6 +20,8 @@ from email.utils import formatdate
 import httpx
 import jwt
 
+from sm_common.integrations.exceptions import AuthError
+
 
 async def build_auth_headers(
     client: httpx.AsyncClient, scheme: str, cfg: dict, body: str = ""
@@ -29,7 +31,14 @@ async def build_auth_headers(
         header = cfg.get("api_key_header", "X-Api-Key")
         return {**base, header: cfg.get("api_key", "")}
     if scheme == "bearer":
-        return {**base, "Authorization": f"Bearer {cfg.get('bearer_token', '')}"}
+        token = (cfg.get("bearer_token") or "").strip()
+        if not token:
+            # "Bearer " is an illegal header value and httpx refuses to send it,
+            # so an unset token crashed the transport instead of surfacing as a
+            # credentials problem. AuthError is what the poll worker already
+            # handles: it records health_status="auth_error" and stops retrying.
+            raise AuthError("bearer auth selected but no bearer_token configured")
+        return {**base, "Authorization": f"Bearer {token}"}
     if scheme == "hmac":
         date_str = formatdate(usegmt=True)
         secret = cfg.get("api_secret", "")

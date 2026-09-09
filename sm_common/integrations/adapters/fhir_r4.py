@@ -70,16 +70,12 @@ class FhirR4Adapter(HmsAdapter):
     def _to_canonical(self, appt: dict) -> CanonicalAppointment:  # type: ignore[type-arg]
         meta = appt.get("meta", {})
         start = appt.get("start", "")
-        try:
-            slot_start = datetime.fromisoformat(start.replace("Z", "+00:00"))
-        except ValueError:
-            logger.warning(
-                "FhirR4Adapter: could not parse slot start %r for appointment %s; "
-                "falling back to datetime.now(UTC)",
-                start,
-                appt.get("id", "<unknown>"),
-            )
-            slot_start = datetime.now(UTC)
+        # No fallback. Substituting datetime.now(UTC) placed the patient in
+        # today's queue at the current moment rather than their real slot, and
+        # nothing downstream could tell the time had been invented. A hosted
+        # FHIR server returned two such values in 2111 appointments. Callers
+        # skip the appointment instead — see list_appointments_modified_since.
+        slot_start = datetime.fromisoformat(start.replace("Z", "+00:00"))
         return CanonicalAppointment(
             appointment_id=str(appt.get("id", "")),
             hms_version=int(meta.get("versionId", 0) or 0),
@@ -137,6 +133,11 @@ class FhirR4Adapter(HmsAdapter):
         appts: list[CanonicalAppointment] = []
         new_cursor = cursor
         reported_total: int | None = None
+        # Appointment resources the SERVER actually handed us, whether or not we
+        # could use them. The truncation guard below must measure delivery, not
+        # parseability — otherwise skipping one unreadable appointment looks
+        # identical to the server withholding records.
+        appointments_received = 0
 
         while True:
             bundle = resp.json()
@@ -146,7 +147,16 @@ class FhirR4Adapter(HmsAdapter):
                 res = entry.get("resource", {})
                 if res.get("resourceType") != "Appointment":
                     continue
-                appts.append(self._to_canonical(res))
+                appointments_received += 1
+                try:
+                    appts.append(self._to_canonical(res))
+                except (ValueError, TypeError, AttributeError):
+                    logger.warning(
+                        "FhirR4Adapter: skipping appointment %s — unusable start %r",
+                        res.get("id", "<unknown>"),
+                        res.get("start"),
+                    )
+                    continue
                 lu = res.get("meta", {}).get("lastUpdated", "")
                 if lu > new_cursor:
                     new_cursor = lu
@@ -163,10 +173,10 @@ class FhirR4Adapter(HmsAdapter):
         # page means it withheld records, and advancing the cursor would skip
         # them permanently — not every server honours _sort, so they would not
         # simply arrive late.
-        if reported_total is not None and len(appts) < reported_total:
+        if reported_total is not None and appointments_received < reported_total:
             raise TransientError(
                 f"Vendor withheld records: bundle reported total={reported_total} "
-                f"but returned {len(appts)} with no next link. "
+                f"but returned {appointments_received} with no next link. "
                 "Cannot advance the cursor without losing the remainder."
             )
 
@@ -401,16 +411,9 @@ class FhirR4Adapter(HmsAdapter):
                 break
 
         start_str = resource.get("start", "")
-        try:
-            slot_start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-        except (ValueError, AttributeError):
-            logger.warning(
-                "FhirR4Adapter._booking_to_external: could not parse slot start %r "
-                "for appointment %s; falling back to datetime.now(UTC).",
-                start_str,
-                resource.get("id", "<unknown>"),
-            )
-            slot_start = datetime.now(UTC)
+        # Same reasoning as _to_canonical: an invented time here would show up
+        # as reconciliation drift against a slot that was never real.
+        slot_start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
 
         updated_str = resource.get("meta", {}).get("lastUpdated", "")
         try:
@@ -460,7 +463,15 @@ class FhirR4Adapter(HmsAdapter):
                 resource = entry.get("resource", {})
                 if resource.get("resourceType") != "Appointment":
                     continue
-                bookings.append(self._booking_to_external(resource))
+                try:
+                    bookings.append(self._booking_to_external(resource))
+                except (ValueError, TypeError, AttributeError):
+                    logger.warning(
+                        "FhirR4Adapter: skipping reconciliation booking %s — unusable start %r",
+                        resource.get("id", "<unknown>"),
+                        resource.get("start"),
+                    )
+                    continue
 
             next_url = self._next_url(bundle)
             if not next_url:

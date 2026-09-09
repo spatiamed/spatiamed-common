@@ -156,3 +156,45 @@ class TestPrivateKeyJwt:
             await build_auth_headers(c, "private_key_jwt", dict(cfg))
 
         assert len(set(jtis)) == 2, "jti must be unique per assertion"
+
+
+class TestBearerTokenGuards:
+    """An empty bearer token must fail cleanly, not crash the transport.
+
+    Found against a hosted FHIR server: `auth_scheme="bearer"` with no token
+    builds the header "Bearer ", which httpx rejects outright —
+    `LocalProtocolError: Illegal header value b'Bearer '`. A misconfigured
+    integration (credentials saved, token blank) would crash the poll worker
+    instead of reporting itself unhealthy. AuthError is the shape the worker
+    already handles: it sets health_status="auth_error" and stops retrying.
+    """
+
+    @pytest.mark.asyncio
+    async def test_empty_bearer_token_raises_auth_error(self):
+        from sm_common.integrations.exceptions import AuthError
+
+        async with httpx.AsyncClient() as c:
+            with pytest.raises(AuthError):
+                await build_auth_headers(c, "bearer", {"bearer_token": ""})
+
+    @pytest.mark.asyncio
+    async def test_whitespace_bearer_token_raises_auth_error(self):
+        from sm_common.integrations.exceptions import AuthError
+
+        async with httpx.AsyncClient() as c:
+            with pytest.raises(AuthError):
+                await build_auth_headers(c, "bearer", {"bearer_token": "   "})
+
+    @pytest.mark.asyncio
+    async def test_missing_bearer_token_raises_auth_error(self):
+        from sm_common.integrations.exceptions import AuthError
+
+        async with httpx.AsyncClient() as c:
+            with pytest.raises(AuthError):
+                await build_auth_headers(c, "bearer", {})
+
+    @pytest.mark.asyncio
+    async def test_a_real_bearer_token_still_works(self):
+        async with httpx.AsyncClient() as c:
+            h = await build_auth_headers(c, "bearer", {"bearer_token": "tok"})
+        assert h["Authorization"] == "Bearer tok"
