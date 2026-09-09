@@ -216,8 +216,12 @@ async def test_bundle_reporting_more_than_it_returned_is_an_error():
     Standards-based and detectable, unlike guessing from a page being 'full'.
     Advancing the cursor here would skip whatever was held back.
     """
-    withheld = {"resourceType": "Bundle", "type": "searchset", "total": 250,
-                "entry": [_appt(i) for i in range(100)]}
+    withheld = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "total": 250,
+        "entry": [_appt(i) for i in range(100)],
+    }
 
     def handler(req: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=withheld)
@@ -234,8 +238,12 @@ async def test_large_complete_result_is_not_an_error():
     'page looks full' stalled the poller permanently against OpenEMR, which
     returns everything in one unpaginated bundle.
     """
-    complete = {"resourceType": "Bundle", "type": "searchset", "total": 100,
-                "entry": [_appt(i) for i in range(100)]}
+    complete = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "total": 100,
+        "entry": [_appt(i) for i in range(100)],
+    }
 
     def handler(req: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=complete)
@@ -259,3 +267,62 @@ async def test_partial_page_without_next_link_is_the_normal_end():
 
     appts, _ = await _adapter(handler).list_appointments_modified_since("", date(2026, 6, 30))
     assert len(appts) == 2
+
+
+@pytest.mark.asyncio
+async def test_an_unparseable_slot_start_is_skipped_not_invented():
+    """A bad timestamp must never become "now".
+
+    Found against a hosted FHIR server carrying real-world messy data: two of
+    2111 appointments had a malformed `start`, and the adapter substituted
+    datetime.now(UTC). In a queue system that is worse than dropping the
+    appointment — the patient is placed in today's queue at the current moment
+    instead of their actual slot, and nothing downstream can tell the time was
+    fabricated. Skip it loudly instead.
+    """
+    bad = {
+        "resource": {
+            "resourceType": "Appointment",
+            "id": "appt-bad-start",
+            "status": "booked",
+            "meta": {"versionId": "1", "lastUpdated": "2026-06-22T10:00:00+00:00"},
+            "start": "2024-11-25T15:30:00.000Z:00Z",  # verbatim from the live server
+            "minutesDuration": 20,
+            "participant": [{"actor": {"reference": "Patient/pat-1"}}],
+        }
+    }
+    good = _appt(1)
+    bundle = {"resourceType": "Bundle", "type": "searchset", "total": 2, "entry": [bad, good]}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=bundle)
+
+    appts, _ = await _adapter(handler).list_appointments_modified_since("", date(2026, 6, 30))
+
+    ids = [a.appointment_id for a in appts]
+    assert "appt-bad-start" not in ids, (
+        "an appointment with an unparseable time was returned anyway"
+    )
+    assert ids == ["appt-1"], f"the good appointment must still come through, got {ids}"
+
+
+@pytest.mark.asyncio
+async def test_a_missing_slot_start_is_also_skipped():
+    """`start` absent entirely is the same problem, not a different one."""
+    missing = {
+        "resource": {
+            "resourceType": "Appointment",
+            "id": "appt-no-start",
+            "status": "booked",
+            "meta": {"versionId": "1", "lastUpdated": "2026-06-22T10:00:00+00:00"},
+            "minutesDuration": 20,
+            "participant": [{"actor": {"reference": "Patient/pat-1"}}],
+        }
+    }
+    bundle = {"resourceType": "Bundle", "type": "searchset", "total": 1, "entry": [missing]}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=bundle)
+
+    appts, _ = await _adapter(handler).list_appointments_modified_since("", date(2026, 6, 30))
+    assert appts == []
