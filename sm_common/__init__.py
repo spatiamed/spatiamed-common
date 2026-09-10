@@ -1,4 +1,4 @@
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 from sm_common.auth import decode_jwt_with_grace
 from sm_common.events import (

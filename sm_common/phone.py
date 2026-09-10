@@ -126,3 +126,55 @@ def hash_phone_for_lookup(phone: str, salt: str) -> str:
         except (ValueError, TypeError):
             value = (phone or "").strip().lower()
     return hash_normalized(value, salt)
+
+
+def phone_search_variants(raw: str) -> list[str]:
+    """Every shape a phone number plausibly takes in an EXTERNAL system.
+
+    This is for querying an HMS, never for our own join space — that space is
+    hashed and uses :func:`hash_phone_for_lookup`.
+
+    Why a list and not one normalized string: FHIR's ``telecom`` is a TOKEN
+    search parameter, so it matches EXACTLY. A hospital that stored
+    "+919876543210" is not found by a search for "9876543210", and neither is
+    the reverse. FHIR treats comma-separated values as OR, so asking for every
+    shape at once costs one request and finds the record whichever way their
+    data entry recorded it.
+
+    Ordered most-likely-first: E.164 with a leading ``+`` is the commonest
+    storage in FHIR servers, and a server that honours only the first value
+    still gets our best guess.
+
+    Returns an empty list for anything unparseable, so a lookup path can skip
+    the search rather than raise — finding nobody is a normal answer here.
+    """
+    if not raw or not isinstance(raw, str):
+        return []
+
+    variants: list[str] = []
+
+    def _add(value: str) -> None:
+        if value not in variants:
+            variants.append(value)
+
+    try:
+        # India-only: gives the bare 10-digit subscriber number.
+        local = normalize_phone(raw)
+    except ValueError:
+        pass
+    else:
+        _add(f"+91{local}")
+        _add(local)
+        _add(f"91{local}")
+        # Older Indian records often keep the trunk prefix.
+        _add(f"0{local}")
+        return variants
+
+    try:
+        digits = normalize_e164(raw)
+    except ValueError:
+        return []
+
+    _add(f"+{digits}")
+    _add(digits)
+    return variants

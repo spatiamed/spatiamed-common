@@ -31,8 +31,14 @@ class HmsAdapter(ABC):
         phone_hash: str | None = None,
         mrn: str | None = None,
         abha_id: str | None = None,
+        phone: str | None = None,
     ) -> CanonicalPatient | None:
-        """Return the patient record if HMS knows them, else None."""
+        """Return the patient record if HMS knows them, else None.
+
+        ``phone`` is the plaintext number. ``phone_hash`` is our own local
+        join-space index and matches nothing on any vendor system — callers
+        holding only the hash get None back.
+        """
 
     async def get_patient(self, external_id: str) -> CanonicalPatient | None:
         """Read a patient by the vendor's own resource id.
