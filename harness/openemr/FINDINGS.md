@@ -412,3 +412,39 @@ appointments resolving to one local patient without duplicating them, which is
 the case the ingest's map-first lookup exists to handle.
 
 Worth stating because the raw numbers invite the opposite conclusion.
+
+## 5. Patient lookup by phone (2026-09-10)
+
+Verified live against the running harness.
+
+**OpenEMR stores the number exactly as submitted.** `patient_data.phone_cell`
+holds `9000000001` for every seeded patient — no reformatting, no country
+code added. Whatever the hospital's data entry typed is what the search must
+match.
+
+**Both `telecom` and `phone` are supported Patient search parameters**, per the
+CapabilityStatement:
+
+    _id, _lastUpdated, address, address-city, address-postalcode,
+    address-state, birthdate, email, family, gender, generalPractitioner,
+    given, identifier, name, phone, telecom
+
+That matters because FHIR's `telecom` is a **token** parameter — it matches
+EXACTLY. A hospital storing `+919876543210` is not found by a query for
+`9876543210`, and neither is the reverse. Neither `normalize_phone` (10-digit,
+India-only) nor `normalize_e164` (digits, no `+`) emits the `+`-prefixed form
+most FHIR servers store, so a single normalized value would have matched
+nothing on a large fraction of real servers. `phone_search_variants()` returns
+every plausible shape and the adapter ORs them in one request (comma is OR in
+FHIR search).
+
+**The seed data is an ambiguity fixture, not a match fixture.** All six seeded
+patients share one phone (`9000000001`) AND one name (`Harness Patient`). A
+lookup therefore returns six candidates, which the matching rules correctly
+refuse to bind — this is the household-phone case. To demonstrate a
+*successful* match, seed a patient with a distinct phone and name.
+
+`birthdate` and `gender` are also searchable, so a future tightening could
+narrow server-side rather than corroborating client-side. Not needed today:
+corroboration must happen on our side regardless, because not every vendor
+supports those parameters.
