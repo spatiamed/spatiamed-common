@@ -28,7 +28,7 @@ from sm_common.integrations.canonical_types import (
 )
 from sm_common.integrations.exceptions import TransientError
 from sm_common.integrations.hms_adapter import HmsAdapter
-from sm_common.phone import hash_phone_for_lookup
+from sm_common.phone import hash_phone_for_lookup, phone_search_variants
 
 logger = logging.getLogger(__name__)
 
@@ -272,16 +272,28 @@ class FhirR4Adapter(HmsAdapter):
         phone_hash: str | None = None,
         mrn: str | None = None,
         abha_id: str | None = None,
+        phone: str | None = None,
     ) -> CanonicalPatient | None:
-        # Build the search param: prefer mrn, then abha_id, then phone_hash.
-        # phone_hash is a hash, not a real phone — FHIR servers generally can't
-        # search by it, so we return None when it is the only hint.
+        # Preference order: MRN, then ABHA, then phone. The first two are
+        # identifiers. A phone is the weakest hint — one number commonly serves
+        # a whole household in India — so callers MUST corroborate the result
+        # against name, age and gender before treating it as identity.
         if mrn:
             params: dict = {"identifier": mrn}  # type: ignore[type-arg]
         elif abha_id:
             params = {"identifier": abha_id}
+        elif phone:
+            # `telecom` is a TOKEN search parameter, so it matches EXACTLY: a
+            # hospital storing "+919876543210" is not found by a query for
+            # "9876543210". Comma means OR in FHIR search, so we ask for every
+            # shape the number plausibly takes in one request.
+            variants = phone_search_variants(phone)
+            if not variants:
+                return None
+            params = {"telecom": ",".join(variants)}
         elif phone_hash:
-            # phone_hash is not searchable; no way to query FHIR by it.
+            # A hash matches nothing on any vendor system. Asking would waste a
+            # round trip and disclose that we are looking for someone.
             return None
         else:
             return None

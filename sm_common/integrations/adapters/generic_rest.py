@@ -24,6 +24,7 @@ from sm_common.integrations.canonical_types import (
 )
 from sm_common.integrations.exceptions import AuthError, ConflictError, TransientError
 from sm_common.integrations.hms_adapter import HmsAdapter
+from sm_common.phone import phone_search_variants
 
 
 class GenericRestAdapter(HmsAdapter):
@@ -118,10 +119,13 @@ class GenericRestAdapter(HmsAdapter):
         phone_hash: str | None = None,
         mrn: str | None = None,
         abha_id: str | None = None,
+        phone: str | None = None,
     ) -> CanonicalPatient | None:
         path = self._m.get("patient_lookup_path", "/patients")
         param_name = self._m.get("patient_lookup_param", "mrn")
-        param_val = mrn or phone_hash or ""
+        # A real phone beats the hash: no vendor can match our join-space hash.
+        variants = phone_search_variants(phone) if phone else []
+        param_val = mrn or (variants[0] if variants else "") or phone_hash or ""
         resp = await self._client.get(
             f"{self._m['base_url']}{path}",
             headers=self._auth_headers(),

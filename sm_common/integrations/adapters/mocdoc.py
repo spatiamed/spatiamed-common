@@ -11,12 +11,20 @@ from uuid import UUID
 import httpx
 
 from sm_common.integrations.canonical_types import (
-    AdapterHealth, CancelResult, CanonicalAppointment, CanonicalDoctor,
-    CanonicalPatient, ExternalBooking, VisitCheckedIn,
-    VisitConsultationStarted, VisitFinalized, WriteBackResult,
+    AdapterHealth,
+    CancelResult,
+    CanonicalAppointment,
+    CanonicalDoctor,
+    CanonicalPatient,
+    ExternalBooking,
+    VisitCheckedIn,
+    VisitConsultationStarted,
+    VisitFinalized,
+    WriteBackResult,
 )
 from sm_common.integrations.exceptions import AuthError, ConflictError, TransientError
 from sm_common.integrations.hms_adapter import HmsAdapter
+from sm_common.phone import phone_search_variants
 
 
 class MocDocAdapter(HmsAdapter):
@@ -96,7 +104,9 @@ class MocDocAdapter(HmsAdapter):
         if cursor:
             params["modified_since"] = cursor
         resp = await self._client.get(
-            f"{self._base_url}/api/v1/appointments", headers=headers, params=params,
+            f"{self._base_url}/api/v1/appointments",
+            headers=headers,
+            params=params,
         )
         if resp.status_code in (401, 403):
             raise AuthError(f"MocDoc auth failed: {resp.status_code}")
@@ -109,17 +119,25 @@ class MocDocAdapter(HmsAdapter):
         return apts, new_cursor
 
     async def find_patient(
-        self, phone_hash: str | None = None,
-        mrn: str | None = None, abha_id: str | None = None,
+        self,
+        phone_hash: str | None = None,
+        mrn: str | None = None,
+        abha_id: str | None = None,
+        phone: str | None = None,
     ) -> CanonicalPatient | None:
         params: dict[str, str] = {}
-        if phone_hash:
-            params["phone_hash"] = phone_hash
+        if phone:
+            # Previously this sent phone_hash, a value MocDoc cannot match, so
+            # every phone lookup silently found nobody.
+            variants = phone_search_variants(phone)
+            if variants:
+                params["phone"] = variants[0]
         elif mrn:
             params["mrn"] = mrn
         resp = await self._client.get(
             f"{self._base_url}/api/v1/patients",
-            headers=self._auth_headers(), params=params,
+            headers=self._auth_headers(),
+            params=params,
         )
         if resp.status_code == 404:
             return None
@@ -131,14 +149,18 @@ class MocDocAdapter(HmsAdapter):
             return None
         p = results[0]
         return CanonicalPatient(
-            mrn=p.get("mrn", ""), abha_id=p.get("abhaId"),
-            phone_hash=phone_hash or "", name_token=p.get("nameToken", ""),
-            age=p.get("age"), gender=p.get("gender"),
+            mrn=p.get("mrn", ""),
+            abha_id=p.get("abhaId"),
+            phone_hash=phone_hash or "",
+            name_token=p.get("nameToken", ""),
+            age=p.get("age"),
+            gender=p.get("gender"),
         )
 
     async def fetch_doctor_roster(self, as_of_date: date) -> list[CanonicalDoctor]:
         resp = await self._client.get(
-            f"{self._base_url}/api/v1/doctors", headers=self._auth_headers(),
+            f"{self._base_url}/api/v1/doctors",
+            headers=self._auth_headers(),
         )
         if resp.status_code >= 500:
             raise TransientError(f"MocDoc error: {resp.status_code}")
@@ -178,20 +200,29 @@ class MocDocAdapter(HmsAdapter):
                 )
             except (KeyError, ValueError):
                 continue
-            bookings.append(ExternalBooking(
-                appointment_id=b.get("id", ""),
-                doctor_external_id=b.get("doctorId", ""),
-                slot_start=slot, status=b.get("status", ""), updated_at=updated,
-            ))
+            bookings.append(
+                ExternalBooking(
+                    appointment_id=b.get("id", ""),
+                    doctor_external_id=b.get("doctorId", ""),
+                    slot_start=slot,
+                    status=b.get("status", ""),
+                    updated_at=updated,
+                )
+            )
         return bookings
 
     async def write_back_idempotent(
-        self, booking_id: UUID, payload: dict, idempotency_key: str  # type: ignore[type-arg]
+        self,
+        booking_id: UUID,
+        payload: dict,
+        idempotency_key: str,  # type: ignore[type-arg]
     ) -> WriteBackResult:
         body_str = _json.dumps(payload, separators=(",", ":"))
         headers = {**self._auth_headers(body_str), "Idempotency-Key": idempotency_key}
         resp = await self._client.post(
-            f"{self._base_url}/api/v1/appointments", headers=headers, content=body_str,
+            f"{self._base_url}/api/v1/appointments",
+            headers=headers,
+            content=body_str,
         )
         if resp.status_code == 409:
             raise ConflictError(resp.json().get("error", "conflict"))
@@ -226,7 +257,8 @@ class MocDocAdapter(HmsAdapter):
         body_str = _json.dumps(payload, separators=(",", ":"))
         resp = await self._client.patch(
             f"{self._base_url}/api/v1/appointments/{event.appointment_id}/status",
-            headers=self._auth_headers(body_str), content=body_str,
+            headers=self._auth_headers(body_str),
+            content=body_str,
         )
         if resp.status_code >= 500:
             raise TransientError(f"MocDoc error: {resp.status_code}")
@@ -236,20 +268,27 @@ class MocDocAdapter(HmsAdapter):
         start = time.monotonic()
         try:
             resp = await self._client.get(
-                f"{self._base_url}/api/v1/health", headers=self._auth_headers(),
+                f"{self._base_url}/api/v1/health",
+                headers=self._auth_headers(),
             )
             latency_ms = int((time.monotonic() - start) * 1000)
             if resp.status_code == 200:
                 return AdapterHealth(
-                    healthy=True, last_success_at=datetime.now(timezone.utc),
-                    latency_ms=latency_ms, message="OK",
+                    healthy=True,
+                    last_success_at=datetime.now(timezone.utc),
+                    latency_ms=latency_ms,
+                    message="OK",
                 )
             return AdapterHealth(
-                healthy=False, last_success_at=None,
-                latency_ms=latency_ms, message=f"HTTP {resp.status_code}",
+                healthy=False,
+                last_success_at=None,
+                latency_ms=latency_ms,
+                message=f"HTTP {resp.status_code}",
             )
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             return AdapterHealth(
-                healthy=False, last_success_at=None,
-                latency_ms=None, message=f"connection error: {exc}",
+                healthy=False,
+                last_success_at=None,
+                latency_ms=None,
+                message=f"connection error: {exc}",
             )

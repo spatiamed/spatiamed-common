@@ -9,6 +9,7 @@ from sm_common.phone import (
     hash_phone_for_lookup,
     normalize_e164,
     normalize_phone,
+    phone_search_variants,
 )
 
 
@@ -175,3 +176,46 @@ class TestHashPhoneForLookup:
 
     def test_never_returns_the_input(self):
         assert hash_phone_for_lookup("9876543210", "s") != "9876543210"
+
+
+class TestPhoneSearchVariants:
+    """Variants for searching a phone against an EXTERNAL system.
+
+    Our own join space is hashed, so these never touch it. An HMS stores a
+    phone in whatever shape its data entry produced, and FHIR's `telecom` is a
+    TOKEN search parameter — exact match, not prefix — so a single normalized
+    form silently matches nobody. FHIR ORs comma-separated values, so we ask
+    for every shape the same number plausibly takes.
+    """
+
+    def test_an_indian_mobile_yields_every_common_stored_shape(self) -> None:
+        variants = phone_search_variants("9876543210")
+        assert "9876543210" in variants  # bare 10-digit
+        assert "+919876543210" in variants  # E.164 with plus
+        assert "919876543210" in variants  # country code, no plus
+        assert "09876543210" in variants  # leading-zero trunk form
+
+    def test_input_format_does_not_change_the_variant_set(self) -> None:
+        # However the kiosk or the HMS wrote it, we search the same shapes.
+        assert set(phone_search_variants("+91 98765 43210")) == set(
+            phone_search_variants("9876543210")
+        )
+        assert set(phone_search_variants("098765-43210")) == set(
+            phone_search_variants("9876543210")
+        )
+
+    def test_variants_are_unique_and_ordered_most_likely_first(self) -> None:
+        variants = phone_search_variants("9876543210")
+        assert len(variants) == len(set(variants)), "duplicates waste query width"
+        assert variants[0] == "+919876543210", "E.164 is the most common FHIR storage"
+
+    def test_a_non_indian_number_still_produces_usable_variants(self) -> None:
+        variants = phone_search_variants("+1 415 555 0123")
+        assert "+14155550123" in variants
+        assert "14155550123" in variants
+
+    def test_an_unparseable_number_yields_nothing_rather_than_raising(self) -> None:
+        # A lookup path must degrade, not explode: the caller skips the search.
+        assert phone_search_variants("not-a-number") == []
+        assert phone_search_variants("") == []
+        assert phone_search_variants(None) == []  # type: ignore[arg-type]
