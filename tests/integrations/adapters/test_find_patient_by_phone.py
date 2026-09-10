@@ -154,9 +154,12 @@ async def test_mocdoc_sends_a_real_phone_not_the_hash() -> None:
     )
     await adapter.find_patient(phone="9876543210", phone_hash="deadbeef")
 
-    if route.call_count:
-        sent = route.calls[0].request.url.params
-        assert "deadbeef" not in str(sent), "the join-space hash must never reach a vendor"
+    # Unconditional: a guarded assertion would pass vacuously if the vendor
+    # path ever changes and the route stops matching.
+    assert route.call_count == 1
+    sent = str(route.calls[0].request.url.params)
+    assert "deadbeef" not in sent, "the join-space hash must never reach a vendor"
+    assert "9876543210" in sent
 
 
 @respx.mock
