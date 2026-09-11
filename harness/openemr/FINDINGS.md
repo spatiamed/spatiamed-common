@@ -448,3 +448,47 @@ refuse to bind — this is the household-phone case. To demonstrate a
 narrow server-side rather than corroborating client-side. Not needed today:
 corroboration must happen on our side regardless, because not every vendor
 supports those parameters.
+
+## 6. What OpenEMR's FHIR API will actually let us write (2026-09-11)
+
+Probed live with `probe_write_scopes.py`, using a system-scoped
+`client_credentials` token (RS384 `private_key_jwt`).
+
+**System tokens CAN write FHIR.** `POST /Patient` returned **201** with
+`system/Patient.write`. This corrects an earlier reading of section 3: the
+"only for users role" restriction is on the **Standard** API, not the FHIR API.
+Backend credentials a hospital issues are therefore sufficient for FHIR writes —
+no named human user account is needed for that surface.
+
+**The CapabilityStatement lies about DocumentReference.** It advertises
+`create`, but `POST /DocumentReference` returns:
+
+    404 {"error":"An error occurred","message":"Route not found","code":0}
+
+The route is simply not implemented. **Never trust a CapabilityStatement — probe
+the write before promising it to a hospital.** This is the same class of error as
+assuming a normalized phone would match a token search: the server's own
+description of itself is not evidence.
+
+**Two undocumented requirements for FHIR Patient create**, both found by trial:
+
+- `name[].text` is what OpenEMR maps to fname/lname. A structurally valid
+  `name[{family, given}]` WITHOUT `text` is rejected with
+  "First Name must not be empty" — the structured fields are ignored.
+- `birthDate` is mandatory; omitting it fails validation.
+
+Clinical resources, all `read` + `search-type`, none writable:
+
+    AllergyIntolerance, Binary, CarePlan, Condition, DiagnosticReport,
+    Encounter, Immunization, Medication, MedicationRequest, Observation,
+    Procedure, ServiceRequest
+
+Writable anywhere in the FHIR surface: `DocumentReference` (advertised only —
+see above), `Organization`, `Patient`, `Practitioner`.
+
+Consequence for prescriptions: the document-attachment path does **not** exist
+on OpenEMR's FHIR API, and `MedicationRequest` is read-only, so structured Rx
+write is impossible here too. Any Rx-to-OpenEMR path must go through the
+Standard API's document endpoints (user-role) or a non-API route. This does not
+generalise — it is one vendor's surface, and the probe should be re-run per
+vendor.
