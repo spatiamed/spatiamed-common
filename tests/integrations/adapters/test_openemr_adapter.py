@@ -484,3 +484,59 @@ async def test_read_back_missing_start_key_is_vendor_rejected_naming_it(missing)
         await _adapter(r).write_back_idempotent(_write())
     # The row is in the HMS: a caller must not read this refusal as "not landed".
     assert info.value.landed is True
+
+
+# ─── FHIR read times are OpenEMR wall time, whatever the label says ─────────
+# OpenEMR's UtilsService::getLocalDateAsUTC takes the stored wall time
+# (pc_eventDate + pc_startTime) and labels it with PHP's CURRENT offset,
+# date('P') — it never converts. Measured on the hosted instance (PHP UTC,
+# gbl_time_zone unset): an appointment at 10:00 Asia/Kolkata is served as
+# "2026-09-24T10:00:00+00:00", which read as UTC is 15:30 IST — 5h30 late.
+
+
+def _fhir_bundle_handler(start: str, end: str | None = None):
+    appt = {
+        "resourceType": "Appointment",
+        "id": "uuid-1",
+        "status": "booked",
+        "start": start,
+        "meta": {"lastUpdated": "2026-09-23T22:01:52+00:00", "versionId": "1"},
+        "participant": [{"actor": {"reference": "Patient/pat-uuid"}}],
+    }
+    if end:
+        appt["end"] = end
+
+    def handler(request):
+        return httpx.Response(
+            200, json={"resourceType": "Bundle", "type": "searchset", "entry": [{"resource": appt}]}
+        )
+
+    return handler
+
+
+IST_10AM = datetime(2026, 9, 24, 4, 30, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "served",
+    [
+        "2026-09-24T10:00:00+00:00",  # PHP in UTC (the hosted instance, measured)
+        "2026-09-24T10:00:00+05:30",  # gbl_time_zone correctly set to Asia/Kolkata
+        "2026-09-24T10:00:00Z",
+        "2026-09-24T10:00:00",  # no label at all
+    ],
+)
+async def test_ingest_reads_fhir_start_as_wall_time_in_the_integration_zone(served):
+    appts, _ = await _adapter(_fhir_bundle_handler(served)).list_appointments_modified_since(
+        "", date(2026, 12, 31)
+    )
+    assert appts[0].slot_start == IST_10AM
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_reads_fhir_start_as_wall_time_too():
+    bookings = await _adapter(
+        _fhir_bundle_handler("2026-09-24T10:00:00+00:00")
+    ).fetch_recent_bookings(UUID(int=1), lookback_minutes=60)
+    assert bookings[0].slot_start == IST_10AM

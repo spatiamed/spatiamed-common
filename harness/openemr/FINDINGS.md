@@ -652,6 +652,22 @@ string as UTC, so it will read OpenEMR appointments off by the UTC offset.
 That predates this work and is not fixed here; it needs its own ticket before
 OpenEMR ingest is trusted for times.
 
+**Fixed in v0.12.1 (2026-09-24).** Root cause, from OpenEMR 8.3.0 source:
+`FhirAppointmentService` builds `start`/`end` with
+`UtilsService::getLocalDateAsUTC(pc_eventDate + ' ' + pc_startTime)`, which is
+`new DateTime($wall, new DateTimeZone(date('P')))->format(DATE_ATOM)`. It attaches
+PHP's *current* offset to the stored wall time and never converts. The digits
+are therefore always the clinic's wall time, and only the label varies:
+`+00:00` with `gbl_time_zone` unset (measured on the Railway-hosted demo: PHP
+`UTC`, event stored `2026-09-24 10:00:00`, served `2026-09-24T10:00:00+00:00`),
+and the right offset only when the global is set. Even then it is wrong across
+a DST change, because it is today's offset, not that date's.
+`OpenEmrAdapter._appointment_instant` now reads the digits in the integration's
+configured timezone and ignores the label. The same appointment imports as
+`2026-09-24T10:00:00+05:30`, confirmed live against the hosted instance.
+`meta.lastUpdated` (built from `pc_time` the same way) is left alone: it is only a
+cursor handed back to OpenEMR, which applies the same labelling on its side.
+
 `practitioner_ref=None` is still not exercised live.
 
 ```
