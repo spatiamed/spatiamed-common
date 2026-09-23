@@ -1,8 +1,9 @@
 """Shared auth-header construction for HMS adapters.
 
-Supports api_key, hmac, bearer, oauth2_client_credentials, and private_key_jwt
-(SMART Backend Services). OAuth tokens are cached on the passed cfg dict under
-the private key "_oauth_cache" with a monotonic expiry.
+Supports api_key, hmac, bearer, oauth2_client_credentials, private_key_jwt
+(SMART Backend Services), and oauth2_password (OpenEMR Standard API). OAuth
+tokens are cached on the passed cfg dict under the private key "_oauth_cache"
+with a monotonic expiry.
 
 private_key_jwt is what FHIR servers require before they will issue system-level
 scopes: the client proves itself with an RS384-signed assertion validated against
@@ -50,6 +51,9 @@ async def build_auth_headers(
         return {**base, "Authorization": f"Bearer {token}"}
     if scheme == "private_key_jwt":
         token = await _private_key_jwt_token(client, cfg)
+        return {**base, "Authorization": f"Bearer {token}"}
+    if scheme == "oauth2_password":
+        token = await _password_grant_token(client, cfg)
         return {**base, "Authorization": f"Bearer {token}"}
     return base
 
@@ -116,6 +120,43 @@ async def _private_key_jwt_token(client: httpx.AsyncClient, cfg: dict) -> str:
         data["scope"] = cfg["scopes"]
 
     resp = await client.post(cfg["token_url"], data=data)
+    resp.raise_for_status()
+    payload = resp.json()
+    token = payload["access_token"]
+    cfg["_oauth_cache"] = {"token": token, "expires_at": now + int(payload.get("expires_in", 3600))}
+    return str(token)
+
+
+def invalidate_token(cfg: dict) -> None:
+    """Forget a cached token — call after the vendor answers 401 with it."""
+    cfg.pop("_oauth_cache", None)
+
+
+async def _password_grant_token(client: httpx.AsyncClient, cfg: dict) -> str:
+    """OAuth2 password grant with OpenEMR's user_role parameter.
+
+    OpenEMR-specific: its Standard API (the only place appointments can be
+    created) refuses system tokens — "the api route is only for users role".
+    The password grant is OFF by default in OpenEMR (oauth_password_grant);
+    the hospital must enable it and issue a dedicated service account.
+    """
+    cache = cfg.get("_oauth_cache")
+    now = time.monotonic()
+    if cache and cache["expires_at"] > now + 30:
+        return str(cache["token"])
+    data = {
+        "grant_type": "password",
+        "client_id": cfg.get("client_id", ""),
+        "client_secret": cfg.get("client_secret", ""),
+        "username": cfg.get("username", ""),
+        "password": cfg.get("password", ""),
+        "user_role": cfg.get("user_role", "users"),
+    }
+    if cfg.get("scopes"):
+        data["scope"] = cfg["scopes"]
+    resp = await client.post(cfg["token_url"], data=data)
+    if resp.status_code in (400, 401, 403):
+        raise AuthError(f"password grant refused: HTTP {resp.status_code} {resp.text[:200]}")
     resp.raise_for_status()
     payload = resp.json()
     token = payload["access_token"]
