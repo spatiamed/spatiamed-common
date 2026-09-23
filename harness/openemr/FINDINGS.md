@@ -564,7 +564,7 @@ confirmed by reading the service source in the running container.
 
 `harness/openemr/verify_write_back.py`, run against the same harness (OpenEMR
 8.3.0, container uptimes unchanged from Task 5/6 — not torn down). No scope
-change was needed: `setup_client.py`'s `SCOPES` (§ the script) already
+change was needed: `setup_client.py`'s `SCOPES` already
 included `system/Appointment.read`.
 
 **Bug found and fixed (real defect, not a harness quirk to work around).**
@@ -619,7 +619,8 @@ booked 2026-09-30 10:00 Asia/Kolkata / 04:30 UTC, 7 days out):
 0 failure(s)
 ```
 
-Every check `[PASS]`, `0 failure(s)`, exit code 0. This is the live proof
+That run printed 12 checks, not the "11/11" quoted elsewhere at the time (see
+§12.1 for the current count). Every check `[PASS]`, `0 failure(s)`, exit code 0. This is the live proof
 that `OpenEmrAdapter` creates a real FHIR `Appointment` through the Standard
 API, converts our UTC time to the integration's configured IANA timezone
 correctly, is retry-safe (a second `write_back_idempotent` call for the same
@@ -629,3 +630,51 @@ through the adapter's own return value and directly against
 the same `hms_booking_id`, cancels cleanly, and that a plain `FhirR4Adapter`
 (no OpenEMR Standard-API override) correctly refuses to write against this
 vendor.
+
+### 12.1 Re-run after the final fix wave (measured 2026-09-24)
+
+The script now counts its own checks and asserts more of spec §4:
+
+- the FHIR read-back names the right `Patient/` and `Practitioner/`, and its
+  start is our local time; the stored row carries the practitioner's `pc_aid`
+  (read from `openemr_postcalendar_events`);
+- **moved booking**: the same `booking_id` resent two hours later returns the
+  appointment written at the original time (`created=False`,
+  `hms_start` = the original start) and the table still holds one row. Before
+  the widened marker scan this created a second appointment.
+
+**Vendor quirk found:** OpenEMR 8.3.0 serves FHIR `Appointment.start` as the
+server-local wall time labelled `+00:00`: an appointment at 10:00
+Asia/Kolkata reads back as `2026-09-30T10:00:00+00:00`, not `04:30:00+00:00`
+or `10:00:00+05:30`. The write path is unaffected: it reads times from the
+Standard API through the configured zone. The FHIR **ingest** path parses that
+string as UTC, so it will read OpenEMR appointments off by the UTC offset.
+That predates this work and is not fixed here; it needs its own ticket before
+OpenEMR ingest is trusted for times.
+
+`practitioner_ref=None` is still not exercised live.
+
+```
+[PASS] match fixture: plain-success patient found exactly once n=1
+[PASS] household phone returns both members n=2
+[PASS] find_patient refuses the household 
+[PASS] create lands WriteBackResult(status='SUCCESS', hms_booking_id='a2d141d4-1242-4c1a-8d33-7196d6efc8b2', error_detail=None, hms_start=datetime.datetime(2026, 9, 30, 10, 0, tzinfo=zoneinfo.ZoneInfo(key='Asia/Kolkata')), created=True)
+[PASS] HMS time equals our time (tz conversion) 2026-09-30 10:00:00+05:30 vs 2026-09-30 04:30:00+00:00
+[PASS] hms_booking_id is the FHIR Appointment.id HTTP 200
+[PASS] FHIR read-back: right patient refs=['Location/a2b02348-5dee-4ca1-9919-76354d0ef415', 'Patient/a2b7b424-8efb-4330-a270-b043c41faf4f', 'Practitioner/a2b02348-00e5-4c08-916a-c8daacbd1c83']
+[PASS] FHIR read-back: right practitioner 
+[PASS] FHIR read-back: local time equals ours fhir=2026-09-30T10:00:00+00:00 ours_local=2026-09-30T10:00:00+05:30
+[PASS] row carries the practitioner's pc_aid pc_aid=1 expected=1
+[PASS] retry finds, does not duplicate 
+[PASS] exactly one row in OpenEMR count=1
+[PASS] moved booking returns the original appointment created=False hms_start=2026-09-30 10:00:00+05:30
+[PASS] moved booking: still one row in OpenEMR count=1
+[PASS] ingest sees our write under the same id 
+[PASS] cancel CancelResult(status='SUCCESS', error_detail=None)
+[PASS] cancelled row gone 
+[PASS] plain FHIR write on OpenEMR is WriteNotSupported 
+
+18 checks, 0 failure(s)
+```
+
+**18 checks, 0 failures**, exit code 0.

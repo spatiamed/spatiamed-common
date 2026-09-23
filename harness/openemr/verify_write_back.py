@@ -13,6 +13,7 @@ import subprocess
 import sys
 import uuid
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -25,15 +26,17 @@ HERE = pathlib.Path(__file__).parent
 BASE = "https://localhost:9300"
 FHIR = f"{BASE}/apis/default/fhir"
 failures: list[str] = []
+checks: list[str] = []
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
     print(f"[{'PASS' if ok else 'FAIL'}] {name} {detail}")
+    checks.append(name)
     if not ok:
         failures.append(name)
 
 
-def db_count(pc_uuid_hex_marker: str) -> int:
+def db_query(sql: str) -> str:
     out = subprocess.run(
         [
             "docker",
@@ -47,15 +50,30 @@ def db_count(pc_uuid_hex_marker: str) -> int:
             "openemr",
             "-N",
             "-e",
-            "SELECT COUNT(*) FROM openemr_postcalendar_events WHERE pc_hometext LIKE "
-            f"'%{pc_uuid_hex_marker}%';",
+            sql,
         ],
         cwd=HERE,
         check=True,
         capture_output=True,
         text=True,
     )
-    return int(out.stdout.strip())
+    return out.stdout.strip()
+
+
+def db_count(pc_uuid_hex_marker: str) -> int:
+    return int(
+        db_query(
+            "SELECT COUNT(*) FROM openemr_postcalendar_events WHERE pc_hometext LIKE "
+            f"'%{pc_uuid_hex_marker}%';"
+        )
+    )
+
+
+def db_aid(pc_uuid_hex_marker: str) -> str:
+    return db_query(
+        "SELECT pc_aid FROM openemr_postcalendar_events WHERE pc_hometext LIKE "
+        f"'%{pc_uuid_hex_marker}%';"
+    )
 
 
 async def main() -> int:
@@ -128,6 +146,30 @@ async def main() -> int:
         fhir.status_code == 200,
         f"HTTP {fhir.status_code}",
     )
+    body = fhir.json() if fhir.status_code == 200 else {}
+    refs = {p.get("actor", {}).get("reference") for p in body.get("participant", [])}
+    check(
+        "FHIR read-back: right patient",
+        f"Patient/{patients[0].resource_id}" in refs,
+        f"refs={sorted(r for r in refs if r)}",
+    )
+    check("FHIR read-back: right practitioner", f"Practitioner/{prac}" in refs)
+    # OpenEMR 8.3.0 emits FHIR Appointment.start as the server-local wall time
+    # labelled +00:00 (FINDINGS §12), so compare wall clocks: the FHIR start's
+    # date/time must equal our start converted into the integration's zone.
+    fhir_start = body.get("start") or ""
+    local_start = start.astimezone(ZoneInfo("Asia/Kolkata"))
+    check(
+        "FHIR read-back: local time equals ours",
+        fhir_start[:16] == local_start.strftime("%Y-%m-%dT%H:%M"),
+        f"fhir={fhir_start} ours_local={local_start.isoformat()}",
+    )
+    expected_aid = oe._aid_cache.get(prac)
+    check(
+        "row carries the practitioner's pc_aid",
+        bool(expected_aid) and db_aid(str(bid)) == expected_aid,
+        f"pc_aid={db_aid(str(bid))} expected={expected_aid}",
+    )
 
     r2 = await oe.write_back_idempotent(w)
     check(
@@ -135,6 +177,29 @@ async def main() -> int:
         (not r2.created) and r2.hms_booking_id == r1.hms_booking_id,
     )
     check("exactly one row in OpenEMR", db_count(str(bid)) == 1, f"count={db_count(str(bid))}")
+
+    # Staff moved the booking: the same booking_id resent at another slot must
+    # come back as the appointment we already wrote (its own time), never a
+    # second one.
+    moved = AppointmentWrite(
+        bid,
+        w.patient_ref,
+        prac,
+        start + timedelta(hours=2),
+        start + timedelta(hours=2, minutes=15),
+        "Fever",
+    )
+    r3 = await oe.write_back_idempotent(moved)
+    check(
+        "moved booking returns the original appointment",
+        (not r3.created) and r3.hms_booking_id == r1.hms_booking_id and r3.hms_start == start,
+        f"created={r3.created} hms_start={r3.hms_start}",
+    )
+    check(
+        "moved booking: still one row in OpenEMR",
+        db_count(str(bid)) == 1,
+        f"count={db_count(str(bid))}",
+    )
 
     appts, _ = await oe.list_appointments_modified_since("", (start + timedelta(days=1)).date())
     ids = {a.appointment_id for a in appts}
@@ -152,7 +217,7 @@ async def main() -> int:
     except WriteNotSupported:
         check("plain FHIR write on OpenEMR is WriteNotSupported", True)
 
-    print(f"\n{len(failures)} failure(s)")
+    print(f"\n{len(checks)} checks, {len(failures)} failure(s)")
     return 1 if failures else 0
 
 
