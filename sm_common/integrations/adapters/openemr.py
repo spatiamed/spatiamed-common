@@ -13,6 +13,8 @@ Measured against OpenEMR 8.3.0 (harness/openemr/FINDINGS.md):
 - pc_hometext (our idempotency marker) is NOT in the per-patient list, only in
   the single-appointment GET — so the guard narrows by date/time/provider,
   then reads each candidate.
+- The per-patient appointment list answers a bare 404 (not 200 + []) for a
+  patient with zero appointments; `_list_appointments` treats that as empty.
 """
 
 from __future__ import annotations
@@ -170,6 +172,22 @@ class OpenEmrAdapter(FhirR4Adapter):
             self._aid_cache[practitioner_ref] = str(aid)
         return self._aid_cache[practitioner_ref]
 
+    async def _list_appointments(self, pid: str) -> list[dict]:  # type: ignore[type-arg]
+        # RestControllerHelper::responseHandler (OpenEMR core) treats a PHP
+        # empty-array service result as falsy and answers with a bare 404
+        # instead of 200 + [] — confirmed against the harness (FINDINGS.md
+        # §12: a patient with zero appointments). A patient with no
+        # appointments is not a vendor rejection.
+        resp = await self._std_request("GET", f"/patient/{pid}/appointment")
+        if resp.status_code == 404:
+            return []
+        rows = self._data(resp) or []
+        if not isinstance(rows, list):
+            raise VendorRejected(
+                f"OpenEMR appointment list returned an unexpected shape (HTTP {resp.status_code})"
+            )
+        return rows
+
     async def _get_appt(self, eid: str) -> dict:  # type: ignore[type-arg]
         resp = await self._std_request("GET", f"/appointment/{eid}")
         row = self._row(self._data(resp))
@@ -213,12 +231,7 @@ class OpenEmrAdapter(FhirR4Adapter):
     async def _find_marked(
         self, pid: str, day: str, hhmm: str, aid: str | None, marker: str
     ) -> dict | None:  # type: ignore[type-arg]
-        resp = await self._std_request("GET", f"/patient/{pid}/appointment")
-        rows = self._data(resp) or []
-        if not isinstance(rows, list):
-            raise VendorRejected(
-                f"OpenEMR appointment list returned an unexpected shape (HTTP {resp.status_code})"
-            )
+        rows = await self._list_appointments(pid)
         same_slot = [
             r
             for r in rows
@@ -292,12 +305,7 @@ class OpenEmrAdapter(FhirR4Adapter):
             # on the Standard API, and no reason to query it.
             return CancelResult(status="NOT_FOUND")
         pid = await self._pid(patient_ref)
-        list_resp = await self._std_request("GET", f"/patient/{pid}/appointment")
-        rows = self._data(list_resp) or []
-        if not isinstance(rows, list):
-            raise VendorRejected(
-                f"OpenEMR appointment list returned an unexpected shape (HTTP {list_resp.status_code})"
-            )
+        rows = await self._list_appointments(pid)
         match = [r for r in rows if str(r.get("pc_uuid")) == hms_booking_id]
         if not match:
             return CancelResult(status="NOT_FOUND")

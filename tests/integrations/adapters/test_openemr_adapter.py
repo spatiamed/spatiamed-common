@@ -316,3 +316,42 @@ async def test_cancel_lookup_403_raises_auth_error_not_transient():
     r = Router(fhir_status=403)
     with pytest.raises(AuthError):
         await _adapter(r).cancel("some-uuid", "patient requested")
+
+
+@pytest.mark.asyncio
+async def test_appointment_list_404_means_zero_appointments_not_an_error():
+    """OpenEMR's Standard API returns a bare 404 (empty body), not 200 + [],
+    when a patient has no appointments — RestControllerHelper::responseHandler
+    treats a PHP empty-array service result as falsy and returns
+    Response('', 404). Confirmed against the running harness (FINDINGS.md
+    §12: patient pid=7 with zero appointments)."""
+
+    class R(Router):
+        def __call__(self, request):
+            path, m = request.url.path, request.method
+            if m == "GET" and path.endswith("/appointment") and "/patient/" in path:
+                return httpx.Response(404)
+            return super().__call__(request)
+
+    r = R(listing_rows=[])
+    res = await _adapter(r).write_back_idempotent(_write())
+    assert res.created is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_appointment_list_404_is_not_found():
+    fhir_appt = {
+        "resourceType": "Appointment",
+        "participant": [{"actor": {"reference": "Patient/pat-uuid"}}],
+    }
+
+    class R(Router):
+        def __call__(self, request):
+            path, m = request.url.path, request.method
+            if m == "GET" and path.endswith("/appointment") and "/patient/" in path:
+                return httpx.Response(404)
+            return super().__call__(request)
+
+    r = R(fhir_appointment=fhir_appt)
+    res = await _adapter(r).cancel("uuid-not-present", "patient requested")
+    assert res.status == "NOT_FOUND"

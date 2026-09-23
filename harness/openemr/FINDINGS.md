@@ -559,3 +559,73 @@ confirmed by reading the service source in the running container.
    provided, but does not exist"}}` — a per-field validation map keyed by the
    field name, not a list of error strings. A caller must treat HTTP 200 with
    this shape as a validation failure, not success.
+
+## 12. Live write-back proof (measured 2026-09-23)
+
+`harness/openemr/verify_write_back.py`, run against the same harness (OpenEMR
+8.3.0, container uptimes unchanged from Task 5/6 — not torn down). No scope
+change was needed: `setup_client.py`'s `SCOPES` (§ the script) already
+included `system/Appointment.read`.
+
+**Bug found and fixed (real defect, not a harness quirk to work around).**
+The first run FAILed at the very first `write_back_idempotent` call:
+`VendorRejected: OpenEMR Standard API HTTP 404` from `_find_marked`, for
+patient pid 7 (`9000000101`, zero prior appointments). Confirmed directly —
+
+```
+GET /apis/default/api/patient/7/appointment → HTTP 404, body '' (text/html)
+```
+
+— then confirmed the root cause by reading OpenEMR's own source inside the
+running container: `AppointmentRestController::getAllForPatient()` passes the
+service result straight to `RestControllerHelper::responseHandler()`, which
+does `if ($serviceResult) { …200… } else { …404, empty body… }`
+(`src/RestControllers/RestControllerHelper.php:156-169`). `getAppointmentsForPatient()`
+returns a plain PHP array; a **PHP empty array is falsy**, so a patient with
+zero appointments gets a bare `404` with no body — not `200` + `[]` as every
+existing fixture and unit test (`Router(listing_rows=[])` returning `200`)
+assumed. `_data()` treated any 4xx as `VendorRejected`, so the very first
+write for a patient with no appointment history failed before it ever
+reached the `POST`.
+
+**Fix**: `OpenEmrAdapter._list_appointments(pid)` (new, shared by
+`_find_marked` and `cancel`) now treats a `404` from
+`GET /patient/{pid}/appointment` as an empty list, not an error. Reproduced
+first as two failing unit tests
+(`test_appointment_list_404_means_zero_appointments_not_an_error`,
+`test_cancel_appointment_list_404_is_not_found` in
+`tests/integrations/adapters/test_openemr_adapter.py`), then fixed, then all
+16 adapter tests passed. This is scoped to the one list endpoint's documented
+empty-result shape — `_pid`/`_aid`/`_get_appt`'s own 404 handling (a genuinely
+missing patient/practitioner/appointment) is untouched.
+
+**Full output after the fix** (patient pid 7, phone `9000000101`; appointment
+booked 2026-09-30 10:00 Asia/Kolkata / 04:30 UTC, 7 days out):
+
+```
+[PASS] match fixture: plain-success patient found exactly once n=1
+[PASS] household phone returns both members n=2
+[PASS] find_patient refuses the household
+[PASS] create lands WriteBackResult(status='SUCCESS', hms_booking_id='a2d10969-9b1d-4131-96f0-ca7df507c61a', error_detail=None, hms_start=datetime.datetime(2026, 9, 30, 10, 0, tzinfo=zoneinfo.ZoneInfo(key='Asia/Kolkata')), created=True)
+[PASS] HMS time equals our time (tz conversion) 2026-09-30 10:00:00+05:30 vs 2026-09-30 04:30:00+00:00
+[PASS] hms_booking_id is the FHIR Appointment.id HTTP 200
+[PASS] retry finds, does not duplicate
+[PASS] exactly one row in OpenEMR count=1
+[PASS] ingest sees our write under the same id
+[PASS] cancel CancelResult(status='SUCCESS', error_detail=None)
+[PASS] cancelled row gone
+[PASS] plain FHIR write on OpenEMR is WriteNotSupported
+
+0 failure(s)
+```
+
+Every check `[PASS]`, `0 failure(s)`, exit code 0. This is the live proof
+that `OpenEmrAdapter` creates a real FHIR `Appointment` through the Standard
+API, converts our UTC time to the integration's configured IANA timezone
+correctly, is retry-safe (a second `write_back_idempotent` call for the same
+`booking_id` finds the marked row instead of double-booking — confirmed both
+through the adapter's own return value and directly against
+`openemr_postcalendar_events`), is visible to the FHIR-side ingest path under
+the same `hms_booking_id`, cancels cleanly, and that a plain `FhirR4Adapter`
+(no OpenEMR Standard-API override) correctly refuses to write against this
+vendor.
