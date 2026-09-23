@@ -492,3 +492,70 @@ write is impossible here too. Any Rx-to-OpenEMR path must go through the
 Standard API's document endpoints (user-role) or a non-API route. This does not
 generalise — it is one vendor's surface, and the probe should be re-run per
 vendor.
+
+## 11. Standard API response shapes (measured 2026-09-23)
+
+Captured with `capture_std_fixtures.py` against the same harness (OpenEMR
+8.3.0). Fixtures live at `tests/integrations/fixtures/openemr/*.json`, each
+`{"status": int, "body": <raw json>}`. This is measurement, not the spec —
+Task 6 must parse exactly these shapes.
+
+**DB reuse check before seeding.** This worktree's `docker compose up -d`
+reused the `openemr_openemr-db` / `openemr_openemr-sites` volumes from an
+earlier harness run. `SELECT pid,fname,lname,phone_cell FROM patient_data
+WHERE phone_cell LIKE '90000001%'` showed all six `seed_match_fixtures.py`
+patients (pids 7–13, phones `9000000101`–`9000000106`) already present, so
+`seed_match_fixtures.py` was **not** re-run — re-running it would have
+double-seeded the `9000000101` plain-success fixture and broken the
+"matched" case. `setup_client.py` and `seed_data.py` (updated with
+`user/practitioner.read`) were run as normal; `seed_data.py` added one more
+"Harness Patient" (pid 15, phone `9000000001`), which is the pre-existing,
+expected ambiguity fixture per §5.
+
+**Prerequisite the brief didn't anticipate:** `GET /api/practitioner` returned
+`{"data": []}` against a freshly-seeded harness. `PractitionerService::search()`
+(`src/Services/PractitionerService.php`) defaults `npi` to modifier `MISSING`
+with value `false` — i.e. it only lists `users` rows with a **non-empty
+`npi`** (and a non-empty `username`, which `admin` already has). The seeded
+`admin` user has `npi = NULL`, so it never appears as a practitioner until one
+is set. Fixed by `UPDATE users SET npi='1234567893' WHERE username='admin';`
+directly against the harness DB (same pattern `seed_data.py` already uses to
+flip `oauth_clients.is_enabled`) — no product code touched, no guessing:
+confirmed by reading the service source in the running container.
+
+1. **Envelope is per-endpoint, not uniform.** `patient_get` and
+   `practitioner_get` (single-record GETs) use the full
+   `{"validationErrors": [], "internalErrors": [], "data": {...}, "links": []}`
+   wrapper. `patient_appointments_list` and `appointment_get` return a **bare
+   JSON array** at the top level — no `data` key, no `validationErrors` at
+   all. `appointment_post` and `appointment_post_missing_hometext` return a
+   bare object (`{"id": ...}` or the validation map) with no envelope either.
+   `appointment_delete` returns `{"message": "record deleted"}`. Conclusion:
+   the OpenEMR-adapter parser cannot assume `body["data"]` exists — it must
+   branch per endpoint on whether the top-level JSON is a list, a
+   `{"data": ...}` envelope, or a bare object.
+2. **`appointment_post`**: the new id is under the top-level key **`id`**
+   (int) — `{"id": 146}` — **not** `pc_eid`, and there is **no `pc_uuid`** in
+   this response at all. The uuid only appears later, when the appointment is
+   read back (`pc_uuid` in `patient_appointments_list` / `appointment_get`
+   rows). A caller that needs the uuid immediately after POST must re-fetch.
+3. **`patient_appointments_list`** rows (bare array, see §1) carry: event id
+   `pc_eid` (int), appointment uuid `pc_uuid`, date `pc_eventDate`
+   (`YYYY-MM-DD`), start time `pc_startTime` (`HH:MM:SS`), provider as
+   `pc_aid` (string numeric id, `null` when unset) plus `pce_aid_uuid` /
+   `pce_aid_fname` / `pce_aid_lname` / `pce_aid_npi`. **`pc_hometext` is
+   confirmed ABSENT from every row** — matches spec §2. Patient identity
+   comes back as both `pid`/`puuid` on each row.
+4. **`appointment_get`** (`GET /api/appointment/:eid`): `body` is a
+   **one-element list**, not a dict — `[{...}]`, same shape as a
+   `patient_appointments_list` row plus the extra fields `pc_hometext` and
+   `pc_duration`. It DOES carry `pc_hometext` (full text, unredacted) and
+   `pc_uuid`. `pc_startTime` is `"10:00:00"` — confirmed `HH:MM:SS`.
+5. **`practitioner_get`**: the numeric `users.id` is the top-level `data.id`
+   field (int, `1` for the seeded admin/practitioner). `data.uuid` is the
+   separate string uuid used in the URL path.
+6. **`appointment_post_missing_hometext`**: status **200** (not 4xx) with
+   body `{"pc_hometext": {"Required::NON_EXISTENT_KEY": "pc_hometext must be
+   provided, but does not exist"}}` — a per-field validation map keyed by the
+   field name, not a list of error strings. A caller must treat HTTP 200 with
+   this shape as a validation failure, not success.
