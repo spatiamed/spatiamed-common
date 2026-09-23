@@ -175,3 +175,108 @@ async def test_generic_rest_prefers_the_real_phone_over_the_hash() -> None:
     sent = str(route.calls[0].request.url.params)
     assert "deadbeef" not in sent, "the join-space hash must never reach a vendor"
     assert "9876543210" in sent
+
+
+# ─── search_patients / find_patient ambiguity (httpx.MockTransport) ───────────
+#
+# Named _mock_adapter rather than _adapter: this file's own _adapter() (above)
+# is respx-based and zero-arg; a same-named handler-taking version would
+# silently shadow it at module scope and break every respx test above.
+
+
+def _mock_adapter(handler):  # type: ignore[no-untyped-def]
+    a = FhirR4Adapter(
+        base_url=BASE,
+        auth_scheme="bearer",
+        auth_cfg={"bearer_token": "t"},
+        hash_salt="salt",
+    )
+    a._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return a
+
+
+def _patient_bundle(entries: list) -> dict:  # type: ignore[type-arg]
+    return {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "entry": entries,
+    }
+
+
+def _patient_resource(
+    resource_id: str = "pat-1",
+    mrn: str = "pat-1",
+    abha_id: str | None = None,
+    name_text: str = "Test Patient",
+    gender: str = "male",
+    birth_date: str | None = "1990-06-15",
+    phone: str | None = "+919876543210",
+) -> dict:  # type: ignore[type-arg]
+    identifiers = [{"system": "urn:local:mrn", "value": mrn}]
+    if abha_id:
+        identifiers.append({"system": "https://ndhm.gov.in", "value": abha_id})
+    resource: dict = {  # type: ignore[type-arg]
+        "resourceType": "Patient",
+        "id": resource_id,
+        "identifier": identifiers,
+        "name": [{"text": name_text}],
+        "gender": gender,
+    }
+    if birth_date:
+        resource["birthDate"] = birth_date
+    if phone:
+        resource["telecom"] = [{"system": "phone", "value": phone}]
+    return resource
+
+
+async def test_search_patients_returns_every_candidate_with_resource_ids():
+    def handler(request):
+        return httpx.Response(
+            200,
+            json=_patient_bundle(
+                [
+                    {
+                        "resource": _patient_resource(
+                            resource_id="uuid-a", mrn="1", name_text="Harness Patient"
+                        )
+                    },
+                    {
+                        "resource": _patient_resource(
+                            resource_id="uuid-b", mrn="2", name_text="Harness Patient"
+                        )
+                    },
+                ]
+            ),
+        )
+
+    found = await _mock_adapter(handler).search_patients(phone="9000000001")
+    assert [p.resource_id for p in found] == ["uuid-a", "uuid-b"]
+    assert [p.mrn for p in found] == ["1", "2"]
+
+
+async def test_find_patient_refuses_to_pick_one_of_many():
+    """entries[0] bound a household's first member to whoever was at the kiosk."""
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            json=_patient_bundle(
+                [
+                    {"resource": _patient_resource(resource_id="uuid-a", mrn="1")},
+                    {"resource": _patient_resource(resource_id="uuid-b", mrn="2")},
+                ]
+            ),
+        )
+
+    assert await _mock_adapter(handler).find_patient(phone="9000000001") is None
+
+
+async def test_find_patient_single_match_still_returned():
+    def handler(request):
+        return httpx.Response(
+            200,
+            json=_patient_bundle([{"resource": _patient_resource(resource_id="uuid-a", mrn="1")}]),
+        )
+
+    p = await _mock_adapter(handler).find_patient(mrn="1")
+    assert p is not None and p.resource_id == "uuid-a"

@@ -266,7 +266,50 @@ class FhirR4Adapter(HmsAdapter):
             name_token=name_token,
             age=self._age_from_birthdate(resource.get("birthDate")),
             gender=self._gender_code(resource.get("gender")),  # type: ignore[arg-type]
+            resource_id=str(resource.get("id")) if resource.get("id") else None,
         )
+
+    def _patient_query(
+        self, phone_hash: str | None, mrn: str | None, abha_id: str | None, phone: str | None
+    ) -> dict | None:  # type: ignore[type-arg]
+        # Preference order: MRN, then ABHA, then phone. A phone is the weakest
+        # hint — one number commonly serves a whole household in India — so
+        # callers MUST corroborate the result against name, age and gender.
+        if mrn:
+            return {"identifier": mrn}
+        if abha_id:
+            return {"identifier": abha_id}
+        if phone:
+            # `telecom` is a TOKEN search parameter: it matches EXACTLY. Comma is
+            # OR in FHIR search, so ask for every shape the number plausibly takes.
+            variants = phone_search_variants(phone)
+            return {"telecom": ",".join(variants)} if variants else None
+        # A hash matches nothing on any vendor system; asking would disclose
+        # that we are looking for someone.
+        return None
+
+    async def search_patients(
+        self,
+        phone_hash: str | None = None,
+        mrn: str | None = None,
+        abha_id: str | None = None,
+        phone: str | None = None,
+    ) -> list[CanonicalPatient]:
+        params = self._patient_query(phone_hash, mrn, abha_id, phone)
+        if params is None:
+            return []
+        try:
+            headers = await self._headers()
+            resp = await self._client.get(f"{self._base}/Patient", params=params, headers=headers)
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.warning("FhirR4Adapter.search_patients HTTP error: %s", exc)
+            return []
+        return [
+            self._patient_to_canonical(e.get("resource", {}))
+            for e in resp.json().get("entry", [])
+            if e.get("resource", {}).get("resourceType", "Patient") == "Patient"
+        ]
 
     async def find_patient(
         self,
@@ -275,48 +318,13 @@ class FhirR4Adapter(HmsAdapter):
         abha_id: str | None = None,
         phone: str | None = None,
     ) -> CanonicalPatient | None:
-        # Preference order: MRN, then ABHA, then phone. The first two are
-        # identifiers. A phone is the weakest hint — one number commonly serves
-        # a whole household in India — so callers MUST corroborate the result
-        # against name, age and gender before treating it as identity.
-        if mrn:
-            params: dict = {"identifier": mrn}  # type: ignore[type-arg]
-        elif abha_id:
-            params = {"identifier": abha_id}
-        elif phone:
-            # `telecom` is a TOKEN search parameter, so it matches EXACTLY: a
-            # hospital storing "+919876543210" is not found by a query for
-            # "9876543210". Comma means OR in FHIR search, so we ask for every
-            # shape the number plausibly takes in one request.
-            variants = phone_search_variants(phone)
-            if not variants:
-                return None
-            params = {"telecom": ",".join(variants)}
-        elif phone_hash:
-            # A hash matches nothing on any vendor system. Asking would waste a
-            # round trip and disclose that we are looking for someone.
-            return None
-        else:
-            return None
-
-        try:
-            resp = await self._client.get(
-                f"{self._base}/Patient",
-                params=params,
-                headers=await self._headers(),
-            )
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            logger.warning("FhirR4Adapter.find_patient HTTP error: %s", exc)
-            return None
-
-        bundle = resp.json()
-        entries = bundle.get("entry", [])
-        if not entries:
-            return None
-
-        resource = entries[0].get("resource", {})
-        return self._patient_to_canonical(resource)
+        # Exactly one or nothing. Returning entries[0] of several silently
+        # picked one member of a household; callers that must see ambiguity
+        # use search_patients.
+        found = await self.search_patients(
+            phone_hash=phone_hash, mrn=mrn, abha_id=abha_id, phone=phone
+        )
+        return found[0] if len(found) == 1 else None
 
     async def get_patient(self, external_id: str) -> CanonicalPatient | None:
         if not external_id:
