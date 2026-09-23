@@ -27,11 +27,20 @@ from sm_common.integrations.canonical_types import (
     VisitFinalized,
     WriteBackResult,
 )
-from sm_common.integrations.exceptions import TransientError
+from sm_common.integrations.exceptions import (
+    ConflictError,
+    TransientError,
+    VendorRejected,
+    WriteNotSupported,
+)
 from sm_common.integrations.hms_adapter import HmsAdapter
 from sm_common.phone import hash_phone_for_lookup, phone_search_variants
 
 logger = logging.getLogger(__name__)
+
+# Our booking id travels on every Appointment we create, so a retry can find
+# the one it already wrote. Changing this string orphans every earlier write.
+BOOKING_IDENTIFIER_SYSTEM = "https://spatiamed.com/booking"
 
 
 def _ref_id(participant_actor_ref: str) -> str:
@@ -507,8 +516,113 @@ class FhirR4Adapter(HmsAdapter):
 
         return bookings
 
+    def _appointment_resource(self, write: AppointmentWrite) -> dict:  # type: ignore[type-arg]
+        participants = [
+            {"actor": {"reference": f"Patient/{write.patient_ref}"}, "status": "accepted"}
+        ]
+        if write.practitioner_ref:
+            participants.append(
+                {
+                    "actor": {"reference": f"Practitioner/{write.practitioner_ref}"},
+                    "status": "accepted",
+                }
+            )
+        resource: dict = {  # type: ignore[type-arg]
+            "resourceType": "Appointment",
+            "status": "booked",
+            "start": write.start.isoformat(),
+            "end": write.end.isoformat(),
+            "participant": participants,
+            "identifier": [{"system": BOOKING_IDENTIFIER_SYSTEM, "value": str(write.booking_id)}],
+        }
+        if write.reason:
+            resource["description"] = write.reason
+        return resource
+
+    def _result_from_resource(self, resource: dict, *, created: bool) -> WriteBackResult:  # type: ignore[type-arg]
+        appt_id = resource.get("id")
+        if resource.get("resourceType") != "Appointment" or not appt_id:
+            # FINDINGS §7.2: a 2xx is not evidence anything was created.
+            raise VendorRejected(
+                f"vendor response carries no Appointment id: {str(resource)[:200]}"
+            )
+        start = resource.get("start")
+        hms_start = datetime.fromisoformat(start.replace("Z", "+00:00")) if start else None
+        return WriteBackResult(
+            status="SUCCESS", hms_booking_id=str(appt_id), hms_start=hms_start, created=created
+        )
+
+    async def _find_our_appointment(self, token: str, headers: dict[str, str]) -> dict | None:  # type: ignore[type-arg]
+        """The appointment we already wrote for this booking, if the server can say.
+
+        A server that rejects `identifier` search (4xx) cannot answer; the
+        If-None-Exist header on the create is then our only guard.
+        """
+        try:
+            resp = await self._client.get(
+                f"{self._base}/Appointment", params={"identifier": token}, headers=headers
+            )
+        except httpx.HTTPError as exc:
+            raise TransientError(f"write_back pre-search HTTP error: {exc}") from exc
+        if resp.status_code >= 500:
+            raise TransientError(f"write_back pre-search HTTP {resp.status_code}")
+        if resp.status_code >= 400:
+            logger.warning(
+                "FhirR4Adapter: server refused identifier search (HTTP %s)", resp.status_code
+            )
+            return None
+        hits = [
+            e["resource"]
+            for e in resp.json().get("entry", [])
+            if e.get("resource", {}).get("resourceType") == "Appointment"
+        ]
+        if len(hits) > 1:
+            raise ConflictError(
+                f"{len(hits)} appointments already carry {token} — a human must reconcile"
+            )
+        return hits[0] if hits else None
+
     async def write_back_idempotent(self, write: AppointmentWrite) -> WriteBackResult:
-        raise NotImplementedError("rewritten in Task 3")
+        headers = await self._headers()
+        token = f"{BOOKING_IDENTIFIER_SYSTEM}|{write.booking_id}"
+        existing = await self._find_our_appointment(token, headers)
+        if existing is not None:
+            return self._result_from_resource(existing, created=False)
+
+        try:
+            resp = await self._client.post(
+                f"{self._base}/Appointment",
+                json=self._appointment_resource(write),
+                headers={**headers, "If-None-Exist": f"identifier={token}"},
+            )
+        except httpx.HTTPError as exc:
+            # Raised, not returned: WriteBackRouter only falls through on a raise.
+            raise TransientError(f"write_back_idempotent HTTP error: {exc}") from exc
+
+        if resp.status_code in (404, 405):
+            raise WriteNotSupported(
+                f"vendor has no Appointment create route (HTTP {resp.status_code})"
+            )
+        if resp.status_code == 409:
+            raise ConflictError(resp.text[:200])
+        if resp.status_code == 429 or resp.status_code >= 500:
+            raise TransientError(
+                f"write_back_idempotent HTTP {resp.status_code}: {resp.text[:200]}"
+            )
+        if resp.status_code >= 400:
+            raise VendorRejected(
+                f"write_back_idempotent HTTP {resp.status_code}: {resp.text[:200]}"
+            )
+        if resp.status_code == 200 and not resp.content:
+            # Conditional create matched an existing resource and the server
+            # returned no body — look it up rather than guess.
+            existing = await self._find_our_appointment(token, headers)
+            if existing is None:
+                raise TransientError(
+                    "conditional create returned 200 with no body and no match found"
+                )
+            return self._result_from_resource(existing, created=False)
+        return self._result_from_resource(resp.json(), created=resp.status_code == 201)
 
     async def cancel(self, hms_booking_id: str, reason: str) -> CancelResult:
         base_headers = await self._headers()
