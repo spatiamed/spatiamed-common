@@ -16,6 +16,7 @@ import httpx
 from sm_common.integrations.auth import build_auth_headers
 from sm_common.integrations.canonical_types import (
     AdapterHealth,
+    AppointmentWrite,
     CancelResult,
     CanonicalAppointment,
     CanonicalDoctor,
@@ -498,39 +499,8 @@ class FhirR4Adapter(HmsAdapter):
 
         return bookings
 
-    async def write_back_idempotent(
-        self,
-        booking_id: UUID,
-        payload: dict,  # type: ignore[type-arg]
-        idempotency_key: str,
-    ) -> WriteBackResult:
-        appt_id = payload.get("appointment_id") or str(booking_id)
-        base_headers = await self._headers()
-        headers = {**base_headers, "X-Idempotency-Key": idempotency_key}
-
-        try:
-            resp = await self._client.put(
-                f"{self._base}/Appointment/{appt_id}",
-                json=payload,
-                headers=headers,
-            )
-        except httpx.HTTPError as exc:
-            # Raised, not returned: WriteBackRouter only falls through to the
-            # next tier on a raised TransientError.
-            raise TransientError(f"write_back_idempotent HTTP error: {exc}") from exc
-
-        if resp.status_code in (200, 201):
-            body = resp.json()
-            return WriteBackResult(
-                status="SUCCESS",
-                hms_booking_id=str(body.get("id", appt_id)),
-            )
-        if resp.status_code == 409:
-            return WriteBackResult(status="CONFLICT", error_detail=resp.text)
-
-        # 4xx (other) or 5xx — escalate so the router can try the agent or
-        # manual tier instead of recording a terminal non-status.
-        raise TransientError(f"write_back_idempotent HTTP {resp.status_code}: {resp.text[:200]}")
+    async def write_back_idempotent(self, write: AppointmentWrite) -> WriteBackResult:
+        raise NotImplementedError("rewritten in Task 3")
 
     async def cancel(self, hms_booking_id: str, reason: str) -> CancelResult:
         base_headers = await self._headers()

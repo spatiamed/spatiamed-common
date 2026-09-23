@@ -1,5 +1,5 @@
 import hashlib
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -9,7 +9,10 @@ import httpx
 
 from sm_common.integrations.adapters.bahmni import BahmniAdapter
 from sm_common.integrations.canonical_types import (
-    AdapterHealth, VisitCheckedIn, WriteBackResult,
+    AdapterHealth,
+    AppointmentWrite,
+    VisitCheckedIn,
+    WriteBackResult,
 )
 from sm_common.integrations.exceptions import ConflictError, TransientError
 
@@ -17,6 +20,20 @@ from sm_common.integrations.exceptions import ConflictError, TransientError
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
 ATOM_XML = (FIXTURE_DIR / "bahmni_atomfeed.xml").read_text()
+
+
+def _write(**over) -> AppointmentWrite:
+    start = datetime(2026, 5, 8, 9, 0, tzinfo=timezone.utc)
+    base = dict(
+        booking_id=uuid4(),
+        patient_ref="P1",
+        practitioner_ref="DEPT-001",
+        start=start,
+        end=start + timedelta(minutes=15),
+        reason="Fever",
+    )
+    base.update(over)
+    return AppointmentWrite(**base)
 
 
 def make_adapter(auth: str = "api_key") -> BahmniAdapter:
@@ -33,7 +50,9 @@ class TestBahmniAdapterAtomFeed:
     @respx.mock
     async def test_list_appointments_returns_canonical(self):
         respx.get("https://bahmni.example.com/openmrs/ws/atomfeed/appointment/recent").mock(
-            return_value=httpx.Response(200, text=ATOM_XML, headers={"Content-Type": "application/atom+xml"})
+            return_value=httpx.Response(
+                200, text=ATOM_XML, headers={"Content-Type": "application/atom+xml"}
+            )
         )
         adapter = make_adapter()
         appointments, new_cursor = await adapter.list_appointments_modified_since(
@@ -63,27 +82,25 @@ class TestBahmniAdapterWriteBack:
     @respx.mock
     async def test_write_back_success(self):
         respx.post("https://bahmni.example.com/openmrs/ws/rest/v1/appointment").mock(
-            return_value=httpx.Response(200, json={"uuid": "HB-001", "appointmentNumber": "APT-002"})
+            return_value=httpx.Response(
+                200, json={"uuid": "HB-001", "appointmentNumber": "APT-002"}
+            )
         )
         adapter = make_adapter()
-        result = await adapter.write_back_idempotent(
-            booking_id=uuid4(),
-            payload={"patientUuid": "P1", "serviceUuid": "DEPT-001"},
-            idempotency_key="idem-001",
-        )
+        result = await adapter.write_back_idempotent(_write())
         assert result.status == "SUCCESS"
         assert result.hms_booking_id == "HB-001"
 
     @respx.mock
     async def test_write_back_conflict_raises(self):
         respx.post("https://bahmni.example.com/openmrs/ws/rest/v1/appointment").mock(
-            return_value=httpx.Response(400, json={
-                "errorMessages": [{"message": "slot already booked for this time"}]
-            })
+            return_value=httpx.Response(
+                400, json={"errorMessages": [{"message": "slot already booked for this time"}]}
+            )
         )
         adapter = make_adapter()
         with pytest.raises(ConflictError):
-            await adapter.write_back_idempotent(uuid4(), {}, "idem-002")
+            await adapter.write_back_idempotent(_write())
 
     @respx.mock
     async def test_write_back_500_raises_transient(self):
@@ -92,7 +109,7 @@ class TestBahmniAdapterWriteBack:
         )
         adapter = make_adapter()
         with pytest.raises(TransientError):
-            await adapter.write_back_idempotent(uuid4(), {}, "idem-003")
+            await adapter.write_back_idempotent(_write())
 
 
 class TestBahmniAdapterHealth:

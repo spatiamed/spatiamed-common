@@ -5,6 +5,7 @@ from uuid import UUID
 
 from sm_common.integrations.canonical_types import (
     AdapterHealth,
+    AppointmentWrite,
     CancelResult,
     CanonicalAppointment,
     CanonicalDoctor,
@@ -46,9 +47,7 @@ class CsvImportAdapter(HmsAdapter):
     ) -> list[ExternalBooking]:
         raise NotImplementedError("implement when pilot requires CSV import")
 
-    async def write_back_idempotent(
-        self, booking_id: UUID, payload: dict, idempotency_key: str
-    ) -> WriteBackResult:  # type: ignore[type-arg]
+    async def write_back_idempotent(self, write: AppointmentWrite) -> WriteBackResult:
         raise NotImplementedError("implement when pilot requires CSV import")
 
     async def cancel(self, hms_booking_id: str, reason: str) -> CancelResult:

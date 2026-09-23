@@ -349,95 +349,6 @@ async def test_fetch_recent_bookings_follows_next_link():
     assert len(bookings) == 2
 
 
-# ─── write_back_idempotent tests ─────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_write_back_success():
-    """200 response → WriteBackResult(status='SUCCESS')."""
-
-    def handler(req: httpx.Request) -> httpx.Response:
-        assert "/Appointment/" in req.url.path
-        assert req.method == "PUT"
-        return httpx.Response(200, json={"resourceType": "Appointment", "id": "appt-1"})
-
-    a = _adapter(handler)
-    booking_id = uuid4()
-    result = await a.write_back_idempotent(
-        booking_id=booking_id,
-        payload={"appointment_id": "appt-1", "resourceType": "Appointment"},
-        idempotency_key="idem-key-1",
-    )
-    assert result.status == "SUCCESS"
-
-
-@pytest.mark.asyncio
-async def test_write_back_created_maps_to_success():
-    """201 response → WriteBackResult(status='SUCCESS')."""
-
-    def handler(req: httpx.Request) -> httpx.Response:
-        return httpx.Response(201, json={"resourceType": "Appointment", "id": "appt-new"})
-
-    a = _adapter(handler)
-    result = await a.write_back_idempotent(
-        booking_id=uuid4(),
-        payload={"appointment_id": "appt-new", "resourceType": "Appointment"},
-        idempotency_key="idem-key-2",
-    )
-    assert result.status == "SUCCESS"
-    assert result.hms_booking_id == "appt-new"
-
-
-@pytest.mark.asyncio
-async def test_write_back_conflict_maps_to_conflict_status():
-    """409 response → WriteBackResult(status='CONFLICT')."""
-
-    def handler(req: httpx.Request) -> httpx.Response:
-        return httpx.Response(409, json={"issue": [{"diagnostics": "conflict"}]})
-
-    a = _adapter(handler)
-    result = await a.write_back_idempotent(
-        booking_id=uuid4(),
-        payload={"appointment_id": "appt-conflict"},
-        idempotency_key="idem-key-3",
-    )
-    assert result.status == "CONFLICT"
-
-
-@pytest.mark.asyncio
-async def test_write_back_idempotency_key_sent_as_header():
-    """write_back_idempotent sends X-Idempotency-Key header."""
-
-    def handler(req: httpx.Request) -> httpx.Response:
-        assert req.headers.get("X-Idempotency-Key") == "idem-key-5"
-        return httpx.Response(200, json={"resourceType": "Appointment", "id": "appt-1"})
-
-    a = _adapter(handler)
-    await a.write_back_idempotent(
-        booking_id=uuid4(),
-        payload={"appointment_id": "appt-1"},
-        idempotency_key="idem-key-5",
-    )
-
-
-@pytest.mark.asyncio
-async def test_write_back_uses_booking_id_when_no_appointment_id_in_payload():
-    """write_back_idempotent falls back to booking_id when payload has no appointment_id."""
-    booking_id = UUID("12345678-1234-5678-1234-567812345678")
-
-    def handler(req: httpx.Request) -> httpx.Response:
-        assert str(booking_id) in req.url.path
-        return httpx.Response(200, json={"resourceType": "Appointment", "id": str(booking_id)})
-
-    a = _adapter(handler)
-    result = await a.write_back_idempotent(
-        booking_id=booking_id,
-        payload={"resourceType": "Appointment"},
-        idempotency_key="idem-key-6",
-    )
-    assert result.status == "SUCCESS"
-
-
 # ─── cancel tests ────────────────────────────────────────────────────────────
 
 
@@ -564,27 +475,6 @@ async def test_find_patient_hashes_the_telecom_phone():
 
 
 # ─── outbound failures must escalate, not be absorbed ─────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_write_back_server_error_raises_so_the_router_falls_through():
-    """WriteBackRouter falls through tiers on a RAISED TransientError.
-
-    Returning WriteBackResult(status="TRANSIENT_ERROR") instead made the router
-    treat the outage as a terminal outcome and return a status outside its own
-    documented set, so a FHIR vendor outage never reached the agent or manual
-    tier. GenericRestAdapter already raises; this makes the two agree.
-    """
-
-    def handler(req: httpx.Request) -> httpx.Response:
-        return httpx.Response(500, text="Internal Server Error")
-
-    with pytest.raises(TransientError):
-        await _adapter(handler).write_back_idempotent(
-            booking_id=uuid4(),
-            payload={"appointment_id": "appt-x"},
-            idempotency_key="idem-key-4",
-        )
 
 
 @pytest.mark.asyncio

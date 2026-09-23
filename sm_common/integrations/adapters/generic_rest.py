@@ -12,6 +12,7 @@ import httpx
 
 from sm_common.integrations.canonical_types import (
     AdapterHealth,
+    AppointmentWrite,
     CancelResult,
     CanonicalAppointment,
     CanonicalDoctor,
@@ -24,6 +25,7 @@ from sm_common.integrations.canonical_types import (
 )
 from sm_common.integrations.exceptions import AuthError, ConflictError, TransientError
 from sm_common.integrations.hms_adapter import HmsAdapter
+from sm_common.integrations.legacy_payload import legacy_payload
 from sm_common.phone import phone_search_variants
 
 
@@ -212,12 +214,9 @@ class GenericRestAdapter(HmsAdapter):
             )
         return bookings
 
-    async def write_back_idempotent(
-        self,
-        booking_id: UUID,
-        payload: dict,
-        idempotency_key: str,  # type: ignore[type-arg]
-    ) -> WriteBackResult:
+    async def write_back_idempotent(self, write: AppointmentWrite) -> WriteBackResult:
+        payload = legacy_payload(write)
+        idempotency_key = str(write.booking_id)
         idem_field = self._m.get("idempotency_field", "idempotencyKey")
         body = {**payload, idem_field: idempotency_key}
         body_str = _json.dumps(body, separators=(",", ":"))

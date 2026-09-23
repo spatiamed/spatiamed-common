@@ -6,6 +6,7 @@ from uuid import UUID
 
 from sm_common.integrations.canonical_types import (
     AdapterHealth,
+    AppointmentWrite,
     CancelResult,
     CanonicalAppointment,
     CanonicalDoctor,
@@ -49,6 +50,26 @@ class HmsAdapter(ABC):
         """
         return None
 
+    async def search_patients(
+        self,
+        phone_hash: str | None = None,
+        mrn: str | None = None,
+        abha_id: str | None = None,
+        phone: str | None = None,
+    ) -> list[CanonicalPatient]:
+        """Every candidate the HMS returns. Matching needs ALL of them: one
+        phone commonly serves a household, and ambiguity can only be seen by a
+        caller that sees every hit.
+
+        Default for adapters with no list-returning search: wraps
+        ``find_patient``. Such an adapter cannot express ambiguity — kiosk
+        matching is only as safe as the adapter's own search.
+        """
+        found = await self.find_patient(
+            phone_hash=phone_hash, mrn=mrn, abha_id=abha_id, phone=phone
+        )
+        return [found] if found is not None else []
+
     @abstractmethod
     async def list_appointments_modified_since(
         self,
@@ -72,13 +93,12 @@ class HmsAdapter(ABC):
     # ─── Outbound (QueueCare → HMS) ──────────────────────────────────────────
 
     @abstractmethod
-    async def write_back_idempotent(
-        self,
-        booking_id: UUID,
-        payload: dict,  # type: ignore[type-arg]
-        idempotency_key: str,
-    ) -> WriteBackResult:
-        """Write a booking to HMS. Must be idempotent on idempotency_key."""
+    async def write_back_idempotent(self, write: AppointmentWrite) -> WriteBackResult:
+        """Write a booking to the HMS. Idempotent on ``write.booking_id``.
+
+        Raises ConflictError (slot taken / duplicate found), TransientError
+        (retry), AuthError, WriteNotSupported or VendorRejected (terminal).
+        """
 
     @abstractmethod
     async def cancel(self, hms_booking_id: str, reason: str) -> CancelResult:

@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -6,7 +6,22 @@ import respx
 import httpx
 
 from sm_common.integrations.adapters.generic_rest import GenericRestAdapter
+from sm_common.integrations.canonical_types import AppointmentWrite
 from sm_common.integrations.exceptions import ConflictError, TransientError
+
+
+def _write(**over) -> AppointmentWrite:
+    start = datetime(2026, 5, 8, 9, 0, tzinfo=timezone.utc)
+    base = dict(
+        booking_id=uuid4(),
+        patient_ref="P1",
+        practitioner_ref="D1",
+        start=start,
+        end=start + timedelta(minutes=15),
+        reason="Fever",
+    )
+    base.update(over)
+    return AppointmentWrite(**base)
 
 
 MEDIXCEL_MAPPING = {
@@ -85,7 +100,7 @@ class TestGenericRestAdapterFieldMapping:
         )
         adapter = GenericRestAdapter(MEDIXCEL_MAPPING)
         with pytest.raises(ConflictError):
-            await adapter.write_back_idempotent(uuid4(), {}, "idem-001")
+            await adapter.write_back_idempotent(_write())
 
     @respx.mock
     async def test_500_raises_transient(self):
@@ -115,4 +130,4 @@ async def test_write_back_rejects_a_2xx_that_created_nothing():
     adapter = GenericRestAdapter(MEDIXCEL_MAPPING)
 
     with pytest.raises(TransientError, match="no booking id"):
-        await adapter.write_back_idempotent(uuid4(), {"slot": "x"}, "idem-1")
+        await adapter.write_back_idempotent(_write())
