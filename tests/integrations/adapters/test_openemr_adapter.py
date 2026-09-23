@@ -10,7 +10,7 @@ import pytest
 
 from sm_common.integrations.adapters.openemr import OpenEmrAdapter
 from sm_common.integrations.canonical_types import AppointmentWrite
-from sm_common.integrations.exceptions import ConflictError, VendorRejected
+from sm_common.integrations.exceptions import AuthError, ConflictError, VendorRejected
 
 FIX = pathlib.Path(__file__).parents[1] / "fixtures" / "openemr"
 BID = UUID("00000000-0000-0000-0000-0000000000f1")
@@ -58,16 +58,30 @@ def _write(practitioner="prac-uuid"):
 class Router:
     """Serves recorded fixtures by route; records every request."""
 
-    def __init__(self, listing_rows=None, get_rows=None):
+    def __init__(
+        self,
+        listing_rows=None,
+        get_rows=None,
+        fhir_appointment=None,
+        fhir_status=200,
+    ):
         self.calls = []
         self.listing_rows = listing_rows
         self.get_rows = get_rows or {}
+        self.fhir_appointment = fhir_appointment
+        self.fhir_status = fhir_status
 
     def __call__(self, request):
         path, m = request.url.path, request.method
         self.calls.append((m, path, request.content))
         if path.endswith("/oauth2/default/token") or path == "/t":
             return httpx.Response(200, json={"access_token": "user-tok", "expires_in": 3600})
+        if m == "GET" and path.startswith("/apis/default/fhir/Appointment/"):
+            if self.fhir_status != 200:
+                return httpx.Response(self.fhir_status)
+            return httpx.Response(
+                200, json=self.fhir_appointment or {"resourceType": "Appointment"}
+            )
         if m == "GET" and path == "/apis/default/api/patient/pat-uuid":
             f = fixture("patient_get")
             return httpx.Response(f["status"], json=f["body"])
@@ -81,6 +95,9 @@ class Router:
             return httpx.Response(200, json=body)
         if m == "POST" and path.endswith("/appointment"):
             f = fixture("appointment_post")
+            return httpx.Response(f["status"], json=f["body"])
+        if m == "DELETE" and "/patient/" in path and "/appointment/" in path:
+            f = fixture("appointment_delete")
             return httpx.Response(f["status"], json=f["body"])
         if m == "GET" and "/apis/default/api/appointment/" in path:
             eid = path.rsplit("/", 1)[1]
@@ -216,3 +233,86 @@ async def test_a_401_on_the_standard_api_re_mints_the_token_once():
     r = R(listing_rows=[])
     await _adapter(r).write_back_idempotent(_write())
     assert sum(1 for c in r.calls if c[1] == "/t") == 2
+
+
+@pytest.mark.asyncio
+async def test_403_on_the_appointment_list_raises_auth_error_not_attributeerror():
+    """A 403 body is a dict, not a row list — iterating it must not crash with AttributeError."""
+
+    class R(Router):
+        def __call__(self, request):
+            path, m = request.url.path, request.method
+            if m == "GET" and path.endswith("/appointment") and "/patient/" in path:
+                return httpx.Response(403, json={"error": "forbidden"})
+            return super().__call__(request)
+
+    with pytest.raises(AuthError):
+        await _adapter(R(listing_rows=[])).write_back_idempotent(_write())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled_status", ["x", "%"])
+async def test_cancelled_same_slot_row_does_not_block_rebooking(cancelled_status):
+    row = {
+        "pc_eid": "50",
+        "pc_eventDate": "2026-09-24",
+        "pc_startTime": "10:00:00",
+        "pc_aid": _aid(),
+        "pc_uuid": "uuid-50",
+        "pc_apptstatus": cancelled_status,
+    }
+    r = Router(listing_rows=[row])
+    res = await _adapter(r).write_back_idempotent(_write())
+    assert res.created is True
+    # the cancelled row is filtered out of same_slot entirely — never read back
+    single_gets = [c for c in r.calls if c[0] == "GET" and "/api/appointment/" in c[1]]
+    assert len(single_gets) == 1  # only the freshly created appointment
+
+
+@pytest.mark.asyncio
+async def test_cancel_deletes_the_matching_appointment_by_eid():
+    row = {
+        "pc_eid": "146",
+        "pc_uuid": "a2d0fe82-5b70-4cb6-b6bd-52594079f973",
+        "pc_eventDate": "2026-10-23",
+        "pc_startTime": "10:00:00",
+        "pc_aid": "1",
+    }
+    fhir_appt = {
+        "resourceType": "Appointment",
+        "participant": [{"actor": {"reference": "Patient/pat-uuid"}}],
+    }
+    r = Router(listing_rows=[row], fhir_appointment=fhir_appt)
+    res = await _adapter(r).cancel(row["pc_uuid"], "patient requested")
+    assert res.status == "SUCCESS"
+    deletes = [c for c in r.calls if c[0] == "DELETE"]
+    assert len(deletes) == 1
+    assert deletes[0][1].endswith(f"/appointment/{row['pc_eid']}")
+
+
+@pytest.mark.asyncio
+async def test_cancel_appointment_not_in_patients_list_is_not_found():
+    fhir_appt = {
+        "resourceType": "Appointment",
+        "participant": [{"actor": {"reference": "Patient/pat-uuid"}}],
+    }
+    r = Router(listing_rows=[], fhir_appointment=fhir_appt)
+    res = await _adapter(r).cancel("uuid-not-present", "patient requested")
+    assert res.status == "NOT_FOUND"
+    assert not any(c[0] == "DELETE" for c in r.calls)
+
+
+@pytest.mark.asyncio
+async def test_cancel_with_no_patient_participant_is_not_found_with_zero_standard_api_calls():
+    fhir_appt = {"resourceType": "Appointment", "participant": []}
+    r = Router(fhir_appointment=fhir_appt)
+    res = await _adapter(r).cancel("some-uuid", "patient requested")
+    assert res.status == "NOT_FOUND"
+    assert not any("/apis/default/api/" in c[1] for c in r.calls)
+
+
+@pytest.mark.asyncio
+async def test_cancel_lookup_403_raises_auth_error_not_transient():
+    r = Router(fhir_status=403)
+    with pytest.raises(AuthError):
+        await _adapter(r).cancel("some-uuid", "patient requested")

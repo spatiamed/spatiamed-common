@@ -17,7 +17,6 @@ Measured against OpenEMR 8.3.0 (harness/openemr/FINDINGS.md):
 
 from __future__ import annotations
 
-import logging
 from datetime import date, datetime, time
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -35,18 +34,26 @@ from sm_common.integrations.canonical_types import (
     WriteBackResult,
 )
 from sm_common.integrations.exceptions import (
+    AuthError,
     ConflictError,
     TransientError,
     VendorRejected,
     WriteNotSupported,
 )
 
-logger = logging.getLogger(__name__)
-
 
 def _default_standard_base(fhir_base: str) -> str:
     base = fhir_base.rstrip("/")
     return base[: -len("/fhir")] + "/api" if base.endswith("/fhir") else base
+
+
+# OpenEMR's own status vocabulary (`list_options` where `list_id='apptstat'`, as
+# seeded into the harness/openemr instance — queried directly against the running
+# container) defines exactly two option_id values whose title says "Canceled":
+# 'x' ("x Canceled") and '%' ("% Canceled < 24h"). '?' ("? No show") is a
+# separate terminal status — the patient had a live slot and didn't attend — so
+# it must still guard the slot as an existing appointment, not be treated as free.
+_CANCELLED_APPTSTATUS = frozenset({"x", "%"})
 
 
 class OpenEmrAdapter(FhirR4Adapter):
@@ -100,13 +107,31 @@ class OpenEmrAdapter(FhirR4Adapter):
             if resp.status_code == 429 or resp.status_code >= 500:
                 raise TransientError(f"OpenEMR {method} {path}: HTTP {resp.status_code}")
             return resp
-        return resp
+        raise AssertionError  # unreachable: attempt=2 always returns or raises above
 
     @staticmethod
     def _data(resp: httpx.Response) -> Any:
-        body = resp.json()
+        # Shared status check for every Standard-API read: a 401 that survived
+        # _std_request's one re-mint, or a plain 403, means the credential is
+        # bad — not something a caller should ever mistake for "record not
+        # found" or iterate as if it were a row list. Any other 4xx that a
+        # caller hasn't already special-cased (404 in _pid/_aid) is a vendor
+        # rejection. Both are checked here, once, instead of at every call site.
+        if resp.status_code in (401, 403):
+            raise AuthError(f"OpenEMR Standard API refused with HTTP {resp.status_code}")
+        if resp.status_code >= 400:
+            raise VendorRejected(f"OpenEMR Standard API HTTP {resp.status_code}")
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise VendorRejected(
+                f"OpenEMR Standard API returned a non-JSON body (HTTP {resp.status_code})"
+            ) from exc
         if isinstance(body, dict) and (body.get("validationErrors") or body.get("internalErrors")):
-            raise VendorRejected(f"OpenEMR refused: {str(body)[:300]}")
+            # PHI-safe: only the top-level field names, never row/patient content.
+            raise VendorRejected(
+                f"OpenEMR refused (HTTP {resp.status_code}): keys={sorted(body.keys())}"
+            )
         return body.get("data") if isinstance(body, dict) and "data" in body else body
 
     @staticmethod
@@ -116,6 +141,10 @@ class OpenEmrAdapter(FhirR4Adapter):
         )
 
     async def _pid(self, patient_ref: str) -> str:
+        if not patient_ref:
+            # An empty ref must never reach GET /patient/ (the patient LIST —
+            # every patient's PHI) nor cache "" against whichever pid comes back first.
+            raise VendorRejected("OpenEMR patient lookup requires a non-empty patient reference")
         if patient_ref not in self._pid_cache:
             resp = await self._std_request("GET", f"/patient/{patient_ref}")
             if resp.status_code == 404:
@@ -127,6 +156,10 @@ class OpenEmrAdapter(FhirR4Adapter):
         return self._pid_cache[patient_ref]
 
     async def _aid(self, practitioner_ref: str) -> str:
+        if not practitioner_ref:
+            raise VendorRejected(
+                "OpenEMR practitioner lookup requires a non-empty practitioner reference"
+            )
         if practitioner_ref not in self._aid_cache:
             resp = await self._std_request("GET", f"/practitioner/{practitioner_ref}")
             if resp.status_code == 404:
@@ -152,16 +185,20 @@ class OpenEmrAdapter(FhirR4Adapter):
         eid = row.get("pc_eid") or row.get("id")
         if not eid:
             # FINDINGS §7.2: OpenEMR answers a failed create with HTTP 200 and a
-            # validation map. A 200 is not evidence anything was created.
+            # validation map. A 200 is not evidence anything was created. Field
+            # names only in the message (e.g. "pc_hometext") — never the row's
+            # content, which carries PHI.
+            keys = sorted(row.keys()) if isinstance(row, dict) else type(data).__name__
             raise VendorRejected(
-                f"OpenEMR create returned no appointment id: {str(resp.text)[:300]}"
+                f"OpenEMR create returned no appointment id (HTTP {resp.status_code}): keys={keys}"
             )
         return str(eid)
 
     def _result(self, row: dict, *, created: bool) -> WriteBackResult:  # type: ignore[type-arg]
         uuid = row.get("pc_uuid")
         if not uuid:
-            raise VendorRejected(f"OpenEMR appointment carries no pc_uuid: {str(row)[:200]}")
+            # pc_eid only — never the row itself, which carries fname/lname/DOB.
+            raise VendorRejected(f"OpenEMR appointment {row.get('pc_eid', '?')} carries no pc_uuid")
         local = datetime.combine(
             date.fromisoformat(str(row["pc_eventDate"])),
             time.fromisoformat(str(row["pc_startTime"])[:5]),
@@ -178,11 +215,16 @@ class OpenEmrAdapter(FhirR4Adapter):
     ) -> dict | None:  # type: ignore[type-arg]
         resp = await self._std_request("GET", f"/patient/{pid}/appointment")
         rows = self._data(resp) or []
+        if not isinstance(rows, list):
+            raise VendorRejected(
+                f"OpenEMR appointment list returned an unexpected shape (HTTP {resp.status_code})"
+            )
         same_slot = [
             r
             for r in rows
             if str(r.get("pc_eventDate")) == day
             and str(r.get("pc_startTime", ""))[:5] == hhmm
+            and str(r.get("pc_apptstatus") or "") not in _CANCELLED_APPTSTATUS
             and (str(r.get("pc_aid") or "") == (aid or "") or (aid is None and not r.get("pc_aid")))
         ]
         for r in same_slot:
@@ -237,11 +279,25 @@ class OpenEmrAdapter(FhirR4Adapter):
             raise TransientError(f"cancel lookup: {exc}") from exc
         if resp.status_code == 404:
             return CancelResult(status="NOT_FOUND")
-        if resp.status_code >= 400:
+        if resp.status_code in (401, 403):
+            raise AuthError(f"cancel lookup HTTP {resp.status_code}")
+        if resp.status_code == 429 or resp.status_code >= 500:
             raise TransientError(f"cancel lookup HTTP {resp.status_code}")
+        if resp.status_code >= 400:
+            # A permanent 4xx (e.g. 400) needs a human, not another attempt.
+            raise VendorRejected(f"cancel lookup HTTP {resp.status_code}")
         patient_ref = self._actor(resp.json(), "Patient")
+        if not patient_ref:
+            # No Patient participant on the FHIR Appointment: nothing to cancel
+            # on the Standard API, and no reason to query it.
+            return CancelResult(status="NOT_FOUND")
         pid = await self._pid(patient_ref)
-        rows = self._data(await self._std_request("GET", f"/patient/{pid}/appointment")) or []
+        list_resp = await self._std_request("GET", f"/patient/{pid}/appointment")
+        rows = self._data(list_resp) or []
+        if not isinstance(rows, list):
+            raise VendorRejected(
+                f"OpenEMR appointment list returned an unexpected shape (HTTP {list_resp.status_code})"
+            )
         match = [r for r in rows if str(r.get("pc_uuid")) == hms_booking_id]
         if not match:
             return CancelResult(status="NOT_FOUND")
