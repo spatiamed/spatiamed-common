@@ -1,12 +1,21 @@
 import pytest
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from uuid import uuid4
 from sm_common.integrations.canonical_types import (
-    AppointmentCreated, AppointmentRescheduled, AppointmentCancelled,
-    VisitCheckedIn, VisitConsultationStarted, VisitFinalized,
-    CanonicalPatient, CanonicalDoctor, WriteBackResult, CancelResult,
-    AdapterHealth, ExternalBooking,
+    AppointmentCreated,
+    AppointmentRescheduled,
+    AppointmentCancelled,
+    AppointmentWrite,
+    VisitCheckedIn,
+    VisitConsultationStarted,
+    VisitFinalized,
+    CanonicalPatient,
+    CanonicalDoctor,
+    WriteBackResult,
+    CancelResult,
+    AdapterHealth,
+    ExternalBooking,
 )
 
 
@@ -40,20 +49,34 @@ class TestCanonicalTypes:
 
     def test_appointment_created_as_dict(self):
         evt = AppointmentCreated(
-            event_uuid=uuid4(), hms_vendor="mocdoc", appointment_id="A1",
-            hms_version=1, mrn="MRN1", abha_id="12-3456-7890-1234",
-            phone_hash="h1", patient_name_token="tok", patient_age=None,
-            patient_gender=None, slot_start=_now(), slot_duration_min=15,
-            doctor_external_id="D1", department_external_id="DEP1",
-            payer_type="CASH", reason_text=None, received_at=_now(),
+            event_uuid=uuid4(),
+            hms_vendor="mocdoc",
+            appointment_id="A1",
+            hms_version=1,
+            mrn="MRN1",
+            abha_id="12-3456-7890-1234",
+            phone_hash="h1",
+            patient_name_token="tok",
+            patient_age=None,
+            patient_gender=None,
+            slot_start=_now(),
+            slot_duration_min=15,
+            doctor_external_id="D1",
+            department_external_id="DEP1",
+            payer_type="CASH",
+            reason_text=None,
+            received_at=_now(),
         )
         d = asdict(evt)
         assert d["appointment_id"] == "A1"
 
     def test_visit_checked_in(self):
         v = VisitCheckedIn(
-            event_uuid=uuid4(), appointment_id="A1",
-            queuecare_visit_id=uuid4(), arrived_at=_now(), token_number="T-042",
+            event_uuid=uuid4(),
+            appointment_id="A1",
+            queuecare_visit_id=uuid4(),
+            arrived_at=_now(),
+            token_number="T-042",
         )
         assert v.token_number == "T-042"
 
@@ -75,3 +98,45 @@ class TestCanonicalTypes:
         h = AdapterHealth(healthy=False, last_success_at=None, latency_ms=None, message="timeout")
         assert h.healthy is False
         assert h.last_success_at is None
+
+
+def _write(**over):
+    start = datetime(2026, 9, 24, 4, 30, tzinfo=UTC)
+    base = dict(
+        booking_id=uuid4(),
+        patient_ref="pat-uuid",
+        practitioner_ref="prac-uuid",
+        start=start,
+        end=start + timedelta(minutes=15),
+        reason="Fever",
+    )
+    base.update(over)
+    return AppointmentWrite(**base)
+
+
+def test_appointment_write_rejects_naive_datetimes():
+    with pytest.raises(ValueError, match="timezone-aware"):
+        _write(start=datetime(2026, 9, 24, 10, 0), end=datetime(2026, 9, 24, 10, 15))
+
+
+def test_appointment_write_rejects_end_not_after_start():
+    start = datetime(2026, 9, 24, 4, 30, tzinfo=UTC)
+    with pytest.raises(ValueError, match="end must be after start"):
+        _write(start=start, end=start)
+
+
+def test_appointment_write_is_frozen():
+    w = _write()
+    with pytest.raises(AttributeError):
+        w.patient_ref = "other"  # type: ignore[misc]
+
+
+def test_write_back_result_defaults_keep_old_callers_working():
+    r = WriteBackResult(status="SUCCESS", hms_booking_id="x")
+    assert r.hms_start is None
+    assert r.created is True
+
+
+def test_canonical_patient_resource_id_defaults_to_none():
+    p = CanonicalPatient(mrn="1", abha_id=None, phone_hash="", name_token="", age=None, gender=None)
+    assert p.resource_id is None

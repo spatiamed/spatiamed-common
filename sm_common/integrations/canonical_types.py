@@ -8,6 +8,7 @@ from uuid import UUID
 
 # ─── Inbound: HMS → QueueCare ────────────────────────────────────────────────
 
+
 @dataclass
 class AppointmentCreated:
     event_uuid: UUID
@@ -17,7 +18,7 @@ class AppointmentCreated:
     mrn: str
     abha_id: str | None
     phone_hash: str
-    patient_name_token: str   # opaque encrypted token (consumer-side field encryption)
+    patient_name_token: str  # opaque encrypted token (consumer-side field encryption)
     patient_age: int | None
     patient_gender: Literal["M", "F", "O"] | None
     slot_start: datetime
@@ -53,6 +54,7 @@ class AppointmentCancelled:
 
 # ─── Outbound: QueueCare → HMS ────────────────────────────────────────────────
 
+
 @dataclass
 class VisitCheckedIn:
     event_uuid: UUID
@@ -80,14 +82,21 @@ class VisitFinalized:
 
 # ─── Supporting types ─────────────────────────────────────────────────────────
 
+
 @dataclass
 class CanonicalPatient:
     mrn: str
     abha_id: str | None
     phone_hash: str
-    name_token: str          # Fernet-encrypted
+    name_token: str  # Fernet-encrypted
     age: int | None
     gender: Literal["M", "F", "O"] | None
+    # The vendor's own resource id (FHIR `Patient.id`). This — not `mrn` — is
+    # what external_patient_refs.external_patient_id stores: inbound ingest
+    # reads the Patient reference off an Appointment, which is always the
+    # resource id. On OpenEMR the first identifier is the internal pid, a
+    # different value, so using mrn gave one patient two conflicting refs.
+    resource_id: str | None = None
 
 
 @dataclass
@@ -117,11 +126,38 @@ class CanonicalAppointment:
     status: str
 
 
+@dataclass(frozen=True)
+class AppointmentWrite:
+    """One booking, in the shape every adapter translates into its vendor's own.
+
+    ``booking_id`` is ours and is every adapter's idempotency marker.
+    ``patient_ref`` / ``practitioner_ref`` are the HMS's FHIR resource ids.
+    """
+
+    booking_id: UUID
+    patient_ref: str
+    practitioner_ref: str | None
+    start: datetime
+    end: datetime
+    reason: str | None
+
+    def __post_init__(self) -> None:
+        if self.start.tzinfo is None or self.end.tzinfo is None:
+            raise ValueError("AppointmentWrite start/end must be timezone-aware")
+        if self.end <= self.start:
+            raise ValueError("AppointmentWrite end must be after start")
+
+
 @dataclass
 class WriteBackResult:
     status: Literal["SUCCESS", "CONFLICT", "TRANSIENT_ERROR"]
     hms_booking_id: str | None = None
     error_detail: str | None = None
+    # The time the HMS actually recorded. QueueCare compares it with its own
+    # slot_start before recording success (PR #215 blocker 1).
+    hms_start: datetime | None = None
+    # False when this call found the appointment we already wrote.
+    created: bool = True
 
 
 @dataclass

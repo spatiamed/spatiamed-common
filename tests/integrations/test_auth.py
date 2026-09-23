@@ -1,7 +1,8 @@
 import httpx
 import pytest
 
-from sm_common.integrations.auth import build_auth_headers
+from sm_common.integrations.auth import build_auth_headers, invalidate_token
+from sm_common.integrations.exceptions import AuthError
 
 import urllib.parse
 
@@ -198,3 +199,58 @@ class TestBearerTokenGuards:
         async with httpx.AsyncClient() as c:
             h = await build_auth_headers(c, "bearer", {"bearer_token": "tok"})
         assert h["Authorization"] == "Bearer tok"
+
+
+@pytest.mark.asyncio
+async def test_oauth2_password_posts_a_user_role_password_grant_and_caches():
+    calls = []
+
+    def handler(request):
+        calls.append(dict(httpx.QueryParams(request.content.decode())))
+        return httpx.Response(200, json={"access_token": "user-tok", "expires_in": 3600})
+
+    cfg = {
+        "token_url": "https://oe/oauth2/default/token",
+        "client_id": "cid",
+        "client_secret": "sec",
+        "username": "svc-spatiamed",
+        "password": "pw",
+        "scopes": "api:oemr user/appointment.write",
+    }
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        h1 = await build_auth_headers(client, "oauth2_password", cfg)
+        h2 = await build_auth_headers(client, "oauth2_password", cfg)
+    assert h1["Authorization"] == h2["Authorization"] == "Bearer user-tok"
+    assert len(calls) == 1
+    assert calls[0] == {
+        "grant_type": "password",
+        "client_id": "cid",
+        "client_secret": "sec",
+        "username": "svc-spatiamed",
+        "password": "pw",
+        "user_role": "users",
+        "scope": "api:oemr user/appointment.write",
+    }
+
+
+@pytest.mark.asyncio
+async def test_oauth2_password_401_is_auth_error():
+    def handler(request):
+        return httpx.Response(401, json={"error": "invalid_grant"})
+
+    cfg = {
+        "token_url": "https://oe/t",
+        "client_id": "c",
+        "client_secret": "s",
+        "username": "u",
+        "password": "p",
+    }
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(AuthError):
+            await build_auth_headers(client, "oauth2_password", cfg)
+
+
+def test_invalidate_token_drops_the_cache():
+    cfg = {"_oauth_cache": {"token": "x", "expires_at": 10**12}}
+    invalidate_token(cfg)
+    assert "_oauth_cache" not in cfg

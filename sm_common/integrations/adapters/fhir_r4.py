@@ -16,6 +16,7 @@ import httpx
 from sm_common.integrations.auth import build_auth_headers
 from sm_common.integrations.canonical_types import (
     AdapterHealth,
+    AppointmentWrite,
     CancelResult,
     CanonicalAppointment,
     CanonicalDoctor,
@@ -26,11 +27,39 @@ from sm_common.integrations.canonical_types import (
     VisitFinalized,
     WriteBackResult,
 )
-from sm_common.integrations.exceptions import TransientError
+from sm_common.integrations.exceptions import (
+    ConflictError,
+    TransientError,
+    VendorRejected,
+    WriteNotSupported,
+)
 from sm_common.integrations.hms_adapter import HmsAdapter
 from sm_common.phone import hash_phone_for_lookup, phone_search_variants
 
 logger = logging.getLogger(__name__)
+
+# Our booking id travels on every Appointment we create, so a retry can find
+# the one it already wrote. Changing this string orphans every earlier write.
+BOOKING_IDENTIFIER_SYSTEM = "https://spatiamed.com/booking"
+
+
+def _refusal(resp: httpx.Response) -> str:
+    """A vendor refusal, PHI-safe: status code plus OperationOutcome issue codes.
+
+    Never the body text — an OperationOutcome can echo the submitted resource
+    (patient reference, reason), and these messages become job.last_error,
+    booking error detail and log lines.
+    """
+    codes: list[str] = []
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict):
+        for issue in body.get("issue") or []:
+            if isinstance(issue, dict) and isinstance(issue.get("code"), str):
+                codes.append(issue["code"])
+    return f"HTTP {resp.status_code} issue_codes={codes}"
 
 
 def _ref_id(participant_actor_ref: str) -> str:
@@ -265,7 +294,50 @@ class FhirR4Adapter(HmsAdapter):
             name_token=name_token,
             age=self._age_from_birthdate(resource.get("birthDate")),
             gender=self._gender_code(resource.get("gender")),  # type: ignore[arg-type]
+            resource_id=str(resource.get("id")) if resource.get("id") else None,
         )
+
+    def _patient_query(
+        self, phone_hash: str | None, mrn: str | None, abha_id: str | None, phone: str | None
+    ) -> dict | None:  # type: ignore[type-arg]
+        # Preference order: MRN, then ABHA, then phone. A phone is the weakest
+        # hint — one number commonly serves a whole household in India — so
+        # callers MUST corroborate the result against name, age and gender.
+        if mrn:
+            return {"identifier": mrn}
+        if abha_id:
+            return {"identifier": abha_id}
+        if phone:
+            # `telecom` is a TOKEN search parameter: it matches EXACTLY. Comma is
+            # OR in FHIR search, so ask for every shape the number plausibly takes.
+            variants = phone_search_variants(phone)
+            return {"telecom": ",".join(variants)} if variants else None
+        # A hash matches nothing on any vendor system; asking would disclose
+        # that we are looking for someone.
+        return None
+
+    async def search_patients(
+        self,
+        phone_hash: str | None = None,
+        mrn: str | None = None,
+        abha_id: str | None = None,
+        phone: str | None = None,
+    ) -> list[CanonicalPatient]:
+        params = self._patient_query(phone_hash, mrn, abha_id, phone)
+        if params is None:
+            return []
+        try:
+            headers = await self._headers()
+            resp = await self._client.get(f"{self._base}/Patient", params=params, headers=headers)
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.warning("FhirR4Adapter.search_patients HTTP error: %s", exc)
+            return []
+        return [
+            self._patient_to_canonical(e.get("resource", {}))
+            for e in resp.json().get("entry", [])
+            if e.get("resource", {}).get("resourceType", "Patient") == "Patient"
+        ]
 
     async def find_patient(
         self,
@@ -274,48 +346,13 @@ class FhirR4Adapter(HmsAdapter):
         abha_id: str | None = None,
         phone: str | None = None,
     ) -> CanonicalPatient | None:
-        # Preference order: MRN, then ABHA, then phone. The first two are
-        # identifiers. A phone is the weakest hint — one number commonly serves
-        # a whole household in India — so callers MUST corroborate the result
-        # against name, age and gender before treating it as identity.
-        if mrn:
-            params: dict = {"identifier": mrn}  # type: ignore[type-arg]
-        elif abha_id:
-            params = {"identifier": abha_id}
-        elif phone:
-            # `telecom` is a TOKEN search parameter, so it matches EXACTLY: a
-            # hospital storing "+919876543210" is not found by a query for
-            # "9876543210". Comma means OR in FHIR search, so we ask for every
-            # shape the number plausibly takes in one request.
-            variants = phone_search_variants(phone)
-            if not variants:
-                return None
-            params = {"telecom": ",".join(variants)}
-        elif phone_hash:
-            # A hash matches nothing on any vendor system. Asking would waste a
-            # round trip and disclose that we are looking for someone.
-            return None
-        else:
-            return None
-
-        try:
-            resp = await self._client.get(
-                f"{self._base}/Patient",
-                params=params,
-                headers=await self._headers(),
-            )
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            logger.warning("FhirR4Adapter.find_patient HTTP error: %s", exc)
-            return None
-
-        bundle = resp.json()
-        entries = bundle.get("entry", [])
-        if not entries:
-            return None
-
-        resource = entries[0].get("resource", {})
-        return self._patient_to_canonical(resource)
+        # Exactly one or nothing. Returning entries[0] of several silently
+        # picked one member of a household; callers that must see ambiguity
+        # use search_patients.
+        found = await self.search_patients(
+            phone_hash=phone_hash, mrn=mrn, abha_id=abha_id, phone=phone
+        )
+        return found[0] if len(found) == 1 else None
 
     async def get_patient(self, external_id: str) -> CanonicalPatient | None:
         if not external_id:
@@ -498,39 +535,113 @@ class FhirR4Adapter(HmsAdapter):
 
         return bookings
 
-    async def write_back_idempotent(
-        self,
-        booking_id: UUID,
-        payload: dict,  # type: ignore[type-arg]
-        idempotency_key: str,
-    ) -> WriteBackResult:
-        appt_id = payload.get("appointment_id") or str(booking_id)
-        base_headers = await self._headers()
-        headers = {**base_headers, "X-Idempotency-Key": idempotency_key}
+    def _appointment_resource(self, write: AppointmentWrite) -> dict:  # type: ignore[type-arg]
+        participants = [
+            {"actor": {"reference": f"Patient/{write.patient_ref}"}, "status": "accepted"}
+        ]
+        if write.practitioner_ref:
+            participants.append(
+                {
+                    "actor": {"reference": f"Practitioner/{write.practitioner_ref}"},
+                    "status": "accepted",
+                }
+            )
+        resource: dict = {  # type: ignore[type-arg]
+            "resourceType": "Appointment",
+            "status": "booked",
+            "start": write.start.isoformat(),
+            "end": write.end.isoformat(),
+            "participant": participants,
+            "identifier": [{"system": BOOKING_IDENTIFIER_SYSTEM, "value": str(write.booking_id)}],
+        }
+        if write.reason:
+            resource["description"] = write.reason
+        return resource
 
+    def _result_from_resource(self, resource: dict, *, created: bool) -> WriteBackResult:  # type: ignore[type-arg]
+        appt_id = resource.get("id")
+        if resource.get("resourceType") != "Appointment" or not appt_id:
+            # FINDINGS §7.2: a 2xx is not evidence anything was created.
+            # Keys only: a 2xx body can be the resource we sent, carrying PHI.
+            raise VendorRejected(
+                f"vendor response carries no Appointment id: resourceType="
+                f"{resource.get('resourceType')!r} keys={sorted(resource)}"
+            )
+        start = resource.get("start")
+        hms_start = datetime.fromisoformat(start.replace("Z", "+00:00")) if start else None
+        return WriteBackResult(
+            status="SUCCESS", hms_booking_id=str(appt_id), hms_start=hms_start, created=created
+        )
+
+    async def _find_our_appointment(self, token: str, headers: dict[str, str]) -> dict | None:  # type: ignore[type-arg]
+        """The appointment we already wrote for this booking, if the server can say.
+
+        A server that rejects `identifier` search (4xx) cannot answer; the
+        If-None-Exist header on the create is then our only guard.
+        """
         try:
-            resp = await self._client.put(
-                f"{self._base}/Appointment/{appt_id}",
-                json=payload,
-                headers=headers,
+            resp = await self._client.get(
+                f"{self._base}/Appointment", params={"identifier": token}, headers=headers
             )
         except httpx.HTTPError as exc:
-            # Raised, not returned: WriteBackRouter only falls through to the
-            # next tier on a raised TransientError.
+            raise TransientError(f"write_back pre-search HTTP error: {exc}") from exc
+        if resp.status_code >= 500:
+            raise TransientError(f"write_back pre-search HTTP {resp.status_code}")
+        if resp.status_code >= 400:
+            logger.warning(
+                "FhirR4Adapter: server refused identifier search (HTTP %s)", resp.status_code
+            )
+            return None
+        hits = [
+            e["resource"]
+            for e in resp.json().get("entry", [])
+            if e.get("resource", {}).get("resourceType") == "Appointment"
+        ]
+        if len(hits) > 1:
+            # Only we write this identifier: the HMS already holds it (twice).
+            raise ConflictError(
+                f"{len(hits)} appointments already carry {token} — a human must reconcile",
+                landed=True,
+            )
+        return hits[0] if hits else None
+
+    async def write_back_idempotent(self, write: AppointmentWrite) -> WriteBackResult:
+        headers = await self._headers()
+        token = f"{BOOKING_IDENTIFIER_SYSTEM}|{write.booking_id}"
+        existing = await self._find_our_appointment(token, headers)
+        if existing is not None:
+            return self._result_from_resource(existing, created=False)
+
+        try:
+            resp = await self._client.post(
+                f"{self._base}/Appointment",
+                json=self._appointment_resource(write),
+                headers={**headers, "If-None-Exist": f"identifier={token}"},
+            )
+        except httpx.HTTPError as exc:
+            # Raised, not returned: WriteBackRouter only falls through on a raise.
             raise TransientError(f"write_back_idempotent HTTP error: {exc}") from exc
 
-        if resp.status_code in (200, 201):
-            body = resp.json()
-            return WriteBackResult(
-                status="SUCCESS",
-                hms_booking_id=str(body.get("id", appt_id)),
+        if resp.status_code in (404, 405):
+            raise WriteNotSupported(
+                f"vendor has no Appointment create route (HTTP {resp.status_code})"
             )
         if resp.status_code == 409:
-            return WriteBackResult(status="CONFLICT", error_detail=resp.text)
-
-        # 4xx (other) or 5xx — escalate so the router can try the agent or
-        # manual tier instead of recording a terminal non-status.
-        raise TransientError(f"write_back_idempotent HTTP {resp.status_code}: {resp.text[:200]}")
+            raise ConflictError(f"write_back_idempotent {_refusal(resp)}")
+        if resp.status_code == 429 or resp.status_code >= 500:
+            raise TransientError(f"write_back_idempotent {_refusal(resp)}")
+        if resp.status_code >= 400:
+            raise VendorRejected(f"write_back_idempotent {_refusal(resp)}")
+        if resp.status_code == 200 and not resp.content:
+            # Conditional create matched an existing resource and the server
+            # returned no body — look it up rather than guess.
+            existing = await self._find_our_appointment(token, headers)
+            if existing is None:
+                raise TransientError(
+                    "conditional create returned 200 with no body and no match found"
+                )
+            return self._result_from_resource(existing, created=False)
+        return self._result_from_resource(resp.json(), created=resp.status_code == 201)
 
     async def cancel(self, hms_booking_id: str, reason: str) -> CancelResult:
         base_headers = await self._headers()
@@ -560,14 +671,12 @@ class FhirR4Adapter(HmsAdapter):
             # Nothing to cancel is an answer, not a failure — do not retry.
             return CancelResult(status="NOT_FOUND", error_detail=resp.text)
 
-        if resp.status_code >= 500:
-            raise TransientError(f"cancel HTTP {resp.status_code}: {resp.text[:200]}")
+        if resp.status_code == 429 or resp.status_code >= 500:
+            raise TransientError(f"cancel {_refusal(resp)}")
 
-        # A permanent 4xx needs a human, not another attempt.
-        return CancelResult(
-            status="FAILED",
-            error_detail=f"HTTP {resp.status_code}: {resp.text[:200]}",
-        )
+        # A permanent 4xx needs a human, not another attempt (spec §1: cancel
+        # raises on failure; only NOT_FOUND is a returned outcome).
+        raise VendorRejected(f"cancel {_refusal(resp)}")
 
     def _visit_event_status(
         self,

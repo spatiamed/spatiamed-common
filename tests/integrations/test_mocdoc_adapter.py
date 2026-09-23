@@ -2,7 +2,7 @@ import hashlib
 import hmac
 import json
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -10,8 +10,22 @@ import respx
 import httpx
 
 from sm_common.integrations.adapters.mocdoc import MocDocAdapter
-from sm_common.integrations.canonical_types import WriteBackResult
+from sm_common.integrations.canonical_types import AppointmentWrite, WriteBackResult
 from sm_common.integrations.exceptions import ConflictError, TransientError
+
+
+def _write(**over) -> AppointmentWrite:
+    start = datetime(2026, 5, 8, 9, 0, tzinfo=timezone.utc)
+    base = dict(
+        booking_id=uuid4(),
+        patient_ref="P1",
+        practitioner_ref="D1",
+        start=start,
+        end=start + timedelta(minutes=15),
+        reason="Fever",
+    )
+    base.update(over)
+    return AppointmentWrite(**base)
 
 
 def make_adapter() -> MocDocAdapter:
@@ -40,7 +54,9 @@ class TestMocDocAdapterAuth:
     @respx.mock
     async def test_request_has_hmac_signature(self):
         route = respx.get("https://api.mocdoc.in/api/v1/appointments").mock(
-            return_value=httpx.Response(200, json={"appointments": [], "cursor": "2026-05-06T10:00:00Z"})
+            return_value=httpx.Response(
+                200, json={"appointments": [], "cursor": "2026-05-06T10:00:00Z"}
+            )
         )
         adapter = make_adapter()
         await adapter.list_appointments_modified_since("", date(2026, 5, 8))
@@ -52,7 +68,9 @@ class TestMocDocAdapterAuth:
     @respx.mock
     async def test_hmac_signature_is_correct(self):
         route = respx.get("https://api.mocdoc.in/api/v1/appointments").mock(
-            return_value=httpx.Response(200, json={"appointments": [], "cursor": "2026-05-06T10:00:00Z"})
+            return_value=httpx.Response(
+                200, json={"appointments": [], "cursor": "2026-05-06T10:00:00Z"}
+            )
         )
         adapter = make_adapter()
         await adapter.list_appointments_modified_since("", date(2026, 5, 8))
@@ -64,20 +82,25 @@ class TestMocDocAdapterListAppointments:
     @respx.mock
     async def test_returns_canonical_appointments(self):
         respx.get("https://api.mocdoc.in/api/v1/appointments").mock(
-            return_value=httpx.Response(200, json={
-                "appointments": [{
-                    "id": "APT-MD-001",
-                    "version": 2,
-                    "patientMrn": "MRN-MD-001",
-                    "doctorId": "DR-MD-001",
-                    "departmentId": "DEPT-MD-001",
-                    "scheduledAt": "2026-05-07T10:00:00Z",
-                    "durationMinutes": 15,
-                    "payerType": "CASH",
-                    "status": "confirmed",
-                }],
-                "cursor": "2026-05-07T10:00:00Z",
-            })
+            return_value=httpx.Response(
+                200,
+                json={
+                    "appointments": [
+                        {
+                            "id": "APT-MD-001",
+                            "version": 2,
+                            "patientMrn": "MRN-MD-001",
+                            "doctorId": "DR-MD-001",
+                            "departmentId": "DEPT-MD-001",
+                            "scheduledAt": "2026-05-07T10:00:00Z",
+                            "durationMinutes": 15,
+                            "payerType": "CASH",
+                            "status": "confirmed",
+                        }
+                    ],
+                    "cursor": "2026-05-07T10:00:00Z",
+                },
+            )
         )
         adapter = make_adapter()
         apts, cursor = await adapter.list_appointments_modified_since("", date(2026, 5, 8))
@@ -103,7 +126,7 @@ class TestMocDocAdapterWriteBack:
             return_value=httpx.Response(201, json={"id": "HB-MD-001", "status": "confirmed"})
         )
         adapter = make_adapter()
-        result = await adapter.write_back_idempotent(uuid4(), {"patientId": "P1"}, "idem-001")
+        result = await adapter.write_back_idempotent(_write())
         assert result.status == "SUCCESS"
         assert result.hms_booking_id == "HB-MD-001"
 
@@ -114,7 +137,7 @@ class TestMocDocAdapterWriteBack:
         )
         adapter = make_adapter()
         with pytest.raises(ConflictError):
-            await adapter.write_back_idempotent(uuid4(), {}, "idem-002")
+            await adapter.write_back_idempotent(_write())
 
 
 class TestMocDocAdapterHealth:

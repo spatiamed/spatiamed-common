@@ -27,7 +27,8 @@ OE_PASS = "SpatiaHarness#2026"
 SCOPES = (
     "openid offline_access api:oemr api:fhir "
     "user/patient.write user/patient.read "
-    "user/appointment.write user/appointment.read"
+    "user/appointment.write user/appointment.read "
+    "user/practitioner.read"
 )
 
 
