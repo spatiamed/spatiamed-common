@@ -1,7 +1,16 @@
-"""The pre-0.12 dict payload, for adapters whose vendors were never measured.
+"""The dict payload for bahmni, mocdoc and generic_rest, built from AppointmentWrite.
 
-bahmni, mocdoc and generic_rest keep sending exactly what they sent before
-AppointmentWrite existed; this refactor must not change their wire behaviour.
+None of these vendors was ever measured, and this is NOT wire-identical to what
+QueueCare sent before 0.12. Against that pre-0.12 dict:
+
+- ``hms_vendor`` is dropped;
+- ``slot_end`` and ``reason`` are added;
+- ``doctor_external_id`` changed meaning: it was QueueCare's local staff UUID
+  and is now the HMS practitioner reference (``AppointmentWrite.practitioner_ref``,
+  None until the doctor is mapped).
+
+``resourceType``, ``status``, ``appointment_id``, ``slot_start`` and
+``patient_external_id`` are unchanged. Measure a vendor before relying on it.
 """
 
 from __future__ import annotations
