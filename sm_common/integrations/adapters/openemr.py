@@ -11,8 +11,8 @@ Measured against OpenEMR 8.3.0 (harness/openemr/FINDINGS.md):
 - The create returns the numeric pc_eid, but ingest keys on the FHIR
   Appointment.id, which is pc_uuid. We always return pc_uuid.
 - pc_hometext (our idempotency marker) is NOT in the per-patient list, only in
-  the single-appointment GET — so the guard narrows by date/time/provider,
-  then reads each candidate.
+  the single-appointment GET — so the guard reads each live appointment at our
+  slot or on/after today (a moved booking's original included), capped.
 - The per-patient appointment list answers a bare 404 (not 200 + []) for a
   patient with zero appointments; `_list_appointments` treats that as empty.
 """
@@ -56,6 +56,10 @@ def _default_standard_base(fhir_base: str) -> str:
 # separate terminal status — the patient had a live slot and didn't attend — so
 # it must still guard the slot as an existing appointment, not be treated as free.
 _CANCELLED_APPTSTATUS = frozenset({"x", "%"})
+
+# The most appointments the marker scan reads one by one (a GET each). Beyond
+# it the write is refused as transient rather than risk a partial scan.
+MAX_MARKER_CANDIDATES = 25
 
 
 class OpenEmrAdapter(FhirR4Adapter):
@@ -228,19 +232,54 @@ class OpenEmrAdapter(FhirR4Adapter):
 
     # ─── Writes ───────────────────────────────────────────────────────────
 
+    def _today(self) -> date:
+        """Today in the integration's zone — the lower bound of the marker scan."""
+        return datetime.now(self._tz).date()
+
     async def _find_marked(
         self, pid: str, day: str, hhmm: str, aid: str | None, marker: str
     ) -> dict | None:  # type: ignore[type-arg]
+        """Our appointment for this booking, wherever it sits; else None.
+
+        The marker is searched across every live (not cancelled) appointment of
+        the patient that is at our slot OR on/after today, whatever its time or
+        provider. Staff can move a booking between attempts; a resend at the new
+        slot must find the appointment we wrote at the old one, never create a
+        second. That row comes back as-is: its own start differs from the write's,
+        and QueueCare's time check turns it into manual_required.
+
+        Only the single-appointment GET carries pc_hometext, so each candidate is
+        read. More than MAX_MARKER_CANDIDATES candidates raises TransientError
+        before any read: a partial scan could miss the marker and duplicate.
+
+        Same slot, no marker anywhere → ConflictError (someone else's
+        appointment; never double-book).
+        """
         rows = await self._list_appointments(pid)
-        same_slot = [
-            r
-            for r in rows
-            if str(r.get("pc_eventDate")) == day
-            and str(r.get("pc_startTime", ""))[:5] == hhmm
-            and str(r.get("pc_apptstatus") or "") not in _CANCELLED_APPTSTATUS
-            and (str(r.get("pc_aid") or "") == (aid or "") or (aid is None and not r.get("pc_aid")))
+        today = self._today().isoformat()
+
+        def at_our_slot(r: dict) -> bool:  # type: ignore[type-arg]
+            return (
+                str(r.get("pc_eventDate")) == day
+                and str(r.get("pc_startTime", ""))[:5] == hhmm
+                and (
+                    str(r.get("pc_aid") or "") == (aid or "")
+                    or (aid is None and not r.get("pc_aid"))
+                )
+            )
+
+        live = [r for r in rows if str(r.get("pc_apptstatus") or "") not in _CANCELLED_APPTSTATUS]
+        same_slot = [r for r in live if at_our_slot(r)]
+        others = [
+            r for r in live if not at_our_slot(r) and str(r.get("pc_eventDate") or "") >= today
         ]
-        for r in same_slot:
+        candidates = same_slot + others
+        if len(candidates) > MAX_MARKER_CANDIDATES:
+            raise TransientError(
+                f"patient {pid} has {len(candidates)} live appointments to scan for our marker "
+                f"(cap {MAX_MARKER_CANDIDATES}); not writing without a complete duplicate check"
+            )
+        for r in candidates:
             full = await self._get_appt(str(r["pc_eid"]))
             if marker in str(full.get("pc_hometext") or ""):
                 return full

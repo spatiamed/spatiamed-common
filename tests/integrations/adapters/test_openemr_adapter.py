@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import pathlib
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 import httpx
@@ -10,7 +10,12 @@ import pytest
 
 from sm_common.integrations.adapters.openemr import OpenEmrAdapter
 from sm_common.integrations.canonical_types import AppointmentWrite
-from sm_common.integrations.exceptions import AuthError, ConflictError, VendorRejected
+from sm_common.integrations.exceptions import (
+    AuthError,
+    ConflictError,
+    TransientError,
+    VendorRejected,
+)
 
 FIX = pathlib.Path(__file__).parents[1] / "fixtures" / "openemr"
 BID = UUID("00000000-0000-0000-0000-0000000000f1")
@@ -46,6 +51,8 @@ def _adapter(handler):
         openemr=_openemr_cfg(),
     )
     a._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    # Pinned so the marker scan's "on or after today" bound is deterministic.
+    a._today = lambda: date(2026, 9, 24)  # type: ignore[method-assign]
     return a
 
 
@@ -172,7 +179,10 @@ async def test_same_slot_without_our_marker_is_a_conflict_not_a_double_booking()
 
 
 @pytest.mark.asyncio
-async def test_marker_guard_ignores_other_dates_and_doctors():
+async def test_unmarked_rows_at_other_slots_are_read_but_never_conflict():
+    """Other doctors / times are scanned for our marker (a moved booking) but,
+    carrying no marker, neither block the write nor count as ours. A row
+    before today is not scanned at all."""
     rows = [
         {
             "pc_eid": "1",
@@ -196,12 +206,68 @@ async def test_marker_guard_ignores_other_dates_and_doctors():
             "pc_uuid": "u3",
         },
     ]
-    r = Router(listing_rows=rows)
+    get_rows = {r["pc_eid"]: {**r, "pc_hometext": "booked at the desk"} for r in rows}
+    r = Router(listing_rows=rows, get_rows=get_rows)
     res = await _adapter(r).write_back_idempotent(_write())
     assert res.created is True
-    single_gets = [c for c in r.calls if c[0] == "GET" and "/api/appointment/" in c[1]]
-    # only the freshly created appointment is read back — none of the three unrelated rows
-    assert len(single_gets) == 1
+    read = [c[1].rsplit("/", 1)[1] for c in r.calls if c[0] == "GET" and "/api/appointment/" in c[1]]
+    assert "1" not in read  # before today: not a candidate
+    assert {"2", "3"} <= set(read)
+
+
+@pytest.mark.asyncio
+async def test_marker_at_a_different_slot_returns_that_appointment_not_a_second_one():
+    """I2: staff moved the booking; the resend at the new slot must find the
+    appointment we wrote at the old one (created=False, its own time), so
+    QueueCare's time check flags it instead of recording a duplicate."""
+    row = {
+        "pc_eid": "90",
+        "pc_eventDate": "2026-09-25",
+        "pc_startTime": "15:30:00",
+        "pc_aid": "999",
+        "pc_uuid": "uuid-90",
+    }
+    r = Router(listing_rows=[row], get_rows={"90": {**row, "pc_hometext": f"Fever {MARKER}"}})
+    res = await _adapter(r).write_back_idempotent(_write())
+    assert (res.hms_booking_id, res.created) == ("uuid-90", False)
+    assert res.hms_start == datetime(2026, 9, 25, 10, 0, tzinfo=UTC)  # 15:30 IST
+    assert not any(c[0] == "POST" and c[1].endswith("/appointment") for c in r.calls)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_row_carrying_our_marker_elsewhere_is_not_ours():
+    row = {
+        "pc_eid": "91",
+        "pc_eventDate": "2026-09-25",
+        "pc_startTime": "15:30:00",
+        "pc_aid": _aid(),
+        "pc_uuid": "uuid-91",
+        "pc_apptstatus": "x",
+    }
+    r = Router(listing_rows=[row], get_rows={"91": {**row, "pc_hometext": f"Fever {MARKER}"}})
+    res = await _adapter(r).write_back_idempotent(_write())
+    assert res.created is True
+    assert not any(c[1].endswith("/api/appointment/91") for c in r.calls)
+
+
+@pytest.mark.asyncio
+async def test_too_many_candidates_is_transient_and_reads_none_of_them():
+    """A partial scan could miss our marker and create a duplicate."""
+    rows = [
+        {
+            "pc_eid": str(100 + i),
+            "pc_eventDate": "2026-10-01",
+            "pc_startTime": f"{8 + i // 4:02d}:{(i % 4) * 15:02d}:00",
+            "pc_aid": _aid(),
+            "pc_uuid": f"u{i}",
+        }
+        for i in range(26)
+    ]
+    r = Router(listing_rows=rows)
+    with pytest.raises(TransientError, match="cap 25"):
+        await _adapter(r).write_back_idempotent(_write())
+    assert not any(c[0] == "GET" and "/api/appointment/" in c[1] for c in r.calls)
+    assert not any(c[0] == "POST" for c in r.calls if "/appointment" in c[1])
 
 
 @pytest.mark.asyncio
