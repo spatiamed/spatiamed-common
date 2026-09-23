@@ -216,6 +216,24 @@ class OpenEmrAdapter(FhirR4Adapter):
             )
         return str(eid)
 
+    def _appointment_instant(self, value: str) -> datetime:
+        """OpenEMR's FHIR times are clinic wall time; the offset label is not.
+
+        OpenEMR stores appointments as wall time (pc_eventDate + pc_startTime,
+        no zone) and ``UtilsService::getLocalDateAsUTC`` serves them by
+        attaching PHP's CURRENT offset, ``date('P')`` — it never converts. The
+        digits are therefore always the stored wall time, and the label is
+        whatever the server happens to run in: ``+00:00`` on a container with
+        ``gbl_time_zone`` unset (measured on the hosted demo — 10:00 IST read
+        back as 10:00Z, 5h30 late), the right offset only when the global is
+        set, and wrong across a DST change even then because it is today's
+        offset, not that date's. So read the digits in the integration's
+        configured zone — the same zone every write already uses — and ignore
+        the label.
+        """
+        wall = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return wall.replace(tzinfo=self._tz)
+
     def _result(self, row: dict, *, created: bool) -> WriteBackResult:  # type: ignore[type-arg]
         uuid = row.get("pc_uuid")
         if not uuid:

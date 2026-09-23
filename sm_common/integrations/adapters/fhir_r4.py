@@ -96,6 +96,14 @@ class FhirR4Adapter(HmsAdapter):
                 return _ref_id(ref)
         return ""
 
+    def _appointment_instant(self, value: str) -> datetime:
+        """Parse an Appointment.start/end as the instant it names.
+
+        Standard FHIR: the value carries its own offset. Vendors whose offset
+        label cannot be trusted override this (see OpenEmrAdapter).
+        """
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
     def _to_canonical(self, appt: dict) -> CanonicalAppointment:  # type: ignore[type-arg]
         meta = appt.get("meta", {})
         start = appt.get("start", "")
@@ -104,7 +112,7 @@ class FhirR4Adapter(HmsAdapter):
         # nothing downstream could tell the time had been invented. A hosted
         # FHIR server returned two such values in 2111 appointments. Callers
         # skip the appointment instead — see list_appointments_modified_since.
-        slot_start = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        slot_start = self._appointment_instant(start)
         return CanonicalAppointment(
             appointment_id=str(appt.get("id", "")),
             hms_version=int(meta.get("versionId", 0) or 0),
@@ -462,7 +470,7 @@ class FhirR4Adapter(HmsAdapter):
         start_str = resource.get("start", "")
         # Same reasoning as _to_canonical: an invented time here would show up
         # as reconciliation drift against a slot that was never real.
-        slot_start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+        slot_start = self._appointment_instant(start_str)
 
         updated_str = resource.get("meta", {}).get("lastUpdated", "")
         try:
