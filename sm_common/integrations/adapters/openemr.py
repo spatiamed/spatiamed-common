@@ -220,7 +220,17 @@ class OpenEmrAdapter(FhirR4Adapter):
         uuid = row.get("pc_uuid")
         if not uuid:
             # pc_eid only — never the row itself, which carries fname/lname/DOB.
-            raise VendorRejected(f"OpenEMR appointment {row.get('pc_eid', '?')} carries no pc_uuid")
+            raise VendorRejected(
+                f"OpenEMR appointment {row.get('pc_eid', '?')} carries no pc_uuid", landed=True
+            )
+        for key in ("pc_eventDate", "pc_startTime"):
+            if not row.get(key):
+                # The row exists in the HMS (created or found): landed=True.
+                # Terminal all the same — a retry reads the same row.
+                raise VendorRejected(
+                    f"OpenEMR appointment {row.get('pc_eid', '?')} read-back has no {key}",
+                    landed=True,
+                )
         local = datetime.combine(
             date.fromisoformat(str(row["pc_eventDate"])),
             time.fromisoformat(str(row["pc_startTime"])[:5]),
@@ -348,9 +358,11 @@ class OpenEmrAdapter(FhirR4Adapter):
         match = [r for r in rows if str(r.get("pc_uuid")) == hms_booking_id]
         if not match:
             return CancelResult(status="NOT_FOUND")
+        # _std_request already raised TransientError on 429/5xx; any 4xx left is
+        # a permanent refusal. Status only — the body can carry PHI.
         d = await self._std_request("DELETE", f"/patient/{pid}/appointment/{match[0]['pc_eid']}")
         if d.status_code >= 400:
-            raise TransientError(f"OpenEMR delete HTTP {d.status_code}: {d.text[:200]}")
+            raise VendorRejected(f"OpenEMR delete HTTP {d.status_code}")
         return CancelResult(status="SUCCESS")
 
     async def push_visit_event(

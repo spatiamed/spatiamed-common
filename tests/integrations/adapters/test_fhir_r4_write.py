@@ -154,3 +154,96 @@ async def test_no_practitioner_sends_only_the_patient_participant():
 
     await _adapter(handler).write_back_idempotent(_write(practitioner=None))
     assert [p["actor"]["reference"] for p in seen["body"]["participant"]] == ["Patient/pat-1"]
+
+
+# ─── M5: no response body in error messages (PHI) ───────────────────────────
+
+_ECHO = {
+    "resourceType": "OperationOutcome",
+    "issue": [
+        {
+            "severity": "error",
+            "code": "business-rule",
+            "diagnostics": "Patient/pat-1 Asha Rao 1990-01-01",
+        },
+        {"severity": "error", "code": "duplicate"},
+    ],
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "exc"), [(409, ConflictError), (422, VendorRejected), (503, TransientError)]
+)
+async def test_refusal_messages_carry_status_and_issue_codes_never_the_body(code, exc):
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json=_bundle([]))
+        return httpx.Response(code, json=_ECHO)
+
+    with pytest.raises(exc) as info:
+        await _adapter(handler).write_back_idempotent(_write())
+    msg = str(info.value)
+    assert str(code) in msg
+    assert "business-rule" in msg and "duplicate" in msg
+    assert "Asha" not in msg and "pat-1" not in msg and "1990" not in msg
+
+
+@pytest.mark.asyncio
+async def test_2xx_without_an_id_message_does_not_echo_the_resource():
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json=_bundle([]))
+        return httpx.Response(
+            200, json={"resourceType": "OperationOutcome", **{"text": {"div": "Asha Rao"}}}
+        )
+
+    with pytest.raises(VendorRejected) as info:
+        await _adapter(handler).write_back_idempotent(_write())
+    assert "Asha" not in str(info.value)
+
+
+# ─── M1: cancel raises on a permanent refusal ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_cancel_permanent_4xx_raises_vendor_rejected():
+    def handler(request):
+        return httpx.Response(422, json=_ECHO)
+
+    with pytest.raises(VendorRejected) as info:
+        await _adapter(handler).cancel("appt-9", "patient requested")
+    assert "Asha" not in str(info.value)
+
+
+@pytest.mark.asyncio
+async def test_cancel_429_is_transient():
+    def handler(request):
+        return httpx.Response(429)
+
+    with pytest.raises(TransientError):
+        await _adapter(handler).cancel("appt-9", "patient requested")
+
+
+@pytest.mark.asyncio
+async def test_duplicates_already_carrying_our_identifier_are_a_landed_conflict():
+    """Only we write the booking identifier: two hits mean the HMS holds it."""
+
+    def handler(request):
+        return httpx.Response(200, json=_bundle([_appt("a"), _appt("b")]))
+
+    with pytest.raises(ConflictError) as info:
+        await _adapter(handler).write_back_idempotent(_write())
+    assert info.value.landed is True
+
+
+@pytest.mark.asyncio
+async def test_a_plain_409_is_not_marked_landed():
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json=_bundle([]))
+        return httpx.Response(409, json=_ECHO)
+
+    with pytest.raises(ConflictError) as info:
+        await _adapter(handler).write_back_idempotent(_write())
+    assert info.value.landed is False

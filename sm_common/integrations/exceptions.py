@@ -1,5 +1,15 @@
 class HmsAdapterError(Exception):
-    """Base class for all HMS adapter errors."""
+    """Base class for all HMS adapter errors.
+
+    ``landed=True`` marks a refusal raised AFTER the HMS already holds our
+    appointment — a read-back missing a field we need, or more than one
+    appointment already carrying our booking identifier. Retrying is still
+    pointless, but a caller must not read it as "the write did not land".
+    """
+
+    def __init__(self, *args: object, landed: bool = False) -> None:
+        super().__init__(*args)
+        self.landed = landed
 
 
 class ConflictError(HmsAdapterError):

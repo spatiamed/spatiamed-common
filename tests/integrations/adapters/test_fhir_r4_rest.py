@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
-from sm_common.integrations.exceptions import TransientError
+from sm_common.integrations.exceptions import TransientError, VendorRejected
 from sm_common.phone import hash_phone_for_lookup
 from sm_common.integrations.adapters.fhir_r4 import FhirR4Adapter
 
@@ -527,19 +527,15 @@ async def test_push_visit_event_non_2xx_raises():
 
 
 @pytest.mark.asyncio
-async def test_cancel_permanent_4xx_is_returned_not_raised():
-    """A rejected cancel needs a human, not another attempt.
-
-    Documents the 4xx/5xx split: 5xx raises so compensation retries, a permanent
-    4xx comes back as FAILED so the saga stops hammering it.
-    """
+async def test_cancel_permanent_4xx_raises_not_returned():
+    """Spec §1: cancel raises on failure; only NOT_FOUND is a returned outcome.
+    A permanent 4xx is VendorRejected (terminal), a 5xx TransientError."""
 
     def handler(req: httpx.Request) -> httpx.Response:
         return httpx.Response(422, text="cannot cancel a finished appointment")
 
-    result = await _adapter(handler).cancel(hms_booking_id="appt-x", reason="r")
-    assert result.status == "FAILED"
-    assert "422" in (result.error_detail or "")
+    with pytest.raises(VendorRejected, match="422"):
+        await _adapter(handler).cancel(hms_booking_id="appt-x", reason="r")
 
 
 # ─── get_patient tests ───────────────────────────────────────────────────────

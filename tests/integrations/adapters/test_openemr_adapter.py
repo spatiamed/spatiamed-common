@@ -210,7 +210,9 @@ async def test_unmarked_rows_at_other_slots_are_read_but_never_conflict():
     r = Router(listing_rows=rows, get_rows=get_rows)
     res = await _adapter(r).write_back_idempotent(_write())
     assert res.created is True
-    read = [c[1].rsplit("/", 1)[1] for c in r.calls if c[0] == "GET" and "/api/appointment/" in c[1]]
+    read = [
+        c[1].rsplit("/", 1)[1] for c in r.calls if c[0] == "GET" and "/api/appointment/" in c[1]
+    ]
     assert "1" not in read  # before today: not a candidate
     assert {"2", "3"} <= set(read)
 
@@ -421,3 +423,64 @@ async def test_cancel_appointment_list_404_is_not_found():
     r = R(fhir_appointment=fhir_appt)
     res = await _adapter(r).cancel("uuid-not-present", "patient requested")
     assert res.status == "NOT_FOUND"
+
+
+# ─── M1: DELETE refusals ────────────────────────────────────────────────────
+
+
+def _cancel_router(delete_status):
+    row = {
+        "pc_eid": "146",
+        "pc_uuid": "uuid-146",
+        "pc_eventDate": "2026-10-23",
+        "pc_startTime": "10:00:00",
+    }
+    fhir_appt = {
+        "resourceType": "Appointment",
+        "participant": [{"actor": {"reference": "Patient/pat-uuid"}}],
+    }
+
+    class R(Router):
+        def __call__(self, request):
+            if request.method == "DELETE":
+                self.calls.append(("DELETE", request.url.path, b""))
+                return httpx.Response(delete_status, json={"error": "Asha Rao"})
+            return super().__call__(request)
+
+    return R(listing_rows=[row], fhir_appointment=fhir_appt)
+
+
+@pytest.mark.asyncio
+async def test_cancel_delete_4xx_is_vendor_rejected_not_retried():
+    with pytest.raises(VendorRejected) as info:
+        await _adapter(_cancel_router(400)).cancel("uuid-146", "patient requested")
+    assert "Asha" not in str(info.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", [429, 503])
+async def test_cancel_delete_429_5xx_is_transient(code):
+    with pytest.raises(TransientError):
+        await _adapter(_cancel_router(code)).cancel("uuid-146", "patient requested")
+
+
+# ─── M8: read-back missing the start keys ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["pc_eventDate", "pc_startTime"])
+async def test_read_back_missing_start_key_is_vendor_rejected_naming_it(missing):
+    row = {
+        "pc_eid": "77",
+        "pc_eventDate": "2026-09-24",
+        "pc_startTime": "10:00:00",
+        "pc_aid": _aid(),
+        "pc_uuid": "uuid-77",
+        "pc_hometext": f"Fever {MARKER}",
+    }
+    full = {k: v for k, v in row.items() if k != missing}
+    r = Router(listing_rows=[row], get_rows={"77": full})
+    with pytest.raises(VendorRejected, match=missing) as info:
+        await _adapter(r).write_back_idempotent(_write())
+    # The row is in the HMS: a caller must not read this refusal as "not landed".
+    assert info.value.landed is True

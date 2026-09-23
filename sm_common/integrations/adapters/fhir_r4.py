@@ -43,6 +43,25 @@ logger = logging.getLogger(__name__)
 BOOKING_IDENTIFIER_SYSTEM = "https://spatiamed.com/booking"
 
 
+def _refusal(resp: httpx.Response) -> str:
+    """A vendor refusal, PHI-safe: status code plus OperationOutcome issue codes.
+
+    Never the body text — an OperationOutcome can echo the submitted resource
+    (patient reference, reason), and these messages become job.last_error,
+    booking error detail and log lines.
+    """
+    codes: list[str] = []
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict):
+        for issue in body.get("issue") or []:
+            if isinstance(issue, dict) and isinstance(issue.get("code"), str):
+                codes.append(issue["code"])
+    return f"HTTP {resp.status_code} issue_codes={codes}"
+
+
 def _ref_id(participant_actor_ref: str) -> str:
     return participant_actor_ref.split("/")[-1] if participant_actor_ref else ""
 
@@ -543,8 +562,10 @@ class FhirR4Adapter(HmsAdapter):
         appt_id = resource.get("id")
         if resource.get("resourceType") != "Appointment" or not appt_id:
             # FINDINGS §7.2: a 2xx is not evidence anything was created.
+            # Keys only: a 2xx body can be the resource we sent, carrying PHI.
             raise VendorRejected(
-                f"vendor response carries no Appointment id: {str(resource)[:200]}"
+                f"vendor response carries no Appointment id: resourceType="
+                f"{resource.get('resourceType')!r} keys={sorted(resource)}"
             )
         start = resource.get("start")
         hms_start = datetime.fromisoformat(start.replace("Z", "+00:00")) if start else None
@@ -577,8 +598,10 @@ class FhirR4Adapter(HmsAdapter):
             if e.get("resource", {}).get("resourceType") == "Appointment"
         ]
         if len(hits) > 1:
+            # Only we write this identifier: the HMS already holds it (twice).
             raise ConflictError(
-                f"{len(hits)} appointments already carry {token} — a human must reconcile"
+                f"{len(hits)} appointments already carry {token} — a human must reconcile",
+                landed=True,
             )
         return hits[0] if hits else None
 
@@ -604,15 +627,11 @@ class FhirR4Adapter(HmsAdapter):
                 f"vendor has no Appointment create route (HTTP {resp.status_code})"
             )
         if resp.status_code == 409:
-            raise ConflictError(resp.text[:200])
+            raise ConflictError(f"write_back_idempotent {_refusal(resp)}")
         if resp.status_code == 429 or resp.status_code >= 500:
-            raise TransientError(
-                f"write_back_idempotent HTTP {resp.status_code}: {resp.text[:200]}"
-            )
+            raise TransientError(f"write_back_idempotent {_refusal(resp)}")
         if resp.status_code >= 400:
-            raise VendorRejected(
-                f"write_back_idempotent HTTP {resp.status_code}: {resp.text[:200]}"
-            )
+            raise VendorRejected(f"write_back_idempotent {_refusal(resp)}")
         if resp.status_code == 200 and not resp.content:
             # Conditional create matched an existing resource and the server
             # returned no body — look it up rather than guess.
@@ -652,14 +671,12 @@ class FhirR4Adapter(HmsAdapter):
             # Nothing to cancel is an answer, not a failure — do not retry.
             return CancelResult(status="NOT_FOUND", error_detail=resp.text)
 
-        if resp.status_code >= 500:
-            raise TransientError(f"cancel HTTP {resp.status_code}: {resp.text[:200]}")
+        if resp.status_code == 429 or resp.status_code >= 500:
+            raise TransientError(f"cancel {_refusal(resp)}")
 
-        # A permanent 4xx needs a human, not another attempt.
-        return CancelResult(
-            status="FAILED",
-            error_detail=f"HTTP {resp.status_code}: {resp.text[:200]}",
-        )
+        # A permanent 4xx needs a human, not another attempt (spec §1: cancel
+        # raises on failure; only NOT_FOUND is a returned outcome).
+        raise VendorRejected(f"cancel {_refusal(resp)}")
 
     def _visit_event_status(
         self,
