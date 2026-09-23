@@ -12,6 +12,7 @@ from sm_common.integrations.adapters.bahmni import BahmniAdapter
 from sm_common.integrations.adapters.fhir_r4 import FhirR4Adapter
 from sm_common.integrations.adapters.generic_rest import GenericRestAdapter
 from sm_common.integrations.adapters.mocdoc import MocDocAdapter
+from sm_common.integrations.adapters.openemr import OpenEmrAdapter
 from sm_common.integrations.hms_adapter import HmsAdapter
 
 
@@ -63,6 +64,17 @@ def build_adapter(cfg: AdapterBuildConfig) -> HmsAdapter:
         mapping["api_key"] = creds.get("api_key", mapping.get("api_key", ""))
         mapping["api_secret"] = creds.get("api_secret", mapping.get("api_secret", ""))
         return GenericRestAdapter(mapping)
+
+    if vendor == "openemr":
+        auth_scheme = creds.get("auth_scheme", "private_key_jwt")
+        auth_cfg = {k: v for k, v in creds.items() if k not in ("auth_scheme", "openemr")}
+        return OpenEmrAdapter(
+            base_url=base_url or creds.get("base_url", ""),
+            auth_scheme=auth_scheme,
+            auth_cfg=auth_cfg,
+            openemr=dict(creds.get("openemr") or {}),
+            hash_salt=hash_salt,
+        )
 
     if vendor == "fhir_r4":
         auth_scheme = creds.get("auth_scheme", "oauth2_client_credentials")

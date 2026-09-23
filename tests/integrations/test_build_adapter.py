@@ -32,3 +32,30 @@ def test_builds_generic_rest_with_mapping():
 def test_unknown_vendor_raises():
     with pytest.raises(ValueError, match="Unknown HMS vendor"):
         build_adapter(_cfg(vendor="nope"))
+
+
+def test_build_openemr_adapter():
+    creds = {
+        "auth_scheme": "private_key_jwt",
+        "token_url": "t",
+        "client_id": "c",
+        "private_key_pem": "k",
+        "openemr": {
+            "timezone": "Asia/Kolkata",
+            "pc_catid": "5",
+            "pc_facility": "3",
+            "pc_billing_location": "3",
+            "write_user": {"token_url": "t"},
+        },
+    }
+    a = build_adapter(
+        AdapterBuildConfig(
+            vendor="openemr",
+            base_url="https://oe/apis/default/fhir",
+            credentials=creds,
+            field_mapping=None,
+        )
+    )
+    assert a.vendor_name == "openemr"
+    assert a._std == "https://oe/apis/default/api"
+    assert "openemr" not in a._cfg  # system auth cfg must not carry the write credential
