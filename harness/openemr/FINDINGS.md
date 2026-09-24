@@ -694,3 +694,61 @@ cursor handed back to OpenEMR, which applies the same labelling on its side.
 ```
 
 **18 checks, 0 failures**, exit code 0.
+
+## 13. FHIR Practitioner list vs the Standard API NPI filter (measured 2026-09-24)
+
+**Question:** does OpenEMR's FHIR `/Practitioner` list apply the same NPI
+filter as the Standard API's `/api/practitioner`, or does it expose every
+`users` row?
+
+**Source (OpenEMR 8.3.0, on the Railway-hosted demo container):**
+
+`src/Services/FHIR/FhirPractitionerService.php` constructs a
+`PractitionerService` and delegates all reads to it (`$this->practitionerService
+= new PractitionerService();`); it has no independent SQL and no separate NPI
+handling of its own. `src/Services/PractitionerService.php::search()` forces
+the filter whenever the caller does not specify one:
+
+```php
+} else {
+    $search['npi'] = new TokenSearchField('npi', [new TokenSearchValue(false)]);
+    $search['npi']->setModifier(SearchModifier::MISSING);
+}
+```
+
+i.e. "only rows where `npi` is NOT missing" — the same forced filter the
+Standard API's `/api/practitioner` uses, because both call through this one
+`PractitionerService::search()`. (The same method also forces `username` to
+be non-empty, unioned with a handful of `abook_type` values — not relevant to
+the NPI question but worth knowing if a practitioner count still looks short
+after fixing NPIs.)
+
+**DB counts** (`users` table, via `railway ssh --service mariadb`):
+
+| total users | users with a non-empty NPI | users with a non-empty username |
+|---|---|---|
+| 4 | 1 | 4 |
+
+Three of the four `users` rows have no NPI, so this dataset can discriminate
+between "list everything" and "list only NPI-holders".
+
+**FHIR count** (`$SCRATCH/probe_fhir_practitioners.py`, `fetch_doctor_roster`
+against `{OPENEMR_URL}/apis/default/fhir`, `system/Practitioner.read`):
+
+```
+FHIR /Practitioner count: 1
+  external_doctor_id='a2d15c9f-3636-42a2-be5d-c60e5e5b820c' has_npi=True
+```
+
+**Conclusion:** FHIR `/Practitioner` lists only users with a non-empty NPI
+(same filter as `/api/practitioner`) — 1 result, matching the 1 DB row that
+has an NPI, and that result carries the `http://hl7.org/fhir/sid/us-npi`
+identifier. The other 3 `users` rows (no NPI) are invisible to both APIs.
+
+**What this means for QueueCare:** the roster path (FHIR or Standard API,
+either one) cannot hand `_aid` mapping a practitioner OpenEMR would then
+reject on write — a `users` row without an NPI never appears in the list to
+begin with, so it can't be selected and can't 404 later. The demo doctor
+still needs an NPI to be listed at all, which it has (measured above); this
+finding is about the *shape* of the roster the HMS will expose, not this
+demo's write path (already proven live in §12).
