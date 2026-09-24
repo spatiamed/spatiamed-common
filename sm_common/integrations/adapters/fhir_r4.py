@@ -460,6 +460,9 @@ class FhirR4Adapter(HmsAdapter):
         forwarded to the server — FHIR R4 Practitioner has no standard
         ``_lastUpdated`` date filter that is reliably implemented across vendors.
         A full roster is always returned.
+
+        Raises TransientError on any HTTP error, failed page or non-JSON body —
+        never returns a partial or empty roster for a failure.
         """
         logger.debug(
             "FhirR4Adapter.fetch_doctor_roster: as_of_date=%s is not applied "
@@ -467,37 +470,27 @@ class FhirR4Adapter(HmsAdapter):
             as_of_date,
         )
         headers = await self._headers()
-        try:
-            resp = await self._client.get(
-                f"{self._base}/Practitioner",
-                params={"_count": "200"},
-                headers=headers,
-            )
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            logger.warning("FhirR4Adapter.fetch_doctor_roster HTTP error: %s", exc)
-            return []
-
+        url: str | None = f"{self._base}/Practitioner"
+        params: dict[str, str] | None = {"_count": "200"}
         doctors: list[CanonicalDoctor] = []
-        while True:
-            bundle = resp.json()
+        while url:
+            try:
+                resp = await self._client.get(url, params=params, headers=headers)
+                resp.raise_for_status()
+                bundle = resp.json()
+            except httpx.HTTPError as exc:
+                raise TransientError(f"FhirR4Adapter.fetch_doctor_roster: {exc}") from exc
+            except ValueError as exc:
+                raise TransientError(
+                    f"FhirR4Adapter.fetch_doctor_roster: non-JSON body (HTTP {resp.status_code})"
+                ) from exc
             for entry in bundle.get("entry", []):
                 resource = entry.get("resource", {})
                 if resource.get("resourceType") != "Practitioner":
                     continue
                 doctors.append(self._practitioner_to_canonical(resource))
-
-            next_url = self._next_url(bundle)
-            if not next_url:
-                break
-
-            try:
-                resp = await self._client.get(next_url, headers=headers)
-                resp.raise_for_status()
-            except httpx.HTTPError as exc:
-                logger.warning("FhirR4Adapter.fetch_doctor_roster pagination error: %s", exc)
-                break
-
+            url = self._next_url(bundle)
+            params = None  # the server-supplied next URL already carries its query
         return doctors
 
     def _booking_to_external(self, resource: dict) -> ExternalBooking:  # type: ignore[type-arg]

@@ -245,15 +245,16 @@ async def test_fetch_doctor_roster_empty_bundle():
 
 
 @pytest.mark.asyncio
-async def test_fetch_doctor_roster_http_error_returns_empty():
-    """fetch_doctor_roster HTTP error → returns [] (never raises)."""
+async def test_fetch_doctor_roster_http_error_raises_transient():
+    """A failed fetch must never read as "this hospital has no doctors": the
+    roster snapshot keys mapping staleness off it (QueueCare sub-project 2)."""
 
     def handler(req: httpx.Request) -> httpx.Response:
         return httpx.Response(503, text="Service Unavailable")
 
     a = _adapter(handler)
-    roster = await a.fetch_doctor_roster(as_of_date=date(2026, 6, 22))
-    assert roster == []
+    with pytest.raises(TransientError):
+        await a.fetch_doctor_roster(as_of_date=date(2026, 6, 22))
 
 
 @pytest.mark.asyncio

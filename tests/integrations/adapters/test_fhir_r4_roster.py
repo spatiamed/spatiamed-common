@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from sm_common.integrations.adapters.fhir_r4 import FhirR4Adapter
+from sm_common.integrations.exceptions import TransientError
 
 NPI = "http://hl7.org/fhir/sid/us-npi"
 
@@ -102,3 +103,39 @@ async def test_active_is_read_when_present_and_none_when_absent():
     assert (await _one(_prac(active=False))).active is False
     assert (await _one(_prac(active=True))).active is True
     assert (await _one(_prac())).active is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_doctor_roster_failed_page_raises():
+    """Page 1 fine, page 2 fails: a partial roster would silently make every
+    practitioner on page 2 look deleted."""
+    page1 = {
+        "resourceType": "Bundle",
+        "link": [{"relation": "next", "url": "https://hms.example/fhir/Practitioner?page=2"}],
+        "entry": [{"resource": _prac(id="p-1")}],
+    }
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if "page=2" in str(req.url):
+            return httpx.Response(502)
+        return httpx.Response(200, json=page1)
+
+    a = FhirR4Adapter(
+        base_url="https://hms.example/fhir", auth_scheme="bearer", auth_cfg={"bearer_token": "t"}
+    )
+    a._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(TransientError):
+        await a.fetch_doctor_roster(as_of_date=date(2026, 9, 24))
+
+
+@pytest.mark.asyncio
+async def test_fetch_doctor_roster_non_json_page_raises():
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>login</html>")
+
+    a = FhirR4Adapter(
+        base_url="https://hms.example/fhir", auth_scheme="bearer", auth_cfg={"bearer_token": "t"}
+    )
+    a._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(TransientError):
+        await a.fetch_doctor_roster(as_of_date=date(2026, 9, 24))
