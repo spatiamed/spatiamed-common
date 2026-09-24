@@ -66,6 +66,42 @@ def _ref_id(participant_actor_ref: str) -> str:
     return participant_actor_ref.split("/")[-1] if participant_actor_ref else ""
 
 
+def _practitioner_display_name(resource: dict) -> str | None:  # type: ignore[type-arg]
+    """First official/usual name, else the first that is not `old`.
+
+    Its `text`, or prefix + given + family joined with spaces. None when there
+    is no usable name — an admin then maps this practitioner by hand.
+    """
+    names = [n for n in resource.get("name") or [] if isinstance(n, dict)]
+    chosen = next((n for n in names if n.get("use") in ("official", "usual")), None)
+    if chosen is None:
+        chosen = next((n for n in names if n.get("use") != "old"), None)
+    if chosen is None:
+        return None
+    text = str(chosen.get("text") or "").strip()
+    if text:
+        return text
+    parts = [
+        *(chosen.get("prefix") or []),
+        *(chosen.get("given") or []),
+        chosen.get("family") or "",
+    ]
+    joined = " ".join(str(p).strip() for p in parts if p and str(p).strip())
+    return joined or None
+
+
+def _practitioner_identifiers(resource: dict) -> list[tuple[str, str]]:  # type: ignore[type-arg]
+    """Every identifier with a non-empty value, as (system or "", value)."""
+    out: list[tuple[str, str]] = []
+    for ident in resource.get("identifier") or []:
+        if not isinstance(ident, dict):
+            continue
+        value = str(ident.get("value") or "").strip()
+        if value:
+            out.append((str(ident.get("system") or ""), value))
+    return out
+
+
 class FhirR4Adapter(HmsAdapter):
     vendor_name = "fhir_r4"
 
@@ -400,6 +436,8 @@ class FhirR4Adapter(HmsAdapter):
                     dept_code = ident.get("value", "")
                     dept_label = ident.get("display", dept_code)
 
+        active = resource.get("active")
+
         return CanonicalDoctor(
             external_doctor_id=str(resource.get("id", "")),
             external_speciality_id=speciality_code or "unknown",
@@ -410,6 +448,9 @@ class FhirR4Adapter(HmsAdapter):
             consultation_fee_inr=None,
             consultation_duration_min=15,
             languages=[],
+            display_name=_practitioner_display_name(resource),
+            identifiers=_practitioner_identifiers(resource),
+            active=active if isinstance(active, bool) else None,
         )
 
     async def fetch_doctor_roster(self, as_of_date: date) -> list[CanonicalDoctor]:

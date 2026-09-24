@@ -110,6 +110,12 @@ class CanonicalDoctor:
     consultation_fee_inr: int | None
     consultation_duration_min: int
     languages: list[str] = field(default_factory=list)
+    # Roster identity (v0.13.0) — what an admin maps a local doctor by.
+    # Filled by FhirR4Adapter; bahmni/generic_rest/mocdoc leave the defaults.
+    # identifiers are (system, value); system is "" when the vendor sent none.
+    display_name: str | None = None
+    identifiers: list[tuple[str, str]] = field(default_factory=list)
+    active: bool | None = None
 
 
 @dataclass
