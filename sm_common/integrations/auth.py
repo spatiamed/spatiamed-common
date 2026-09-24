@@ -21,7 +21,7 @@ from email.utils import formatdate
 import httpx
 import jwt
 
-from sm_common.integrations.exceptions import AuthError
+from sm_common.integrations.exceptions import AuthError, TransientError
 
 
 async def build_auth_headers(
@@ -58,6 +58,28 @@ async def build_auth_headers(
     return base
 
 
+async def _post_token(
+    client: httpx.AsyncClient, token_url: str, data: dict, grant: str
+) -> httpx.Response:
+    """POST to a token endpoint, turning failures into typed adapter errors.
+
+    A refused credential (400/401/403) is AuthError: retrying will not help and
+    the admin needs to see it. An unreachable endpoint, a timeout or a 5xx is
+    TransientError. A raw httpx error used to escape from here, and callers
+    that only catch adapter errors turned it into a bare 500.
+    """
+    try:
+        resp = await client.post(token_url, data=data)
+    except httpx.TransportError as exc:
+        raise TransientError(f"{grant} token endpoint unreachable: {exc!r}") from exc
+    if resp.status_code in (400, 401, 403):
+        raise AuthError(f"{grant} refused: HTTP {resp.status_code} {resp.text[:200]}")
+    if resp.status_code >= 500:
+        raise TransientError(f"{grant} token endpoint failed: HTTP {resp.status_code}")
+    resp.raise_for_status()
+    return resp
+
+
 async def _oauth_token(client: httpx.AsyncClient, cfg: dict) -> str:
     cache = cfg.get("_oauth_cache")
     now = time.monotonic()
@@ -70,8 +92,7 @@ async def _oauth_token(client: httpx.AsyncClient, cfg: dict) -> str:
     }
     if cfg.get("scopes"):
         data["scope"] = cfg["scopes"]
-    resp = await client.post(cfg["token_url"], data=data)
-    resp.raise_for_status()
+    resp = await _post_token(client, cfg["token_url"], data, "client_credentials grant")
     payload = resp.json()
     token = payload["access_token"]
     cfg["_oauth_cache"] = {"token": token, "expires_at": now + int(payload.get("expires_in", 3600))}
@@ -119,8 +140,7 @@ async def _private_key_jwt_token(client: httpx.AsyncClient, cfg: dict) -> str:
     if cfg.get("scopes"):
         data["scope"] = cfg["scopes"]
 
-    resp = await client.post(cfg["token_url"], data=data)
-    resp.raise_for_status()
+    resp = await _post_token(client, cfg["token_url"], data, "private_key_jwt grant")
     payload = resp.json()
     token = payload["access_token"]
     cfg["_oauth_cache"] = {"token": token, "expires_at": now + int(payload.get("expires_in", 3600))}
@@ -154,10 +174,7 @@ async def _password_grant_token(client: httpx.AsyncClient, cfg: dict) -> str:
     }
     if cfg.get("scopes"):
         data["scope"] = cfg["scopes"]
-    resp = await client.post(cfg["token_url"], data=data)
-    if resp.status_code in (400, 401, 403):
-        raise AuthError(f"password grant refused: HTTP {resp.status_code} {resp.text[:200]}")
-    resp.raise_for_status()
+    resp = await _post_token(client, cfg["token_url"], data, "password grant")
     payload = resp.json()
     token = payload["access_token"]
     cfg["_oauth_cache"] = {"token": token, "expires_at": now + int(payload.get("expires_in", 3600))}
