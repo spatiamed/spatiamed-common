@@ -308,11 +308,6 @@ class FhirR4Adapter(HmsAdapter):
             return None
         return None
 
-    def _age_from_birthdate(self, birth_date: str | None) -> int | None:
-        """Age in years on the UTC day, from any FHIR birthDate shape."""
-        dob = self._birth_dob(birth_date)
-        return age_on(dob.value, datetime.now(UTC).date()) if dob else None
-
     def _patient_to_canonical(self, resource: dict) -> CanonicalPatient:  # type: ignore[type-arg]
         identifiers = resource.get("identifier", [])
         mrn = ""
