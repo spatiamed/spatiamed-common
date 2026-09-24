@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
-from sm_common.integrations.exceptions import TransientError, VendorRejected
+from sm_common.integrations.exceptions import AuthError, TransientError, VendorRejected
 from sm_common.phone import hash_phone_for_lookup
 from sm_common.integrations.adapters.fhir_r4 import FhirR4Adapter
 
@@ -253,6 +253,65 @@ async def test_fetch_doctor_roster_http_error_raises_transient():
         return httpx.Response(503, text="Service Unavailable")
 
     a = _adapter(handler)
+    with pytest.raises(TransientError):
+        await a.fetch_doctor_roster(as_of_date=date(2026, 6, 22))
+
+
+def _oauth_adapter(handler):
+    a = FhirR4Adapter(
+        base_url="https://hms.example/fhir",
+        auth_scheme="oauth2_client_credentials",
+        auth_cfg={"token_url": "https://hms.example/token", "client_id": "c", "client_secret": "s"},
+    )
+    a._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return a
+
+
+@pytest.mark.asyncio
+async def test_fetch_doctor_roster_token_refusal_raises_auth_error():
+    """Rotated or wrong credentials: the token endpoint refuses. That must reach
+    QueueCare as AuthError (an error run the admin can read), not a raw httpx
+    error that the refresh endpoint turns into a bare 500 (final review I-1)."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/token":
+            return httpx.Response(401, json={"error": "invalid_client"})
+        raise AssertionError("roster must not be fetched without a token")
+
+    a = _oauth_adapter(handler)
+    with pytest.raises(AuthError):
+        await a.fetch_doctor_roster(as_of_date=date(2026, 6, 22))
+
+
+@pytest.mark.asyncio
+async def test_fetch_doctor_roster_token_endpoint_unreachable_raises_transient():
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    a = _oauth_adapter(handler)
+    with pytest.raises(TransientError):
+        await a.fetch_doctor_roster(as_of_date=date(2026, 6, 22))
+
+
+@pytest.mark.asyncio
+async def test_fetch_doctor_roster_token_endpoint_other_4xx_raises_transient():
+    """A status the auth layer does not classify (404: wrong token_url) still
+    surfaces as a typed adapter error, never a raw httpx one."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="no such route")
+
+    a = _oauth_adapter(handler)
+    with pytest.raises(TransientError):
+        await a.fetch_doctor_roster(as_of_date=date(2026, 6, 22))
+
+
+@pytest.mark.asyncio
+async def test_fetch_doctor_roster_token_non_json_raises_transient():
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>login</html>")
+
+    a = _oauth_adapter(handler)
     with pytest.raises(TransientError):
         await a.fetch_doctor_roster(as_of_date=date(2026, 6, 22))
 

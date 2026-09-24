@@ -2,7 +2,7 @@ import httpx
 import pytest
 
 from sm_common.integrations.auth import build_auth_headers, invalidate_token
-from sm_common.integrations.exceptions import AuthError
+from sm_common.integrations.exceptions import AuthError, TransientError
 
 import urllib.parse
 
@@ -254,3 +254,63 @@ def test_invalidate_token_drops_the_cache():
     cfg = {"_oauth_cache": {"token": "x", "expires_at": 10**12}}
     invalidate_token(cfg)
     assert "_oauth_cache" not in cfg
+
+
+# ─── Token-endpoint failures are typed, not raw httpx errors ────────────────
+# A refused credential is AuthError (stop retrying, tell the admin); an
+# unreachable or failing token endpoint is TransientError (retry later). A raw
+# httpx error escaped before, and QueueCare's roster refresh turned it into a
+# bare 500 with no sync-run record (final review I-1).
+
+_TOKEN_SCHEMES = ["oauth2_client_credentials", "private_key_jwt", "oauth2_password"]
+
+
+def _token_cfg(scheme: str) -> dict:
+    cfg = {
+        "token_url": "https://hms.example/token",
+        "client_id": "cid",
+        "client_secret": "sec",
+        "username": "u",
+        "password": "p",
+    }
+    if scheme == "private_key_jwt":
+        cfg["private_key_pem"] = _rsa_pem()
+    return cfg
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scheme", _TOKEN_SCHEMES)
+@pytest.mark.parametrize("status", [400, 401, 403])
+async def test_token_endpoint_refusal_is_auth_error(scheme, status):
+    def handler(request):
+        return httpx.Response(status, json={"error": "invalid_client"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(AuthError):
+            await build_auth_headers(client, scheme, _token_cfg(scheme))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scheme", _TOKEN_SCHEMES)
+@pytest.mark.parametrize("status", [500, 502, 503])
+async def test_token_endpoint_5xx_is_transient(scheme, status):
+    def handler(request):
+        return httpx.Response(status, text="down")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(TransientError):
+            await build_auth_headers(client, scheme, _token_cfg(scheme))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scheme", _TOKEN_SCHEMES)
+@pytest.mark.parametrize(
+    "exc", [httpx.ConnectError("refused"), httpx.ReadTimeout("slow")], ids=["connect", "timeout"]
+)
+async def test_token_endpoint_unreachable_is_transient(scheme, exc):
+    def handler(request):
+        raise exc
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(TransientError):
+            await build_auth_headers(client, scheme, _token_cfg(scheme))

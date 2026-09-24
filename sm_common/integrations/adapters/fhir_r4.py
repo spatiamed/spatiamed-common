@@ -469,7 +469,18 @@ class FhirR4Adapter(HmsAdapter):
             "(FHIR R4 Practitioner has no standard date filter); returning full roster.",
             as_of_date,
         )
-        headers = await self._headers()
+        # The token fetch is covered too: build_auth_headers already raises
+        # AuthError/TransientError for the cases it classifies, and anything
+        # else (a 404 token_url, a non-JSON or token-less body) must still be a
+        # typed error, never a raw one a caller turns into a bare 500.
+        try:
+            headers = await self._headers()
+        except httpx.HTTPError as exc:
+            raise TransientError(f"FhirR4Adapter.fetch_doctor_roster: token: {exc}") from exc
+        except (ValueError, KeyError) as exc:
+            raise TransientError(
+                f"FhirR4Adapter.fetch_doctor_roster: unreadable token response ({exc!r})"
+            ) from exc
         url: str | None = f"{self._base}/Practitioner"
         params: dict[str, str] | None = {"_count": "200"}
         doctors: list[CanonicalDoctor] = []
