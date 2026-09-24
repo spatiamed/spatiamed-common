@@ -85,3 +85,20 @@ def test_scenario_is_byte_identical_across_interpreter_processes(tmp_path):
         digests.append(hashlib.sha256(result.stdout.encode()).hexdigest())
 
     assert digests[0] == digests[1]
+
+
+def test_patient_dob_is_optional_and_absent_from_output_when_none():
+    import dataclasses
+    from datetime import date
+
+    from sm_common.demo_scenario.types import PatientRef
+
+    fields = [f.name for f in dataclasses.fields(PatientRef)]
+    assert fields[-1] == "dob"
+    ref = PatientRef(0, __import__("uuid").uuid4(), "A B", "+910000000000", 30, "M", "en")
+    assert ref.dob is None
+    assert dataclasses.replace(ref, dob=date(1995, 3, 1)).dob == date(1995, 3, 1)
+
+
+def test_serialised_roster_has_no_dob_key_today():
+    assert all("dob" not in p for p in scenario_to_dict(CFG)["patients"])
