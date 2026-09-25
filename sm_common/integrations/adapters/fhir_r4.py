@@ -13,6 +13,7 @@ from uuid import UUID
 
 import httpx
 
+from sm_common.identity.dob import Dob, DobError, age_on, make_dob
 from sm_common.integrations.auth import build_auth_headers
 from sm_common.integrations.canonical_types import (
     AdapterHealth,
@@ -284,16 +285,28 @@ class FhirR4Adapter(HmsAdapter):
         """Map FHIR gender string to canonical M/F/O."""
         return {"male": "M", "female": "F", "other": "O", "unknown": None}.get(fhir_gender or "")
 
-    def _age_from_birthdate(self, birth_date: str | None) -> int | None:
-        """Derive age in years from a FHIR birthDate string (YYYY-MM-DD)."""
+    def _birth_dob(self, birth_date: str | None) -> Dob | None:
+        """FHIR birthDate (YYYY, YYYY-MM or YYYY-MM-DD) as a validated Dob, else None.
+
+        Validated against the UTC day: the adapter has no clinic day, and a
+        one-day skew on a DOB bound is noise.
+        """
         if not birth_date:
             return None
+        today = datetime.now(UTC).date()
+        parts = birth_date.strip().split("-")
         try:
-            born = date.fromisoformat(birth_date)
-            today = datetime.now(UTC).date()
-            return today.year - born.year - ((today.month, today.day) < (born.month, born.day))
-        except ValueError:
+            if len(parts) == 3:
+                return make_dob(
+                    int(parts[0]), int(parts[1]), int(parts[2]), "exact", reference=today
+                )
+            if len(parts) == 2:
+                return make_dob(int(parts[0]), int(parts[1]), None, "month", reference=today)
+            if len(parts) == 1 and len(parts[0]) == 4:
+                return make_dob(int(parts[0]), None, None, "year", reference=today)
+        except (DobError, ValueError):
             return None
+        return None
 
     def _patient_to_canonical(self, resource: dict) -> CanonicalPatient:  # type: ignore[type-arg]
         identifiers = resource.get("identifier", [])
@@ -331,14 +344,17 @@ class FhirR4Adapter(HmsAdapter):
                 phone_hash = hash_phone_for_lookup(raw_phone, self._hash_salt) if raw_phone else ""
                 break
 
+        dob = self._birth_dob(resource.get("birthDate"))
         return CanonicalPatient(
             mrn=mrn,
             abha_id=abha_id,
             phone_hash=phone_hash,
             name_token=name_token,
-            age=self._age_from_birthdate(resource.get("birthDate")),
+            age=age_on(dob.value, datetime.now(UTC).date()) if dob else None,
             gender=self._gender_code(resource.get("gender")),  # type: ignore[arg-type]
             resource_id=str(resource.get("id")) if resource.get("id") else None,
+            birth_date=dob.value if dob else None,
+            birth_date_precision=dob.precision if dob else None,
         )
 
     def _patient_query(

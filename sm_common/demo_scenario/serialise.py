@@ -41,6 +41,7 @@ def scenario_to_dict(cfg: ScenarioConfig) -> dict[str, Any]:
                 "age": p.age,
                 "gender": p.gender,
                 "language": p.language,
+                **({"dob": p.dob.isoformat()} if p.dob is not None else {}),
             }
             for p in generate_roster(cfg)
         ],

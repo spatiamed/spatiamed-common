@@ -42,6 +42,7 @@ class PatientRef:
     age: int
     gender: str  # "M" | "F"
     language: str  # "en" | "hi" | "mr"
+    dob: date | None = None
 
 
 @dataclass(frozen=True, slots=True)

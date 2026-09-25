@@ -97,6 +97,13 @@ class CanonicalPatient:
     # resource id. On OpenEMR the first identifier is the internal pid, a
     # different value, so using mrn gave one patient two conflicting refs.
     resource_id: str | None = None
+    # Real DOB when the vendor holds one (FHIR birthDate, partial allowed).
+    # birth_date is the stored anchor for partials (15th / 1 July, see
+    # sm_common.identity.dob); birth_date_precision is exact|month|year.
+    # mocdoc/bahmni/generic_rest are age-only and leave both None; QueueCare
+    # ingest turns such an age into an `estimated` DOB.
+    birth_date: date | None = None
+    birth_date_precision: str | None = None
 
 
 @dataclass
