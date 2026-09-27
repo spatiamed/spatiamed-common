@@ -44,6 +44,23 @@ logger = logging.getLogger(__name__)
 BOOKING_IDENTIFIER_SYSTEM = "https://spatiamed.com/booking"
 
 
+def _family_matches(name_token: str, family: str) -> bool:
+    """Whole-token-run, case-insensitive exact match of ``family`` in ``name_token``.
+
+    FINDINGS §14 P4: OpenEMR's ``family=`` is a case-insensitive starts-with
+    match ("rao" also returns "Raorane"), so the caller must filter to an
+    exact surname match itself. A substring or split-membership test drops
+    every multi-word surname ("Van Der Berg") — this matches a contiguous run
+    of whole tokens instead (preflight F8/F9).
+    """
+    fam_tokens = family.strip().casefold().split()
+    if not fam_tokens:
+        return False
+    name_tokens = (name_token or "").casefold().split()
+    m = len(fam_tokens)
+    return any(name_tokens[i : i + m] == fam_tokens for i in range(len(name_tokens) - m + 1))
+
+
 def _refusal(resp: httpx.Response) -> str:
     """A vendor refusal, PHI-safe: status code plus OperationOutcome issue codes.
 
@@ -125,6 +142,23 @@ class FhirR4Adapter(HmsAdapter):
 
     async def _headers(self, body: str = "") -> dict[str, str]:
         return await build_auth_headers(self._client, self._scheme, self._cfg, body)
+
+    async def _token_headers(self, what: str) -> dict[str, str]:
+        """``_headers()`` with every token failure typed.
+
+        ``build_auth_headers`` already raises AuthError/TransientError for what
+        it classifies; anything else (a 404 token_url, a non-JSON or
+        token-less body) must still be a typed error, never a raw one a caller
+        turns into a bare 500.
+        """
+        try:
+            return await self._headers()
+        except httpx.HTTPError as exc:
+            raise TransientError(f"FhirR4Adapter.{what}: token: {exc}") from exc
+        except (ValueError, KeyError) as exc:
+            raise TransientError(
+                f"FhirR4Adapter.{what}: unreadable token response ({exc!r})"
+            ) from exc
 
     def _actor(self, appt: dict, prefix: str) -> str:  # type: ignore[type-arg]
         for p in appt.get("participant", []):
@@ -358,8 +392,21 @@ class FhirR4Adapter(HmsAdapter):
         )
 
     def _patient_query(
-        self, phone_hash: str | None, mrn: str | None, abha_id: str | None, phone: str | None
+        self,
+        phone_hash: str | None,
+        mrn: str | None,
+        abha_id: str | None,
+        phone: str | None,
+        family: str | None = None,
+        birth_date: date | None = None,
     ) -> dict | None:  # type: ignore[type-arg]
+        if family is not None or birth_date is not None:
+            if not family or birth_date is None:
+                # A name-only search returns half a town (spec §8.2).
+                raise ValueError("family and birth_date are searched together")
+            if phone or mrn or abha_id:
+                raise ValueError("one patient search per call")
+            return {"family": family.strip(), "birthdate": f"eq{birth_date.isoformat()}"}
         # Preference order: MRN, then ABHA, then phone. A phone is the weakest
         # hint — one number commonly serves a whole household in India — so
         # callers MUST corroborate the result against name, age and gender.
@@ -382,22 +429,36 @@ class FhirR4Adapter(HmsAdapter):
         mrn: str | None = None,
         abha_id: str | None = None,
         phone: str | None = None,
+        family: str | None = None,
+        birth_date: date | None = None,
     ) -> list[CanonicalPatient]:
-        params = self._patient_query(phone_hash, mrn, abha_id, phone)
+        params = self._patient_query(phone_hash, mrn, abha_id, phone, family, birth_date)
         if params is None:
             return []
+        headers = await self._token_headers("search_patients")
         try:
-            headers = await self._headers()
             resp = await self._client.get(f"{self._base}/Patient", params=params, headers=headers)
-            resp.raise_for_status()
         except httpx.HTTPError as exc:
-            logger.warning("FhirR4Adapter.search_patients HTTP error: %s", exc)
-            return []
-        return [
+            # SP3 §8.1: raised, never []. "No candidates" unlocks Create in HMS.
+            raise TransientError(f"search_patients: {exc.__class__.__name__}") from exc
+        if resp.status_code != 200:
+            raise TransientError(f"search_patients {_refusal(resp)}")
+        try:
+            bundle = resp.json()
+        except ValueError as exc:
+            raise TransientError("search_patients: non-JSON body (HTTP 200)") from exc
+        if not isinstance(bundle, dict) or bundle.get("resourceType", "Bundle") != "Bundle":
+            raise TransientError("search_patients: body is not a Bundle")
+        found = [
             self._patient_to_canonical(e.get("resource", {}))
-            for e in resp.json().get("entry", [])
+            for e in bundle.get("entry", []) or []
             if e.get("resource", {}).get("resourceType", "Patient") == "Patient"
         ]
+        if family is not None:
+            # FINDINGS §14 P4: family= is a starts-with match on OpenEMR, not
+            # exact — filter to the surname the caller actually asked for.
+            found = [p for p in found if _family_matches(p.name_token, family)]
+        return found
 
     async def find_patient(
         self,
@@ -417,19 +478,19 @@ class FhirR4Adapter(HmsAdapter):
     async def get_patient(self, external_id: str) -> CanonicalPatient | None:
         if not external_id:
             return None
+        headers = await self._token_headers("get_patient")
         try:
-            resp = await self._client.get(
-                f"{self._base}/Patient/{external_id}",
-                headers=await self._headers(),
-            )
+            resp = await self._client.get(f"{self._base}/Patient/{external_id}", headers=headers)
         except httpx.HTTPError as exc:
-            logger.warning("FhirR4Adapter.get_patient HTTP error for %s: %s", external_id, exc)
+            raise TransientError(f"get_patient: {exc.__class__.__name__}") from exc
+        if resp.status_code in (404, 410):
             return None
-
         if resp.status_code != 200:
-            return None
-
-        resource = resp.json()
+            raise TransientError(f"get_patient {_refusal(resp)}")
+        try:
+            resource = resp.json()
+        except ValueError as exc:
+            raise TransientError("get_patient: non-JSON body (HTTP 200)") from exc
         if resource.get("resourceType") != "Patient":
             return None
         return self._patient_to_canonical(resource)
@@ -485,18 +546,7 @@ class FhirR4Adapter(HmsAdapter):
             "(FHIR R4 Practitioner has no standard date filter); returning full roster.",
             as_of_date,
         )
-        # The token fetch is covered too: build_auth_headers already raises
-        # AuthError/TransientError for the cases it classifies, and anything
-        # else (a 404 token_url, a non-JSON or token-less body) must still be a
-        # typed error, never a raw one a caller turns into a bare 500.
-        try:
-            headers = await self._headers()
-        except httpx.HTTPError as exc:
-            raise TransientError(f"FhirR4Adapter.fetch_doctor_roster: token: {exc}") from exc
-        except (ValueError, KeyError) as exc:
-            raise TransientError(
-                f"FhirR4Adapter.fetch_doctor_roster: unreadable token response ({exc!r})"
-            ) from exc
+        headers = await self._token_headers("fetch_doctor_roster")
         url: str | None = f"{self._base}/Practitioner"
         params: dict[str, str] | None = {"_count": "200"}
         doctors: list[CanonicalDoctor] = []

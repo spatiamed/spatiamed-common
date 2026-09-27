@@ -17,6 +17,7 @@ from sm_common.integrations.canonical_types import (
     VisitFinalized,
     WriteBackResult,
 )
+from sm_common.integrations.exceptions import SearchNotSupported
 
 
 class HmsAdapter(ABC):
@@ -56,6 +57,8 @@ class HmsAdapter(ABC):
         mrn: str | None = None,
         abha_id: str | None = None,
         phone: str | None = None,
+        family: str | None = None,
+        birth_date: date | None = None,
     ) -> list[CanonicalPatient]:
         """Every candidate the HMS returns. Matching needs ALL of them: one
         phone commonly serves a household, and ambiguity can only be seen by a
@@ -64,7 +67,14 @@ class HmsAdapter(ABC):
         Default for adapters with no list-returning search: wraps
         ``find_patient``. Such an adapter cannot express ambiguity — kiosk
         matching is only as safe as the adapter's own search.
+
+        ``family`` + ``birth_date`` (always together) is a name + exact-DOB
+        search. Adapters with no list-returning search cannot run it and raise
+        SearchNotSupported rather than answer "nobody" — an empty result is
+        what unlocks Create in HMS downstream.
         """
+        if family is not None or birth_date is not None:
+            raise SearchNotSupported(f"{self.vendor_name}: name + DOB search is not supported")
         found = await self.find_patient(
             phone_hash=phone_hash, mrn=mrn, abha_id=abha_id, phone=phone
         )

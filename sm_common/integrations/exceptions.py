@@ -30,3 +30,7 @@ class WriteNotSupported(HmsAdapterError):  # noqa: N818
 
 class VendorRejected(HmsAdapterError):  # noqa: N818
     """The vendor refused the payload (validation error, even under HTTP 200). Terminal."""
+
+
+class SearchNotSupported(HmsAdapterError):  # noqa: N818
+    """This vendor cannot run the requested patient search (e.g. name + DOB). Terminal."""

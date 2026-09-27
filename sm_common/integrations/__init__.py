@@ -22,6 +22,7 @@ from sm_common.integrations.exceptions import (
     AuthError,
     WriteNotSupported,
     VendorRejected,
+    SearchNotSupported,
 )
 
 __all__ = [
@@ -46,4 +47,5 @@ __all__ = [
     "AuthError",
     "WriteNotSupported",
     "VendorRejected",
+    "SearchNotSupported",
 ]
