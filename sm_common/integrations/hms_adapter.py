@@ -12,12 +12,14 @@ from sm_common.integrations.canonical_types import (
     CanonicalDoctor,
     CanonicalPatient,
     ExternalBooking,
+    PatientCreate,
+    PatientCreateResult,
     VisitCheckedIn,
     VisitConsultationStarted,
     VisitFinalized,
     WriteBackResult,
 )
-from sm_common.integrations.exceptions import SearchNotSupported
+from sm_common.integrations.exceptions import SearchNotSupported, WriteNotSupported
 
 
 class HmsAdapter(ABC):
@@ -101,6 +103,16 @@ class HmsAdapter(ABC):
         """Recent bookings for reconciliation worker drift detection."""
 
     # ─── Outbound (QueueCare → HMS) ──────────────────────────────────────────
+
+    async def create_patient(self, patient: PatientCreate) -> PatientCreateResult:
+        """Register a NEW patient in the HMS. Idempotent on ``patient.patient_marker``.
+
+        Deliberately not abstract: bahmni, mocdoc, generic_rest, generic_db and
+        csv_import have no create route and inherit this refusal (spec §8.3).
+        Raises ConflictError (several prior records carry our marker),
+        TransientError, AuthError, VendorRejected or WriteNotSupported.
+        """
+        raise WriteNotSupported(f"{self.vendor_name}: patient create is not supported")
 
     @abstractmethod
     async def write_back_idempotent(self, write: AppointmentWrite) -> WriteBackResult:

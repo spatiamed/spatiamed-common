@@ -13,6 +13,8 @@ from sm_common.integrations.canonical_types import (
     CancelResult,
     AdapterHealth,
     ExternalBooking,
+    PatientCreate,
+    PatientCreateResult,
 )
 from sm_common.integrations.hms_adapter import HmsAdapter
 from sm_common.integrations.exceptions import (
@@ -41,6 +43,8 @@ __all__ = [
     "CancelResult",
     "AdapterHealth",
     "ExternalBooking",
+    "PatientCreate",
+    "PatientCreateResult",
     "HmsAdapterError",
     "ConflictError",
     "TransientError",

@@ -194,3 +194,43 @@ class ExternalBooking:
     slot_start: datetime
     status: str
     updated_at: datetime
+
+
+@dataclass(frozen=True)
+class PatientCreate:
+    """A NEW patient to register in the HMS (SP3 §5, B4: exact DOB, real surname).
+
+    ``patient_marker`` is our patients.id and every adapter's idempotency key.
+    ``exclude_ids`` are HMS ids that must never be read as "the record our earlier
+    attempt created": the ids seen before our first POST plus ids staff confirmed
+    are not this patient (spec §5.1). Only the OpenEMR no-marker fallback reads it.
+    """
+
+    patient_marker: UUID
+    family: str
+    given: list[str]
+    birth_date: date
+    gender: Literal["M", "F", "O"]
+    phone: str | None
+    exclude_ids: frozenset[str] = field(default_factory=frozenset)
+
+    def __post_init__(self) -> None:
+        family = (self.family or "").strip()
+        if len(family) < 2:
+            # Our rule, not a vendor's: one letter is an initial, not a surname (B4).
+            raise ValueError("family name must be at least 2 characters")
+        if not isinstance(self.birth_date, date) or isinstance(self.birth_date, datetime):
+            raise ValueError("birth_date must be a calendar date")
+        if self.gender not in ("M", "F", "O"):
+            raise ValueError("gender must be M, F or O")
+        object.__setattr__(self, "family", family)
+        object.__setattr__(self, "given", [g.strip() for g in self.given if g and g.strip()])
+        object.__setattr__(self, "exclude_ids", frozenset(self.exclude_ids))
+
+
+@dataclass(frozen=True)
+class PatientCreateResult:
+    resource_id: str
+    mrn: str | None
+    # False when the call found the record an earlier attempt already created.
+    created: bool
