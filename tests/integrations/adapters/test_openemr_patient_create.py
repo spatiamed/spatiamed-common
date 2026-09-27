@@ -61,11 +61,23 @@ async def test_fallback_one_new_id_is_our_earlier_record():
 
 
 async def test_fallback_several_new_ids_raise_conflict():
+    # F7: the two hits only come back on the phone (telecom=) search, never on
+    # an identifier= search — proves it's the fallback, not the base marker
+    # search, that finds them and raises.
+    seen = []
+
     def handler(request):
-        return httpx.Response(200, json=_bundle(_pat("x"), _pat("y")))
+        if request.method == "POST":
+            raise AssertionError("must not create while several candidates are unresolved")
+        params = dict(request.url.params)
+        seen.append(params)
+        if "telecom" in params:
+            return httpx.Response(200, json=_bundle(_pat("x"), _pat("y")))
+        return httpx.Response(200, json=_bundle())
 
     with pytest.raises(ConflictError):
         await _adapter(handler).create_patient(_pc())
+    assert seen == [{"telecom": "+919876543210,9876543210,919876543210,09876543210"}]
 
 
 async def test_fallback_requires_exact_family_and_birthdate():
@@ -73,6 +85,18 @@ async def test_fallback_requires_exact_family_and_birthdate():
         if request.method == "POST":
             return httpx.Response(201, json={"resourceType": "Patient", "id": "new"})
         return httpx.Response(200, json=_bundle(_pat("other-dob", dob="1985-03-13"), _pat("other-fam", family="Rai")))
+
+    r = await _adapter(handler).create_patient(_pc())
+    assert r.created is True
+
+
+async def test_fallback_phone_path_rejects_a_surname_that_only_contains_ours():
+    # A substring test ("rao" in "raorane") would wrongly match this record
+    # and bind the new patient to someone else's chart (review Important #1).
+    def handler(request):
+        if request.method == "POST":
+            return httpx.Response(201, json={"resourceType": "Patient", "id": "new"})
+        return httpx.Response(200, json=_bundle(_pat("other-chart", family="Raorane")))
 
     r = await _adapter(handler).create_patient(_pc())
     assert r.created is True
