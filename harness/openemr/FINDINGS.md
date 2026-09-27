@@ -814,3 +814,11 @@ earlier run.
 - **Scope note:** a create needs `system/Patient.write` on the integration's FHIR client. The
   QueueCare live test's `_credentials()` and every tenant's saved scopes today carry only
   `system/Patient.read …`; Create in HMS needs the write scope added (QueueCare plan, live task).
+- **Live proof 2026-09-27 (`verify_patient_create.py`, local harness, OpenEMR 8.3.0 / db 541):**
+  `OpenEmrAdapter.create_patient` end to end. (a) create → `created=True` + id: **PASS**.
+  (b) repeat with the same `PatientCreate` → `created=False`, same id: **PASS**; exactly one
+  `patient_data` row for the surname: **PASS**. (c) read-back name, DOB, sex and phone (phone
+  hash equal to `hash_phone_for_lookup` of the sent number): **PASS**. (d) marker identifier
+  persisted: **no**, which agrees with P1. So on OpenEMR, (b) rests entirely on the
+  phone+family+birthdate fallback (Task 6). The same script run against the pre-fallback
+  adapter (commit `fcd0c7d`) fails (b): a second row is created.
