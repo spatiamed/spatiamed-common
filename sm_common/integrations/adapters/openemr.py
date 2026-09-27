@@ -30,6 +30,7 @@ from sm_common.integrations.auth import build_auth_headers, invalidate_token
 from sm_common.integrations.canonical_types import (
     AppointmentWrite,
     CancelResult,
+    PatientCreate,
     VisitCheckedIn,
     VisitConsultationStarted,
     VisitFinalized,
@@ -387,3 +388,29 @@ class OpenEmrAdapter(FhirR4Adapter):
         self, event: VisitCheckedIn | VisitConsultationStarted | VisitFinalized
     ) -> None:
         raise WriteNotSupported("OpenEMR has no appointment status update route")
+
+    # ─── Patient create ───────────────────────────────────────────────────
+
+    async def _find_existing_created(self, patient: PatientCreate, headers: dict[str, str]) -> list[dict]:  # type: ignore[type-arg]
+        """OpenEMR drops our marker identifier on create (FINDINGS §14 P1), so an
+        earlier attempt is recognised by exact phone + family + birthdate instead
+        (family + birthdate for a phone-less patient). Ids in exclude_ids existed
+        before our first POST, or staff confirmed them "not this patient": they are
+        never "already created" — without that, twins on one phone with one surname
+        and DOB would bind twin B to twin A's chart (spec §5.2)."""
+        if patient.phone:
+            found = await self.search_patients(phone=patient.phone)
+        else:
+            found = await self.search_patients(family=patient.family, birth_date=patient.birth_date)
+        fam = patient.family.casefold()
+        out = []
+        for c in found:
+            if not c.resource_id or c.resource_id in patient.exclude_ids:
+                continue
+            if c.birth_date != patient.birth_date or c.birth_date_precision != "exact":
+                continue
+            if fam not in (c.name_token or "").casefold():
+                continue
+            out.append({"resourceType": "Patient", "id": c.resource_id,
+                        "identifier": [{"value": c.mrn}] if c.mrn else []})
+        return out
