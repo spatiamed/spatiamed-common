@@ -4,3 +4,5 @@ client.json
 seed_client.json
 token.txt
 user_token.txt
+write_probe_client.json
+patient_probe_client.json

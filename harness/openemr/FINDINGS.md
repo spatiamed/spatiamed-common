@@ -752,3 +752,73 @@ begin with, so it can't be selected and can't 404 later. The demo doctor
 still needs an NPI to be listed at all, which it has (measured above); this
 finding is about the *shape* of the roster the HMS will expose, not this
 demo's write path (already proven live in §12).
+
+## 14. Patient create + name/DOB search (measured 2026-09-27, SP3 task 1)
+
+Probed with `probe_patient_create.py` (system token, `system/Patient.read system/Patient.write`)
+against the **local** docker harness (own compose project, fresh DB), not the shared Railway
+demo. Version: `openemr/openemr:8.3.0`; the `version` table reads 8.3.0 (realpatch 0, database
+541), the same release as the Railway demo. The final script's output was identical on its
+last two full runs (names/phones masked); P1, P3, P4 and If-None-Exist also held on every
+earlier run.
+
+- **Create response shape:** `POST /Patient` → **201** with body `{"pid", "uuid"}` — not a
+  Patient resource, no FHIR `id`, no `Location` header. The `uuid` is the FHIR id
+  (`GET /Patient/<uuid>` reads the record back). Consequence: SP3 sm_common Task 5 must take
+  the resource id from `uuid` when `id` is absent; as planned, its "2xx without `id` →
+  `VendorRejected(landed=True)`" branch (Review Focus 3) would fire on **every** OpenEMR create.
+- **P1 — our identifier on create:** **dropped** on read-back. The only identifier returned is
+  OpenEMR's own `PT` (system `http://terminology.hl7.org/CodeSystem/v2-0203`, value = pid).
+  `identifier=https://spatiamed.com/patient|<marker>` search returns **0** hits (so no
+  every-create `ConflictError` either). Gate (ruling F4: kept AND search hits == 1) fails.
+  Consequence: the marker cannot be the idempotency key; OpenEmrAdapter needs the
+  phone+family+birthdate fallback — **SP3 sm_common Task 6 is required.**
+- **P2 — name mapping: OpenEMR never reads `name[].text`.** It maps the structured fields:
+  `given[0]` → fname, `given[1]` → mname, `family` → lname verbatim.
+  - "Asha X" (`family` X, `given` [Asha]) → (Asha, —, X).
+  - "Asha Devi X" (`given` [Asha, Devi]) → (Asha, Devi, X).
+  - "Asha Van Der X" (`family` "Van Der X") → (Asha, —, "Van Der X"): a multi-word surname is
+    kept whole, spaces included.
+  - Three given names [Asha, Kumari, Devi] → (Asha, Kumari, X); read-back `given` is
+    [Asha, Kumari]. **`given[2+]` is silently dropped.**
+  - `family` + `given` with **no** `text` → **201**, same split. This **contradicts §6 above**
+    (2026-09-11: "structured fields are ignored … without `text` rejected") and the SP3 plan's
+    Global Constraint §5.2, which repeats it. On 8.3.0, today, the opposite holds.
+  - `text` only (no `family`/`given`) → **400**, validation errors on `fname` and `lname`.
+  - The read-back `name[0]` carries only `use`, `family`, `given` (no `text`).
+  Consequence for `FhirR4Adapter._name_text`: `text` is harmless (sending it costs nothing and
+  other FHIR servers may use it), but OpenEMR stores only what is in `family`/`given`; both
+  must be non-empty, and a third-or-later given name is lost — join given[1:] into `given[1]`
+  if middle names must survive.
+- **P3 — sex on create:** without `gender` → **HTTP 400**, validation error on `sex`.
+  **Required.** (Our form always sends it.)
+- **P4 — `family` + `birthdate`:** right date → hits, wrong date → **0**: **honoured**, and a
+  multi-word family ("Van Der X") searches as one string (1 hit). **But `family=` is a
+  case-insensitive starts-with match, not exact:** the family minus its last character, and
+  the family lower-cased, each returned every record whose surname begins with it (8 hits over
+  6 distinct surnames in the last run). An inner word ("Der X" for "Van Der X") → 0 hits.
+  Consequence: Task 3's query shape stands, but callers must filter the results client-side to
+  an exact, case-insensitive surname match (`"rao"` also returns `"Raorane"`). Preflight F8/F9's
+  whole-token-run matching is the right shape for that filter.
+- **P5 — telecom:** a `telecom` phone with **no `use` is silently dropped** (201; no phone in
+  `patient_data`, none on read-back). `use: mobile` → `phone_cell`, `use: home` → `phone_home`;
+  either way `telecom=<the 10 digits>` search then returns 1 hit. Consequence: Task 5 must send
+  `use: "mobile"`, or Task 6's phone fallback and Task 7's read-back phone check have nothing
+  to find. Unmeasured: whether `+91…` / `0…` forms of the number are stored or searchable.
+- **If-None-Exist on Patient: ignored.** A first create with a fresh marker + `If-None-Exist`
+  → 201 with an id (the header is not rejected, so it need not be stripped). A repeat create
+  with the same marker + `If-None-Exist` → **201, a new id, one more `patient_data` row**.
+  Together with P1: OpenEMR offers **no** server-side idempotency for Patient create; nothing
+  may rely on the header (plan Review Focus 5 calls it "our only guard" — on OpenEMR it guards
+  nothing).
+- **Scope note:** a create needs `system/Patient.write` on the integration's FHIR client. The
+  QueueCare live test's `_credentials()` and every tenant's saved scopes today carry only
+  `system/Patient.read …`; Create in HMS needs the write scope added (QueueCare plan, live task).
+- **Live proof 2026-09-27 (`verify_patient_create.py`, local harness, OpenEMR 8.3.0 / db 541):**
+  `OpenEmrAdapter.create_patient` end to end. (a) create → `created=True` + id: **PASS**.
+  (b) repeat with the same `PatientCreate` → `created=False`, same id: **PASS**; exactly one
+  `patient_data` row for the surname: **PASS**. (c) read-back name, DOB, sex and phone (phone
+  hash equal to `hash_phone_for_lookup` of the sent number): **PASS**. (d) marker identifier
+  persisted: **no**, which agrees with P1. So on OpenEMR, (b) rests entirely on the
+  phone+family+birthdate fallback (Task 6). The same script run against the pre-fallback
+  adapter (commit `fcd0c7d`) fails (b): a second row is created.

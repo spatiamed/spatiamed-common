@@ -10,9 +10,9 @@ Rules (spec 2026-09-24-dob-first-identity-design.md):
 * A 29 February birthday falls on 1 March in non-leap years (common Indian practice).
 * A two-digit year resolves to the most recent year not after the reference day.
 * Valid means a real calendar date, not after the reference day, and at most
-  120 years before it. For ``month``/``year`` the check runs on the components;
-  an anchor that would land after the reference day (a birth this month or this
-  year) is clamped to the reference day.
+  120 years before it. For ``month``/``year`` both checks run on the components
+  (the age limit on the period's last day); an anchor that would land after the
+  reference day (a birth this month or this year) is clamped to the reference day.
 * Corroboration is decided by the COARSER side's precision. It compares the
   real components, or ``age_on`` values for ``estimated``, and never the anchors.
 """
@@ -112,6 +112,16 @@ def resolve_two_digit_year(yy: int, *, month: int, day: int, reference: date) ->
     return year - 100 if candidate > reference else year
 
 
+def _latest_in_period(dob: Dob) -> date:
+    """The latest real birthday the stated precision allows: the period's last day."""
+    v = dob.value
+    if dob.precision == "year":
+        return date(v.year, 12, 31)
+    if dob.precision == "month":
+        return date(v.year, v.month, calendar.monthrange(v.year, v.month)[1])
+    return v
+
+
 def validate(dob: Dob, *, reference: date) -> None:
     v = dob.value
     if dob.precision == "year":
@@ -122,7 +132,9 @@ def validate(dob: Dob, *, reference: date) -> None:
         future = v > reference
     if future or v > reference:
         raise DobError("date of birth is after the reference day")
-    if age_on(v, reference) > MAX_AGE_YEARS:
+    # The age limit, like the future check, runs on the components: a partial DOB
+    # is valid when ANY real date inside it is within the limit, i.e. its last day.
+    if age_on(min(_latest_in_period(dob), reference), reference) > MAX_AGE_YEARS:
         raise DobError(f"date of birth is more than {MAX_AGE_YEARS} years ago")
 
 

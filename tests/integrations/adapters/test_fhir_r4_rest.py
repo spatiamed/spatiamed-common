@@ -203,15 +203,14 @@ async def test_find_patient_maps_gender_female():
 
 
 @pytest.mark.asyncio
-async def test_find_patient_http_error_returns_none():
-    """find_patient HTTP error → returns None (never raises)."""
+async def test_find_patient_http_error_raises_transient():
+    """SP3 §8.1: an outage must not read as "no such patient"."""
 
     def handler(req: httpx.Request) -> httpx.Response:
         return httpx.Response(503, text="Service Unavailable")
 
-    a = _adapter(handler)
-    result = await a.find_patient(mrn="pat-1")
-    assert result is None
+    with pytest.raises(TransientError):
+        await _adapter(handler).find_patient(mrn="pat-1")
 
 
 # ─── fetch_doctor_roster tests ────────────────────────────────────────────────
