@@ -899,7 +899,8 @@ class FhirR4Adapter(HmsAdapter):
     # --- Implemented in Task 5 ---
 
     def _name_text(self, patient: PatientCreate) -> str:
-        # OpenEMR ignores structured names and splits `text` (FINDINGS §6, §14 P2).
+        # OpenEMR reads only `family`/`given` (FINDINGS §14 P2); `text` is
+        # harmless to send and other FHIR servers may use it.
         return " ".join([*patient.given, patient.family])
 
     def _patient_create_resource(self, patient: PatientCreate) -> dict:  # type: ignore[type-arg]
@@ -931,18 +932,37 @@ class FhirR4Adapter(HmsAdapter):
         for ident in resource.get("identifier") or []:
             system = str(ident.get("system") or "")
             value = str(ident.get("value") or "").strip()
-            if value and system != PATIENT_IDENTIFIER_SYSTEM and "abha" not in system.lower() and "ndhm" not in system:
+            if (
+                value
+                and system != PATIENT_IDENTIFIER_SYSTEM
+                and "abha" not in system.lower()
+                and "ndhm" not in system.lower()
+            ):
                 return value
         return None
 
-    def _create_result(self, resource: dict, *, created: bool) -> PatientCreateResult:  # type: ignore[type-arg]
-        rid = resource.get("id")
-        if resource.get("resourceType") != "Patient" or not rid:
+    def _create_result(
+        self, resource: dict, *, created: bool, location: str | None = None
+    ) -> PatientCreateResult:  # type: ignore[type-arg]
+        # FINDINGS §14 "Create response shape" / progress.md ruling: OpenEMR's
+        # POST /Patient answers 201 {"pid", "uuid"} — no resourceType, no id,
+        # no Location. `uuid` IS the FHIR id (GET /Patient/<uuid> reads it
+        # back); reading only `id` made every OpenEMR create a VendorRejected.
+        # A body with a resourceType that isn't Patient is still refused.
+        if resource.get("resourceType") not in (None, "Patient"):
+            raise VendorRejected(
+                f"vendor response carries no Patient id: keys={sorted(resource)}", landed=True
+            )
+        rid = resource.get("uuid") or resource.get("id")
+        if not rid and location:
+            rid = location.rstrip("/").rsplit("/", 1)[-1] or None
+        if not rid:
             # A 2xx is not evidence (FINDINGS §7.2). Keys only: the body may be PHI.
             raise VendorRejected(
                 f"vendor response carries no Patient id: keys={sorted(resource)}", landed=True
             )
-        return PatientCreateResult(resource_id=str(rid), mrn=self._mrn_of(resource), created=created)
+        mrn = self._mrn_of(resource) or (str(resource["pid"]) if resource.get("pid") else None)
+        return PatientCreateResult(resource_id=str(rid), mrn=mrn, created=created)
 
     async def _find_existing_created(
         self, patient: PatientCreate, headers: dict[str, str]
@@ -963,9 +983,12 @@ class FhirR4Adapter(HmsAdapter):
             )
             return []
         try:
-            entries = resp.json().get("entry", []) or []
+            data = resp.json()
         except ValueError as exc:
             raise TransientError("create_patient pre-search: non-JSON body") from exc
+        if not isinstance(data, dict):
+            raise TransientError("create_patient pre-search: body is not a JSON object")
+        entries = data.get("entry", []) or []
         return [e["resource"] for e in entries if e.get("resource", {}).get("resourceType") == "Patient"]
 
     async def create_patient(self, patient: PatientCreate) -> PatientCreateResult:
@@ -1008,4 +1031,6 @@ class FhirR4Adapter(HmsAdapter):
             body = resp.json()
         except ValueError as exc:
             raise VendorRejected("create_patient: non-JSON 2xx body", landed=True) from exc
-        return self._create_result(body, created=resp.status_code == 201)
+        return self._create_result(
+            body, created=resp.status_code == 201, location=resp.headers.get("Location")
+        )

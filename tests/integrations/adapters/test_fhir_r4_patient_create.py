@@ -157,6 +157,20 @@ async def test_create_2xx_without_id_is_vendor_rejected_landed():
     assert ei.value.landed is True
 
 
+async def test_create_reads_id_from_openemr_shaped_pid_uuid_body():
+    # FINDINGS §14 "Create response shape" / progress.md ruling: OpenEMR 8.3.0
+    # answers POST /Patient with 201 {"pid", "uuid"} — no resourceType, no id,
+    # no Location header. The uuid IS the FHIR id (GET /Patient/<uuid> reads it
+    # back); pid is OpenEMR's own MRN.
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json=_bundle())
+        return httpx.Response(201, json={"pid": 7, "uuid": "9a1b2c3d-0000-0000-0000-000000000000"})
+
+    r = await _adapter(handler).create_patient(_pc())
+    assert (r.resource_id, r.mrn, r.created) == ("9a1b2c3d-0000-0000-0000-000000000000", "7", True)
+
+
 async def test_conditional_create_200_empty_body_rereads_by_marker():
     calls = {"get": 0}
 
