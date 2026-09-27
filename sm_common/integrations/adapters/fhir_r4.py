@@ -23,12 +23,15 @@ from sm_common.integrations.canonical_types import (
     CanonicalDoctor,
     CanonicalPatient,
     ExternalBooking,
+    PatientCreate,
+    PatientCreateResult,
     VisitCheckedIn,
     VisitConsultationStarted,
     VisitFinalized,
     WriteBackResult,
 )
 from sm_common.integrations.exceptions import (
+    AuthError,
     ConflictError,
     TransientError,
     VendorRejected,
@@ -42,6 +45,18 @@ logger = logging.getLogger(__name__)
 # Our booking id travels on every Appointment we create, so a retry can find
 # the one it already wrote. Changing this string orphans every earlier write.
 BOOKING_IDENTIFIER_SYSTEM = "https://spatiamed.com/booking"
+
+# Our patients.id travels on every Patient we create, so a retry finds the one it
+# already made. Changing this string orphans every earlier create.
+PATIENT_IDENTIFIER_SYSTEM = "https://spatiamed.com/patient"
+_FHIR_GENDER = {"M": "male", "F": "female", "O": "other"}
+
+
+def _e164_india(phone: str) -> str:
+    """The `+`-prefixed shape most FHIR servers store (FINDINGS §5)."""
+    variants = phone_search_variants(phone)
+    plus = [v for v in variants if v.startswith("+")]
+    return plus[0] if plus else phone.strip()
 
 
 def _family_matches(name_token: str, family: str) -> bool:
@@ -880,3 +895,117 @@ class FhirR4Adapter(HmsAdapter):
                 f"push_visit_event HTTP {resp.status_code} for event {event.event_uuid}: "
                 f"{resp.text[:200]}"
             )
+
+    # --- Implemented in Task 5 ---
+
+    def _name_text(self, patient: PatientCreate) -> str:
+        # OpenEMR ignores structured names and splits `text` (FINDINGS §6, §14 P2).
+        return " ".join([*patient.given, patient.family])
+
+    def _patient_create_resource(self, patient: PatientCreate) -> dict:  # type: ignore[type-arg]
+        resource: dict = {  # type: ignore[type-arg]
+            "resourceType": "Patient",
+            "name": [
+                {
+                    "use": "official",
+                    "text": self._name_text(patient),
+                    "family": patient.family,
+                    "given": list(patient.given),
+                }
+            ],
+            "birthDate": patient.birth_date.isoformat(),
+            "gender": _FHIR_GENDER[patient.gender],
+            "identifier": [{"system": PATIENT_IDENTIFIER_SYSTEM, "value": str(patient.patient_marker)}],
+        }
+        if patient.phone:
+            # FINDINGS §14 P5: a telecom phone with no `use` is silently dropped
+            # by OpenEMR on create and read-back — `use: "mobile"` is required
+            # for Task 6's phone fallback and Task 7's read-back check to find it.
+            resource["telecom"] = [
+                {"system": "phone", "use": "mobile", "value": _e164_india(patient.phone)}
+            ]
+        return resource
+
+    @staticmethod
+    def _mrn_of(resource: dict) -> str | None:  # type: ignore[type-arg]
+        for ident in resource.get("identifier") or []:
+            system = str(ident.get("system") or "")
+            value = str(ident.get("value") or "").strip()
+            if value and system != PATIENT_IDENTIFIER_SYSTEM and "abha" not in system.lower() and "ndhm" not in system:
+                return value
+        return None
+
+    def _create_result(self, resource: dict, *, created: bool) -> PatientCreateResult:  # type: ignore[type-arg]
+        rid = resource.get("id")
+        if resource.get("resourceType") != "Patient" or not rid:
+            # A 2xx is not evidence (FINDINGS §7.2). Keys only: the body may be PHI.
+            raise VendorRejected(
+                f"vendor response carries no Patient id: keys={sorted(resource)}", landed=True
+            )
+        return PatientCreateResult(resource_id=str(rid), mrn=self._mrn_of(resource), created=created)
+
+    async def _find_existing_created(
+        self, patient: PatientCreate, headers: dict[str, str]
+    ) -> list[dict]:  # type: ignore[type-arg]
+        token = f"{PATIENT_IDENTIFIER_SYSTEM}|{patient.patient_marker}"
+        try:
+            resp = await self._client.get(
+                f"{self._base}/Patient", params={"identifier": token}, headers=headers
+            )
+        except httpx.HTTPError as exc:
+            raise TransientError(f"create_patient pre-search: {exc.__class__.__name__}") from exc
+        if resp.status_code == 429 or resp.status_code >= 500:
+            raise TransientError(f"create_patient pre-search {_refusal(resp)}")
+        if resp.status_code >= 400:
+            logger.warning(
+                "FhirR4Adapter: server refused Patient identifier search (HTTP %s)",
+                resp.status_code,
+            )
+            return []
+        try:
+            entries = resp.json().get("entry", []) or []
+        except ValueError as exc:
+            raise TransientError("create_patient pre-search: non-JSON body") from exc
+        return [e["resource"] for e in entries if e.get("resource", {}).get("resourceType") == "Patient"]
+
+    async def create_patient(self, patient: PatientCreate) -> PatientCreateResult:
+        headers = await self._token_headers("create_patient")
+        existing = await self._find_existing_created(patient, headers)
+        if len(existing) > 1:
+            raise ConflictError(
+                f"{len(existing)} HMS patients already match our earlier create — a human must reconcile",
+                landed=True,
+            )
+        if existing:
+            return self._create_result(existing[0], created=False)
+
+        token = f"{PATIENT_IDENTIFIER_SYSTEM}|{patient.patient_marker}"
+        try:
+            resp = await self._client.post(
+                f"{self._base}/Patient",
+                json=self._patient_create_resource(patient),
+                headers={**headers, "If-None-Exist": f"identifier={token}"},
+            )
+        except httpx.HTTPError as exc:
+            raise TransientError(f"create_patient: {exc.__class__.__name__}") from exc
+
+        if resp.status_code in (404, 405):
+            raise WriteNotSupported(f"vendor has no Patient create route (HTTP {resp.status_code})")
+        if resp.status_code in (401, 403):
+            raise AuthError(f"create_patient {_refusal(resp)}")
+        if resp.status_code == 409:
+            raise ConflictError(f"create_patient {_refusal(resp)}")
+        if resp.status_code == 429 or resp.status_code >= 500:
+            raise TransientError(f"create_patient {_refusal(resp)}")
+        if resp.status_code >= 400:
+            raise VendorRejected(f"create_patient {_refusal(resp)}")
+        if resp.status_code == 200 and not resp.content:
+            again = await self._find_existing_created(patient, headers)
+            if len(again) != 1:
+                raise TransientError("conditional create returned 200 with no body and no single match")
+            return self._create_result(again[0], created=False)
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise VendorRejected("create_patient: non-JSON 2xx body", landed=True) from exc
+        return self._create_result(body, created=resp.status_code == 201)
