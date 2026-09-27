@@ -182,6 +182,32 @@ def test_120_years_is_the_limit():
     assert age_on(parse_dob("1906-09-24", reference=REF).value, REF) == 120
 
 
+def test_year_only_1905_is_valid_at_the_boundary():
+    """qc-4: a Nov/Dec-1905 birth is 120 on 2026-09-24, so "1905" is a valid year."""
+    dob = parse_dob("1905", reference=REF)
+    assert dob.precision == "year"
+
+
+def test_year_only_1904_is_still_too_old():
+    with pytest.raises(DobError):
+        parse_dob("1904", reference=REF)
+
+
+def test_month_only_at_the_boundary_is_valid():
+    # 1905-09-30 is still 120 on 2026-09-24; the 15th anchor made it 121.
+    assert parse_dob("1905-09", reference=REF).precision == "month"
+
+
+def test_month_only_past_the_boundary_is_too_old():
+    with pytest.raises(DobError):
+        parse_dob("1905-08", reference=REF)
+
+
+def test_exact_boundary_is_unchanged_by_the_partial_rule():
+    with pytest.raises(DobError):
+        parse_dob("1905-09-23", reference=REF)  # 121 on REF (birthday passed)
+
+
 def test_current_year_only_is_valid_age_zero():
     """R11 / Review Focus 1: a baby born this year, parent knows only the year."""
     early = date(2026, 3, 1)
