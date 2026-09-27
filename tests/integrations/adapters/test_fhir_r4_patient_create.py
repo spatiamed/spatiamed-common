@@ -88,6 +88,51 @@ async def test_a_prior_marker_hit_returns_created_false_without_posting():
     assert (r.resource_id, r.created) == ("p-old", False)
 
 
+async def test_pre_search_hit_without_our_marker_is_ignored_and_still_posts():
+    # A server that treats `identifier=<system>|<value>` leniently (ignores the
+    # system, or does a partial/unfiltered match) can hand back a bundle entry
+    # that isn't our earlier create. Trusting it as-is binds a new patient to a
+    # stranger's chart (final-review.md Important #1).
+    unrelated = {
+        "resourceType": "Patient",
+        "id": "stranger-1",
+        "identifier": [{"system": "https://example.org/other", "value": "not-our-marker"}],
+    }
+
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json=_bundle(unrelated))
+        return httpx.Response(201, json=_created())
+
+    r = await _adapter(handler).create_patient(_pc())
+    assert (r.resource_id, r.created) == ("p-new", True)
+
+
+async def test_pre_search_entry_without_identifier_field_is_ignored_and_still_posts():
+    unrelated = {"resourceType": "Patient", "id": "stranger-2"}
+
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json=_bundle(unrelated))
+        return httpx.Response(201, json=_created())
+
+    r = await _adapter(handler).create_patient(_pc())
+    assert (r.resource_id, r.created) == ("p-new", True)
+
+
+async def test_pre_search_non_dict_entry_does_not_crash():
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={"resourceType": "Bundle", "type": "searchset", "entry": ["not-a-dict"]},
+            )
+        return httpx.Response(201, json=_created())
+
+    r = await _adapter(handler).create_patient(_pc())
+    assert (r.resource_id, r.created) == ("p-new", True)
+
+
 async def test_several_marker_hits_raise_conflict():
     def handler(request):
         return httpx.Response(200, json=_bundle(_created("a"), _created("b")))

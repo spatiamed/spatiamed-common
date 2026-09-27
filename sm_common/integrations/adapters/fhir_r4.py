@@ -989,7 +989,23 @@ class FhirR4Adapter(HmsAdapter):
         if not isinstance(data, dict):
             raise TransientError("create_patient pre-search: body is not a JSON object")
         entries = data.get("entry", []) or []
-        return [e["resource"] for e in entries if e.get("resource", {}).get("resourceType") == "Patient"]
+        marker = str(patient.patient_marker)
+        resources = [
+            e["resource"]
+            for e in entries
+            if isinstance(e, dict) and isinstance(e.get("resource"), dict)
+        ]
+        return [
+            r
+            for r in resources
+            if r.get("resourceType") == "Patient"
+            and any(
+                isinstance(i, dict)
+                and i.get("system") == PATIENT_IDENTIFIER_SYSTEM
+                and i.get("value") == marker
+                for i in r.get("identifier") or []
+            )
+        ]
 
     async def create_patient(self, patient: PatientCreate) -> PatientCreateResult:
         headers = await self._token_headers("create_patient")

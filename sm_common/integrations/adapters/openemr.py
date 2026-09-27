@@ -401,9 +401,9 @@ class OpenEmrAdapter(FhirR4Adapter):
         never "already created" — without that, twins on one phone with one surname
         and DOB would bind twin B to twin A's chart (spec §5.2).
 
-        ``headers`` is unused: ``search_patients`` mints its own read-scope
-        token via ``_token_headers``, so the caller's (write-scope) headers
-        must not be substituted in here."""
+        ``headers`` is unused: ``search_patients`` mints its own token via
+        ``_headers()`` (the same token and scope the caller already holds),
+        so the caller's headers must not be substituted in here."""
         if patient.phone:
             found = await self.search_patients(phone=patient.phone)
         else:
