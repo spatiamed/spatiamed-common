@@ -47,11 +47,10 @@ BOOKING_IDENTIFIER_SYSTEM = "https://spatiamed.com/booking"
 def _family_matches(name_token: str, family: str) -> bool:
     """Whole-token-run, case-insensitive exact match of ``family`` in ``name_token``.
 
-    FINDINGS §14 P4: OpenEMR's ``family=`` is a case-insensitive starts-with
-    match ("rao" also returns "Raorane"), so the caller must filter to an
-    exact surname match itself. A substring or split-membership test drops
-    every multi-word surname ("Van Der Berg") — this matches a contiguous run
-    of whole tokens instead (preflight F8/F9).
+    Fallback only, for a Patient with no structured ``name[*].family`` at
+    all — see ``_resource_family_matches``. A substring or split-membership
+    test drops every multi-word surname ("Van Der Berg"); this matches a
+    contiguous run of whole tokens instead (preflight F8/F9).
     """
     fam_tokens = family.strip().casefold().split()
     if not fam_tokens:
@@ -59,6 +58,31 @@ def _family_matches(name_token: str, family: str) -> bool:
     name_tokens = (name_token or "").casefold().split()
     m = len(fam_tokens)
     return any(name_tokens[i : i + m] == fam_tokens for i in range(len(name_tokens) - m + 1))
+
+
+def _resource_family_matches(resource: dict, family: str, name_token: str) -> bool:  # type: ignore[type-arg]
+    """True if ``family`` matches this Patient resource's surname.
+
+    FINDINGS §14 P4: OpenEMR's ``family=`` is a case-insensitive starts-with
+    match ("rao" also returns "Raorane"), so the caller must filter to an
+    exact surname match itself. That filter must not run on the display token
+    derived from ``name[0]`` alone: a "Family, Given" ``text`` form, an
+    honorific glued to the surname, or the searched surname sitting on
+    ``name[1+]`` (an old/maiden name first) would all be silently dropped —
+    and an empty result unlocks Create in HMS, i.e. a duplicate chart. Any
+    ``name[*].family`` is matched (exact, case-insensitive, whitespace-
+    normalised — not a token-run: the structured field is the surname, not
+    prose). Only when NO ``name[]`` entry carries a structured ``family`` at
+    all does this fall back to a token-run match against the display token.
+    """
+    fam = " ".join(family.strip().casefold().split())
+    names = [n for n in resource.get("name") or [] if isinstance(n, dict)]
+    structured = [
+        " ".join(str(n["family"]).strip().casefold().split()) for n in names if n.get("family")
+    ]
+    if structured:
+        return fam in structured
+    return _family_matches(name_token, family)
 
 
 def _refusal(resp: httpx.Response) -> str:
@@ -401,8 +425,10 @@ class FhirR4Adapter(HmsAdapter):
         birth_date: date | None = None,
     ) -> dict | None:  # type: ignore[type-arg]
         if family is not None or birth_date is not None:
-            if not family or birth_date is None:
-                # A name-only search returns half a town (spec §8.2).
+            if not (family or "").strip() or birth_date is None:
+                # A name-only search returns half a town (spec §8.2). A
+                # whitespace-only family is the same "no name" case — sending
+                # family="" would silently answer [] instead of refusing.
                 raise ValueError("family and birth_date are searched together")
             if phone or mrn or abha_id:
                 raise ValueError("one patient search per call")
@@ -449,15 +475,22 @@ class FhirR4Adapter(HmsAdapter):
             raise TransientError("search_patients: non-JSON body (HTTP 200)") from exc
         if not isinstance(bundle, dict) or bundle.get("resourceType", "Bundle") != "Bundle":
             raise TransientError("search_patients: body is not a Bundle")
-        found = [
-            self._patient_to_canonical(e.get("resource", {}))
+        resources = [
+            e["resource"]
             for e in bundle.get("entry", []) or []
-            if e.get("resource", {}).get("resourceType", "Patient") == "Patient"
+            if isinstance(e, dict)
+            and isinstance(e.get("resource"), dict)
+            and e["resource"].get("resourceType", "Patient") == "Patient"
         ]
+        found = [self._patient_to_canonical(r) for r in resources]
         if family is not None:
             # FINDINGS §14 P4: family= is a starts-with match on OpenEMR, not
             # exact — filter to the surname the caller actually asked for.
-            found = [p for p in found if _family_matches(p.name_token, family)]
+            found = [
+                p
+                for r, p in zip(resources, found, strict=True)
+                if _resource_family_matches(r, family, p.name_token)
+            ]
         return found
 
     async def find_patient(
@@ -491,6 +524,8 @@ class FhirR4Adapter(HmsAdapter):
             resource = resp.json()
         except ValueError as exc:
             raise TransientError("get_patient: non-JSON body (HTTP 200)") from exc
+        if not isinstance(resource, dict):
+            raise TransientError("get_patient: body is not a JSON object (HTTP 200)")
         if resource.get("resourceType") != "Patient":
             return None
         return self._patient_to_canonical(resource)

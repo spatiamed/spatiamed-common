@@ -28,6 +28,10 @@ def _pat(pid="p1", name_text="Asha Rao", birth_date="1985-03-12"):
     return {"resourceType": "Patient", "id": pid, "name": [{"text": name_text}], "birthDate": birth_date}
 
 
+def _pat_names(pid, names: list[dict], birth_date="1985-03-12"):
+    return {"resourceType": "Patient", "id": pid, "name": names, "birthDate": birth_date}
+
+
 async def test_search_5xx_raises_transient():
     a = _adapter(lambda r: httpx.Response(503, text="down"))
     with pytest.raises(TransientError):
@@ -148,3 +152,110 @@ async def test_family_prefix_match_filter_keeps_multi_word_surnames():
     a = _adapter(lambda r: httpx.Response(200, json=bundle))
     found = await a.search_patients(family="Van Der X", birth_date=date(1985, 3, 12))
     assert [p.resource_id for p in found] == ["p1"]
+
+
+# ─── fix3: filter must match structured name[*].family, not only the display
+# token derived from name[0] — a real hit must never be dropped, because an
+# empty result unlocks Create in HMS (duplicate chart). ──────────────────────
+
+
+async def test_family_filter_matches_structured_family_despite_family_comma_given_text():
+    """fix3-findings #1, case 1+2: text is "Family, Given" (or carries an
+    honorific glued to the surname). name_token tokenises to ["rao,", "asha"],
+    so a token-run match against name_token alone would drop this real hit.
+    The structured `family` field must be checked instead."""
+    bundle = _bundle(
+        _pat_names("p1", [{"text": "Rao, Asha", "family": "Rao", "given": ["Asha"]}])
+    )
+
+    a = _adapter(lambda r: httpx.Response(200, json=bundle))
+    found = await a.search_patients(family="Rao", birth_date=date(1985, 3, 12))
+    assert [p.resource_id for p in found] == ["p1"]
+
+
+async def test_family_filter_matches_structured_family_on_a_later_name_entry():
+    """fix3-findings #1, case 3: the searched surname sits on name[1] (current
+    name), not name[0] (an old/maiden name). The server matched it; the filter
+    must not throw the hit away because name_token is derived from name[0]."""
+    bundle = _bundle(
+        _pat_names(
+            "p1",
+            [
+                {"use": "old", "family": "Mehta", "given": ["Asha"]},
+                {"family": "Rao", "given": ["Asha"]},
+            ],
+        )
+    )
+
+    a = _adapter(lambda r: httpx.Response(200, json=bundle))
+    found = await a.search_patients(family="Rao", birth_date=date(1985, 3, 12))
+    assert [p.resource_id for p in found] == ["p1"]
+
+
+async def test_family_filter_still_rejects_a_structured_family_prefix_superset():
+    """The structured-field match must stay exact (not a prefix match): a
+    patient whose structured family is "Raorane" must not match a search for
+    "Rao", the same guarantee test_family_prefix_match_results_are_filtered_client_side
+    proves for the text-only fallback path."""
+    bundle = _bundle(
+        _pat_names("p1", [{"family": "Rao", "given": ["Asha"]}]),
+        _pat_names("p2", [{"family": "Raorane", "given": ["Asha"]}]),
+    )
+
+    a = _adapter(lambda r: httpx.Response(200, json=bundle))
+    found = await a.search_patients(family="Rao", birth_date=date(1985, 3, 12))
+    assert [p.resource_id for p in found] == ["p1"]
+
+
+async def test_whitespace_only_family_is_refused_not_silently_empty():
+    """fix3-findings #2: a whitespace-only family passes `not family` (a
+    non-empty string) and would send family="" and quietly return [] — an
+    empty "nobody" answer belongs to ValueError, not to a silent search."""
+
+    def handler(request):
+        raise AssertionError("must not call the vendor")
+
+    with pytest.raises(ValueError):
+        await _adapter(handler).search_patients(family="   ", birth_date=date(1985, 3, 12))
+
+
+async def test_get_patient_410_is_still_none():
+    """fix3-findings #4: FHIR Gone is the same "nothing here" answer as 404."""
+    assert await _adapter(lambda r: httpx.Response(410)).get_patient("gone-for-good") is None
+
+
+async def test_search_valid_json_non_bundle_body_is_transient():
+    """fix3-findings #4: a 200 with well-formed JSON that isn't a Bundle (e.g.
+    an OperationOutcome) must not be read as an empty result set."""
+    a = _adapter(lambda r: httpx.Response(200, json={"resourceType": "OperationOutcome"}))
+    with pytest.raises(TransientError):
+        await a.search_patients(phone="9876543210")
+
+
+async def test_get_patient_non_json_body_is_transient():
+    """fix3-findings #4: a 200 with a non-JSON body must not be read as absence."""
+    with pytest.raises(TransientError):
+        await _adapter(lambda r: httpx.Response(200, text="<html>proxy error</html>")).get_patient(
+            "p1"
+        )
+
+
+async def test_search_skips_non_dict_bundle_entries():
+    """fix3-findings #3: a malformed `entry` item (not a dict) must not crash
+    the search with a raw AttributeError; the well-formed entries still return."""
+    bundle = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "entry": ["not-a-dict", {"resource": "also-not-a-dict"}, {"resource": _pat(pid="p1")}],
+    }
+    a = _adapter(lambda r: httpx.Response(200, json=bundle))
+    found = await a.search_patients(phone="9876543210")
+    assert [p.resource_id for p in found] == ["p1"]
+
+
+async def test_get_patient_non_dict_json_body_is_transient():
+    """fix3-findings #3: a 200 body that is valid JSON but not an object (e.g.
+    a JSON list) must not crash with a raw AttributeError on `.get`."""
+    a = _adapter(lambda r: httpx.Response(200, json=["not", "an", "object"]))
+    with pytest.raises(TransientError):
+        await a.get_patient("p1")
