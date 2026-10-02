@@ -41,6 +41,7 @@ from pydantic import BaseModel, ConfigDict, Field
 __all__ = [
     "CURRENT_ENVELOPE_VERSION",
     "EVENT_PAYLOAD_MODELS",
+    "BookingUpdatedPayload",
     "ConsultationScheduledPayload",
     "EventEnvelope",
     "EventPayload",
@@ -81,7 +82,7 @@ class EventType(StrEnum):
     """Every event-type string on the QueueCare <-> CareLoop webhook contract.
 
     Forward direction (QueueCare -> CareLoop): ``visit.*``, ``report.*``,
-    ``consultation.scheduled``. Reverse direction (CareLoop -> QueueCare):
+    ``consultation.scheduled``, ``booking.updated``. Reverse direction (CareLoop -> QueueCare):
     ``patient.*``.
     """
 
@@ -93,6 +94,7 @@ class EventType(StrEnum):
     REPORT_READY = "report.ready"
     REPORT_REVOKED = "report.revoked"
     CONSULTATION_SCHEDULED = "consultation.scheduled"
+    BOOKING_UPDATED = "booking.updated"
 
     # CareLoop -> QueueCare (reverse)
     PATIENT_PRE_REGISTERED = "patient.pre_registered"
@@ -271,6 +273,38 @@ class ConsultationScheduledPayload(EventPayload):
     channels: list[str] = Field(default_factory=list)
 
 
+class BookingUpdatedPayload(EventPayload):
+    """``booking.updated`` — a booking's CURRENT state, sent on every change.
+
+    Producer: QueueCare (every path that creates a booking or changes its
+    slot time, doctor or lifecycle state). Consumer: CareLoop
+    ``app/services/appointment_reminders.py::apply_booking_event`` (#285),
+    which schedules the 24h/2h appointment reminders.
+
+    State-carrying, not a delta: CareLoop reconciles its reminders to exactly
+    this state, so a replay is harmless and an out-of-order delivery is
+    discarded by ``updated_at`` (an event older than one already applied is
+    ``stale``).
+
+    * ``status`` — ``booked`` | ``confirmed`` schedule (or move) reminders
+      when ``slot_start`` is set; any other value, or a null ``slot_start``,
+      cancels them.
+    * ``slot_start`` / ``updated_at`` — ISO-8601 WITH a UTC offset.
+    * ``doctor_name`` — display name, or null when no doctor is assigned.
+
+    PHI: the patient is identified by ``phone_hash`` only (the same hash the
+    ``visit.*`` events carry). No name, no phone number — ``extra="forbid"``
+    rejects a producer that tries to add one.
+    """
+
+    booking_id: str
+    phone_hash: str
+    status: str
+    slot_start: str | None
+    doctor_name: str | None
+    updated_at: str
+
+
 class PatientPreRegisteredPayload(EventPayload):
     """``patient.pre_registered`` — CareLoop -> QueueCare pre-registration.
 
@@ -319,6 +353,7 @@ EVENT_PAYLOAD_MODELS: dict[EventType, type[EventPayload]] = {
     EventType.REPORT_READY: ReportReadyPayload,
     EventType.REPORT_REVOKED: ReportRevokedPayload,
     EventType.CONSULTATION_SCHEDULED: ConsultationScheduledPayload,
+    EventType.BOOKING_UPDATED: BookingUpdatedPayload,
     EventType.PATIENT_PRE_REGISTERED: PatientPreRegisteredPayload,
     EventType.PATIENT_APPOINTMENT_CANCELLED: PatientAppointmentCancelledPayload,
 }
