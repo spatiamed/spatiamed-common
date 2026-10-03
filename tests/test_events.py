@@ -7,6 +7,8 @@ models are pinned to the real contract, not an invented one:
 * ``report.*``           -> QueueCare ``server/app/services/clinical/notes_signoff.py``
 * ``consultation.scheduled`` -> QueueCare
   ``server/app/services/clinical/telemedicine/encounter_service.py``
+* ``booking.updated``    -> contract from CareLoop #289 (consumer
+  ``app/services/appointment_reminders.py``); producer QueueCare
 * ``patient.*``          -> QueueCare
   ``server/app/integration/careloop_handlers.py`` (consumer of CareLoop output)
 """
@@ -31,6 +33,7 @@ from sm_common import (
     payload_model_for,
 )
 from sm_common.events import (
+    BookingUpdatedPayload,
     ConsultationScheduledPayload,
     PatientAppointmentCancelledPayload,
     PatientPreRegisteredPayload,
@@ -127,6 +130,15 @@ PATIENT_APPOINTMENT_CANCELLED_SAMPLE = {
     "appointment_date": "2026-07-09",
 }
 
+BOOKING_UPDATED_SAMPLE = {
+    "booking_id": str(uuid.uuid4()),
+    "phone_hash": "abc123hash",
+    "status": "confirmed",
+    "slot_start": "2026-10-05T07:00:00+00:00",
+    "doctor_name": "Dr. Rao",
+    "updated_at": "2026-10-02T09:15:00.123456+00:00",
+}
+
 SAMPLES: dict[EventType, dict] = {
     EventType.VISIT_TOKEN_ISSUED: VISIT_TOKEN_ISSUED_SAMPLE,
     EventType.VISIT_COMPLETED: VISIT_COMPLETED_SAMPLE,
@@ -137,6 +149,7 @@ SAMPLES: dict[EventType, dict] = {
     EventType.CONSULTATION_SCHEDULED: CONSULTATION_SCHEDULED_SAMPLE,
     EventType.PATIENT_PRE_REGISTERED: PATIENT_PRE_REGISTERED_SAMPLE,
     EventType.PATIENT_APPOINTMENT_CANCELLED: PATIENT_APPOINTMENT_CANCELLED_SAMPLE,
+    EventType.BOOKING_UPDATED: BOOKING_UPDATED_SAMPLE,
 }
 
 
@@ -154,6 +167,7 @@ def test_event_type_values() -> None:
         "consultation.scheduled",
         "patient.pre_registered",
         "patient.appointment_cancelled",
+        "booking.updated",
     }
 
 
@@ -164,7 +178,7 @@ def test_event_type_is_str() -> None:
 
 def test_every_event_type_has_a_payload_model() -> None:
     assert set(EVENT_PAYLOAD_MODELS) == set(EventType)
-    assert len(EVENT_PAYLOAD_MODELS) == 9
+    assert len(EVENT_PAYLOAD_MODELS) == 10
 
 
 def test_every_sample_covers_every_event() -> None:
@@ -380,3 +394,59 @@ def test_envelope_defaults_version_when_absent() -> None:
     # no envelope_version on the wire (legacy producer) -> current default
     assert env.envelope_version == CURRENT_ENVELOPE_VERSION
     assert env.source == EventSource.CARELOOP
+
+
+# --- booking.updated (CareLoop #285 appointment reminders) ------------------
+
+
+def test_booking_updated_contract_fields() -> None:
+    """The exact field set CareLoop #289's reminder reconciler reads."""
+    assert set(BookingUpdatedPayload.model_fields) == {
+        "booking_id",
+        "phone_hash",
+        "status",
+        "slot_start",
+        "doctor_name",
+        "updated_at",
+    }
+    p = BookingUpdatedPayload.model_validate(BOOKING_UPDATED_SAMPLE)
+    assert p.status == "confirmed"
+    assert p.doctor_name == "Dr. Rao"
+
+
+def test_booking_updated_slot_and_doctor_are_nullable() -> None:
+    # A booking whose slot was released (or one with no doctor yet) still
+    # emits: a null slot is what tells CareLoop to cancel pending reminders.
+    p = BookingUpdatedPayload.model_validate(
+        {**BOOKING_UPDATED_SAMPLE, "slot_start": None, "doctor_name": None}
+    )
+    assert p.slot_start is None
+    assert p.doctor_name is None
+
+
+@pytest.mark.parametrize("field", ["booking_id", "phone_hash", "status", "updated_at"])
+def test_booking_updated_required_fields(field: str) -> None:
+    data = {k: v for k, v in BOOKING_UPDATED_SAMPLE.items() if k != field}
+    with pytest.raises(ValidationError):
+        BookingUpdatedPayload.model_validate(data)
+
+
+def test_booking_updated_rejects_raw_phone() -> None:
+    # PHI guard: the contract carries the phone HASH only. A producer that
+    # tries to add the raw number fails at the boundary (extra="forbid").
+    with pytest.raises(ValidationError):
+        BookingUpdatedPayload.model_validate({**BOOKING_UPDATED_SAMPLE, "phone": "+919876543210"})
+
+
+def test_booking_updated_envelope_round_trip() -> None:
+    payload = BookingUpdatedPayload.model_validate(BOOKING_UPDATED_SAMPLE)
+    env = build_envelope(
+        event_type=EventType.BOOKING_UPDATED,
+        payload=payload,
+        source=EventSource.QUEUECARE,
+        tenant_id="tenant-1",
+    )
+    wire = env.model_dump(mode="json")
+    assert wire["event_type"] == "booking.updated"
+    assert wire["data"] == BOOKING_UPDATED_SAMPLE
+    assert parse_payload(parse_envelope(wire)) == payload
