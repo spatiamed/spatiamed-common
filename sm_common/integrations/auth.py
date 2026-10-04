@@ -17,6 +17,7 @@ import hmac
 import time
 import uuid
 from email.utils import formatdate
+from typing import Any
 
 import httpx
 import jwt
@@ -76,8 +77,37 @@ async def _post_token(
         raise AuthError(f"{grant} refused: HTTP {resp.status_code} {resp.text[:200]}")
     if resp.status_code >= 500:
         raise TransientError(f"{grant} token endpoint failed: HTTP {resp.status_code}")
-    resp.raise_for_status()
+    if not resp.is_success:
+        # 429, a redirect, a 404 from a mistyped token_url, ... used to escape as
+        # a raw httpx.HTTPStatusError, which no caller classifies. None of them is
+        # a refused credential, so they are retryable rather than auth failures.
+        raise TransientError(f"{grant} token endpoint returned HTTP {resp.status_code}")
     return resp
+
+
+def _token_payload(resp: httpx.Response, grant: str) -> dict[str, Any]:
+    """Parse a 2xx token response, turning a malformed body into TransientError.
+
+    A token endpoint that answers 2xx with an HTML error page or an empty body
+    (a proxy, a broken PHP backend, a database outage behind the HMS) made
+    ``resp.json()`` raise a bare JSONDecodeError. Callers that only catch the
+    typed adapter errors logged it as an unexpected crash with a stack trace,
+    while others treated it as transient. It is the server misbehaving, not our
+    credential being refused, so it is TransientError everywhere. The body is
+    not echoed: it is the vendor's, and the message lands in logs and the DB.
+    """
+    try:
+        payload = resp.json()
+    except ValueError as exc:  # JSONDecodeError and UnicodeDecodeError are both ValueErrors
+        ctype = resp.headers.get("content-type", "?")
+        raise TransientError(
+            f"{grant} token endpoint returned a non-JSON HTTP {resp.status_code} body ({ctype})"
+        ) from exc
+    if not isinstance(payload, dict) or not payload.get("access_token"):
+        raise TransientError(
+            f"{grant} token endpoint returned HTTP {resp.status_code} without an access_token"
+        )
+    return payload
 
 
 async def _oauth_token(client: httpx.AsyncClient, cfg: dict) -> str:
@@ -93,7 +123,7 @@ async def _oauth_token(client: httpx.AsyncClient, cfg: dict) -> str:
     if cfg.get("scopes"):
         data["scope"] = cfg["scopes"]
     resp = await _post_token(client, cfg["token_url"], data, "client_credentials grant")
-    payload = resp.json()
+    payload = _token_payload(resp, "client_credentials grant")
     token = payload["access_token"]
     cfg["_oauth_cache"] = {"token": token, "expires_at": now + int(payload.get("expires_in", 3600))}
     return token
@@ -141,7 +171,7 @@ async def _private_key_jwt_token(client: httpx.AsyncClient, cfg: dict) -> str:
         data["scope"] = cfg["scopes"]
 
     resp = await _post_token(client, cfg["token_url"], data, "private_key_jwt grant")
-    payload = resp.json()
+    payload = _token_payload(resp, "private_key_jwt grant")
     token = payload["access_token"]
     cfg["_oauth_cache"] = {"token": token, "expires_at": now + int(payload.get("expires_in", 3600))}
     return str(token)
@@ -175,7 +205,7 @@ async def _password_grant_token(client: httpx.AsyncClient, cfg: dict) -> str:
     if cfg.get("scopes"):
         data["scope"] = cfg["scopes"]
     resp = await _post_token(client, cfg["token_url"], data, "password grant")
-    payload = resp.json()
+    payload = _token_payload(resp, "password grant")
     token = payload["access_token"]
     cfg["_oauth_cache"] = {"token": token, "expires_at": now + int(payload.get("expires_in", 3600))}
     return str(token)

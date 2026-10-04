@@ -314,3 +314,45 @@ async def test_token_endpoint_unreachable_is_transient(scheme, exc):
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(TransientError):
             await build_auth_headers(client, scheme, _token_cfg(scheme))
+
+
+# ─── A 2xx token reply that is not a usable token is transient (QueueCare#262) ─
+# The demo OpenEMR answered its token endpoint with a 2xx error page while its
+# database was full. resp.json() raised a bare JSONDecodeError, which the poll
+# worker logged as an "unexpected error" stack trace every 30s.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scheme", _TOKEN_SCHEMES)
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, text="<html><body>Database error</body></html>",
+                       headers={"content-type": "text/html"}),
+        httpx.Response(200, text=""),
+        httpx.Response(200, json=["not", "an", "object"]),
+        httpx.Response(200, json={"token_type": "Bearer"}),
+    ],
+    ids=["html", "empty", "json-array", "no-access-token"],
+)
+async def test_token_endpoint_2xx_without_a_token_is_transient(scheme, response):
+    def handler(request):
+        return response
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(TransientError) as info:
+            await build_auth_headers(client, scheme, _token_cfg(scheme))
+    # The vendor's body is not echoed into a message that reaches logs and the DB.
+    assert "Database error" not in str(info.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scheme", _TOKEN_SCHEMES)
+@pytest.mark.parametrize("status", [302, 404, 429])
+async def test_token_endpoint_other_non_2xx_is_transient(scheme, status):
+    def handler(request):
+        return httpx.Response(status, text="nope")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(TransientError):
+            await build_auth_headers(client, scheme, _token_cfg(scheme))
