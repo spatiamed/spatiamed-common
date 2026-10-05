@@ -23,10 +23,32 @@ if TYPE_CHECKING:
 FILTERED = "[Filtered]"
 
 _SENSITIVE_KEY_PARTS = (
-    "authorization", "cookie", "secret", "password", "passwd", "api_key", "apikey",
-    "api-key", "session", "signature", "otp", "phone", "mobile", "email", "aadhaar",
-    "abha", "address", "dob", "patient_name", "first_name", "last_name", "full_name",
-    "query", "bearer", "jwt", "credential",
+    "authorization",
+    "cookie",
+    "secret",
+    "password",
+    "passwd",
+    "api_key",
+    "apikey",
+    "api-key",
+    "session",
+    "signature",
+    "otp",
+    "phone",
+    "mobile",
+    "email",
+    "aadhaar",
+    "abha",
+    "address",
+    "dob",
+    "patient_name",
+    "first_name",
+    "last_name",
+    "full_name",
+    "query",
+    "bearer",
+    "jwt",
+    "credential",
 )
 _TOKEN_KEY = re.compile(r"(^|[_\-.])token$")
 _HEADER_ALLOWLIST = frozenset(
