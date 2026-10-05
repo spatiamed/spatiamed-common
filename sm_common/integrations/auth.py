@@ -2,8 +2,16 @@
 
 Supports api_key, hmac, bearer, oauth2_client_credentials, private_key_jwt
 (SMART Backend Services), and oauth2_password (OpenEMR Standard API). OAuth
-tokens are cached on the passed cfg dict under the private key "_oauth_cache"
-with a monotonic expiry.
+tokens are cached with a monotonic expiry: in the caller-owned TokenCache when
+the cfg carries one (``cfg["_token_cache"]`` + ``cfg["_token_slot"]``, wired by
+build_adapter from AdapterBuildConfig.token_cache), otherwise on the passed cfg
+dict under the private key "_oauth_cache".
+
+A cfg dict lives only as long as its adapter, and adapters are typically built
+per poll cycle, so the cfg-dict cache alone means a token per cycle. A caller
+that wants tokens to outlive the adapter passes a TokenCache it keeps (keyed by
+whatever identifies the integration on its side; sm_common never shares tokens
+between cfgs on its own).
 
 private_key_jwt is what FHIR servers require before they will issue system-level
 scopes: the client proves itself with an RS384-signed assertion validated against
@@ -17,12 +25,87 @@ import hmac
 import time
 import uuid
 from email.utils import formatdate
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import httpx
 import jwt
 
 from sm_common.integrations.exceptions import AuthError, TransientError
+
+
+# Refresh this long before the vendor's expiry, so a token is never sent in its
+# last seconds and refused mid-request.
+EXPIRY_MARGIN_SECONDS = 30
+
+
+@runtime_checkable
+class TokenCache(Protocol):
+    """Caller-owned OAuth token store that outlives an adapter.
+
+    ``slot`` names the identity a token belongs to within one integration
+    ("system", or "write_user" for OpenEMR's password-grant user). ``expires_at``
+    is a ``time.monotonic()`` instant, so a cache must stay in-process: never
+    persist it.
+
+    ``set`` runs as soon as a token is minted and before it is first sent, which
+    makes it the place for a caller to register the token with its log
+    scrubber.
+    """
+
+    def get(self, slot: str) -> tuple[str, float] | None: ...
+
+    def set(self, slot: str, token: str, expires_at: float) -> None: ...
+
+    def invalidate(self, slot: str) -> None: ...
+
+
+class InMemoryTokenCache:
+    """The simplest TokenCache: a dict per instance. One instance per integration."""
+
+    def __init__(self) -> None:
+        self._tokens: dict[str, tuple[str, float]] = {}
+
+    def get(self, slot: str) -> tuple[str, float] | None:
+        return self._tokens.get(slot)
+
+    def set(self, slot: str, token: str, expires_at: float) -> None:
+        self._tokens[slot] = (token, expires_at)
+
+    def invalidate(self, slot: str) -> None:
+        self._tokens.pop(slot, None)
+
+
+def _external_cache(cfg: dict) -> tuple[TokenCache, str] | None:  # type: ignore[type-arg]
+    cache = cfg.get("_token_cache")
+    if cache is None:
+        return None
+    return cache, str(cfg.get("_token_slot") or "system")
+
+
+def _cached_token(cfg: dict, now: float) -> str | None:  # type: ignore[type-arg]
+    ext = _external_cache(cfg)
+    if ext is not None:
+        cache, slot = ext
+        hit = cache.get(slot)
+        if hit is not None and hit[1] > now + EXPIRY_MARGIN_SECONDS:
+            return str(hit[0])
+        return None
+    local = cfg.get("_oauth_cache")
+    if local and local["expires_at"] > now + EXPIRY_MARGIN_SECONDS:
+        return str(local["token"])
+    return None
+
+
+def _store_token(cfg: dict, payload: dict[str, Any], now: float) -> str:  # type: ignore[type-arg]
+    token = str(payload["access_token"])
+    expires_at = now + int(payload.get("expires_in", 3600))
+    ext = _external_cache(cfg)
+    if ext is not None:
+        cache, slot = ext
+        cache.set(slot, token, expires_at)
+    else:
+        cfg["_oauth_cache"] = {"token": token, "expires_at": expires_at}
+    return token
 
 
 async def build_auth_headers(
@@ -111,10 +194,10 @@ def _token_payload(resp: httpx.Response, grant: str) -> dict[str, Any]:
 
 
 async def _oauth_token(client: httpx.AsyncClient, cfg: dict) -> str:
-    cache = cfg.get("_oauth_cache")
     now = time.monotonic()
-    if cache and cache["expires_at"] > now + 30:
-        return cache["token"]
+    cached = _cached_token(cfg, now)
+    if cached is not None:
+        return cached
     data = {
         "grant_type": "client_credentials",
         "client_id": cfg.get("client_id", ""),
@@ -124,9 +207,7 @@ async def _oauth_token(client: httpx.AsyncClient, cfg: dict) -> str:
         data["scope"] = cfg["scopes"]
     resp = await _post_token(client, cfg["token_url"], data, "client_credentials grant")
     payload = _token_payload(resp, "client_credentials grant")
-    token = payload["access_token"]
-    cfg["_oauth_cache"] = {"token": token, "expires_at": now + int(payload.get("expires_in", 3600))}
-    return token
+    return _store_token(cfg, payload, now)
 
 
 def _client_assertion(cfg: dict) -> str:
@@ -157,10 +238,10 @@ def _client_assertion(cfg: dict) -> str:
 
 
 async def _private_key_jwt_token(client: httpx.AsyncClient, cfg: dict) -> str:
-    cache = cfg.get("_oauth_cache")
     now = time.monotonic()
-    if cache and cache["expires_at"] > now + 30:
-        return str(cache["token"])
+    cached = _cached_token(cfg, now)
+    if cached is not None:
+        return cached
 
     data = {
         "grant_type": "client_credentials",
@@ -172,14 +253,16 @@ async def _private_key_jwt_token(client: httpx.AsyncClient, cfg: dict) -> str:
 
     resp = await _post_token(client, cfg["token_url"], data, "private_key_jwt grant")
     payload = _token_payload(resp, "private_key_jwt grant")
-    token = payload["access_token"]
-    cfg["_oauth_cache"] = {"token": token, "expires_at": now + int(payload.get("expires_in", 3600))}
-    return str(token)
+    return _store_token(cfg, payload, now)
 
 
 def invalidate_token(cfg: dict) -> None:
     """Forget a cached token — call after the vendor answers 401 with it."""
     cfg.pop("_oauth_cache", None)
+    ext = _external_cache(cfg)
+    if ext is not None:
+        cache, slot = ext
+        cache.invalidate(slot)
 
 
 async def _password_grant_token(client: httpx.AsyncClient, cfg: dict) -> str:
@@ -190,10 +273,10 @@ async def _password_grant_token(client: httpx.AsyncClient, cfg: dict) -> str:
     The password grant is OFF by default in OpenEMR (oauth_password_grant);
     the hospital must enable it and issue a dedicated service account.
     """
-    cache = cfg.get("_oauth_cache")
     now = time.monotonic()
-    if cache and cache["expires_at"] > now + 30:
-        return str(cache["token"])
+    cached = _cached_token(cfg, now)
+    if cached is not None:
+        return cached
     data = {
         "grant_type": "password",
         "client_id": cfg.get("client_id", ""),
@@ -206,6 +289,4 @@ async def _password_grant_token(client: httpx.AsyncClient, cfg: dict) -> str:
         data["scope"] = cfg["scopes"]
     resp = await _post_token(client, cfg["token_url"], data, "password grant")
     payload = _token_payload(resp, "password grant")
-    token = payload["access_token"]
-    cfg["_oauth_cache"] = {"token": token, "expires_at": now + int(payload.get("expires_in", 3600))}
-    return str(token)
+    return _store_token(cfg, payload, now)

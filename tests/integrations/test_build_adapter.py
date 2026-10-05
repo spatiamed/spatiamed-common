@@ -59,3 +59,56 @@ def test_build_openemr_adapter():
     assert a.vendor_name == "openemr"
     assert a._std == "https://oe/apis/default/api"
     assert "openemr" not in a._cfg  # system auth cfg must not carry the write credential
+
+
+def test_token_cache_is_wired_to_fhir_system_auth_cfg():
+    from sm_common.integrations.auth import InMemoryTokenCache
+
+    cache = InMemoryTokenCache()
+    a = build_adapter(
+        _cfg(
+            credentials={"auth_scheme": "oauth2_client_credentials", "token_url": "t"},
+            token_cache=cache,
+        )
+    )
+    assert a._cfg["_token_cache"] is cache
+    assert a._cfg["_token_slot"] == "system"
+
+
+def test_token_cache_is_wired_to_both_openemr_identities_in_separate_slots():
+    from sm_common.integrations.auth import InMemoryTokenCache
+
+    cache = InMemoryTokenCache()
+    write_user = {"token_url": "t", "username": "u"}
+    creds = {
+        "auth_scheme": "private_key_jwt",
+        "token_url": "t",
+        "client_id": "c",
+        "private_key_pem": "k",
+        "openemr": {
+            "timezone": "Asia/Kolkata",
+            "pc_catid": "5",
+            "pc_facility": "3",
+            "pc_billing_location": "3",
+            "write_user": write_user,
+        },
+    }
+    a = build_adapter(
+        AdapterBuildConfig(
+            vendor="openemr",
+            base_url="https://oe/apis/default/fhir",
+            credentials=creds,
+            field_mapping=None,
+            token_cache=cache,
+        )
+    )
+    assert a._cfg["_token_cache"] is cache and a._cfg["_token_slot"] == "system"
+    assert a._write_cfg["_token_cache"] is cache and a._write_cfg["_token_slot"] == "write_user"
+    assert "_token_cache" not in write_user  # the caller's credentials dict is not mutated
+
+
+def test_no_token_cache_leaves_auth_cfg_unchanged():
+    a = build_adapter(
+        _cfg(credentials={"auth_scheme": "oauth2_client_credentials", "token_url": "t"})
+    )
+    assert "_token_cache" not in a._cfg
