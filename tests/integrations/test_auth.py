@@ -327,8 +327,11 @@ async def test_token_endpoint_unreachable_is_transient(scheme, exc):
 @pytest.mark.parametrize(
     "response",
     [
-        httpx.Response(200, text="<html><body>Database error</body></html>",
-                       headers={"content-type": "text/html"}),
+        httpx.Response(
+            200,
+            text="<html><body>Database error</body></html>",
+            headers={"content-type": "text/html"},
+        ),
         httpx.Response(200, text=""),
         httpx.Response(200, json=["not", "an", "object"]),
         httpx.Response(200, json={"token_type": "Bearer"}),
@@ -356,3 +359,113 @@ async def test_token_endpoint_other_non_2xx_is_transient(scheme, status):
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(TransientError):
             await build_auth_headers(client, scheme, _token_cfg(scheme))
+
+
+# ─── Caller-owned TokenCache: tokens outlive the cfg dict (QueueCare#274) ────
+# QueueCare builds a fresh adapter (and so a fresh cfg dict) every poll cycle,
+# so a cache on the cfg dict meant a token fetch every 30s. A TokenCache the
+# caller keeps carries the token across cfg dicts, per slot.
+
+
+def _counting_token_handler(calls: dict) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, json={"access_token": f"tok-{calls['n']}", "expires_in": 3600})
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scheme", _TOKEN_SCHEMES)
+async def test_token_cache_survives_a_fresh_cfg_dict(scheme):
+    from sm_common.integrations.auth import InMemoryTokenCache
+
+    cache = InMemoryTokenCache()
+    calls = {"n": 0}
+    async with httpx.AsyncClient(transport=_counting_token_handler(calls)) as client:
+        for _ in range(3):
+            cfg = {**_token_cfg(scheme), "_token_cache": cache, "_token_slot": "system"}
+            h = await build_auth_headers(client, scheme, cfg)
+            assert h["Authorization"] == "Bearer tok-1"
+            assert "_oauth_cache" not in cfg  # the cache owns it, not the cfg
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_token_cache_slots_do_not_share_tokens():
+    from sm_common.integrations.auth import InMemoryTokenCache
+
+    cache = InMemoryTokenCache()
+    calls = {"n": 0}
+    scheme = "oauth2_client_credentials"
+    async with httpx.AsyncClient(transport=_counting_token_handler(calls)) as client:
+        sys_cfg = {**_token_cfg(scheme), "_token_cache": cache, "_token_slot": "system"}
+        user_cfg = {**_token_cfg(scheme), "_token_cache": cache, "_token_slot": "write_user"}
+        assert (await build_auth_headers(client, scheme, sys_cfg))[
+            "Authorization"
+        ] == "Bearer tok-1"
+        assert (await build_auth_headers(client, scheme, user_cfg))[
+            "Authorization"
+        ] == "Bearer tok-2"
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_token_cache_refetches_once_the_token_is_inside_the_expiry_margin(monkeypatch):
+    from sm_common.integrations import auth
+    from sm_common.integrations.auth import InMemoryTokenCache
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(auth.time, "monotonic", lambda: clock["t"])
+    cache = InMemoryTokenCache()
+    calls = {"n": 0}
+    scheme = "oauth2_client_credentials"
+    async with httpx.AsyncClient(transport=_counting_token_handler(calls)) as client:
+        cfg = {**_token_cfg(scheme), "_token_cache": cache}
+        await build_auth_headers(client, scheme, cfg)
+        clock["t"] += 3600 - auth.EXPIRY_MARGIN_SECONDS - 1  # still valid
+        assert (await build_auth_headers(client, scheme, dict(cfg)))[
+            "Authorization"
+        ] == "Bearer tok-1"
+        clock["t"] += 2  # now inside the margin
+        assert (await build_auth_headers(client, scheme, dict(cfg)))[
+            "Authorization"
+        ] == "Bearer tok-2"
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_invalidate_token_clears_the_caller_cache_slot():
+    from sm_common.integrations.auth import InMemoryTokenCache
+
+    cache = InMemoryTokenCache()
+    calls = {"n": 0}
+    scheme = "oauth2_password"
+    async with httpx.AsyncClient(transport=_counting_token_handler(calls)) as client:
+        cfg = {**_token_cfg(scheme), "_token_cache": cache, "_token_slot": "write_user"}
+        await build_auth_headers(client, scheme, cfg)
+        invalidate_token(dict(cfg))  # a different dict sharing the cache, as after a rebuild
+        assert cache.get("write_user") is None
+        assert (await build_auth_headers(client, scheme, cfg))["Authorization"] == "Bearer tok-2"
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_token_cache_set_runs_before_the_token_is_returned():
+    """The caller's set() is its hook to register the token (e.g. with a log scrubber)."""
+    from sm_common.integrations.auth import InMemoryTokenCache
+
+    seen: list[str] = []
+
+    class Recording(InMemoryTokenCache):
+        def set(self, slot: str, token: str, expires_at: float) -> None:
+            seen.append(token)
+            super().set(slot, token, expires_at)
+
+    calls = {"n": 0}
+    scheme = "private_key_jwt"
+    async with httpx.AsyncClient(transport=_counting_token_handler(calls)) as client:
+        cfg = {**_token_cfg(scheme), "_token_cache": Recording()}
+        h = await build_auth_headers(client, scheme, cfg)
+    assert seen == ["tok-1"]
+    assert h["Authorization"] == "Bearer tok-1"

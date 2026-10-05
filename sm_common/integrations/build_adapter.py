@@ -13,6 +13,7 @@ from sm_common.integrations.adapters.fhir_r4 import FhirR4Adapter
 from sm_common.integrations.adapters.generic_rest import GenericRestAdapter
 from sm_common.integrations.adapters.mocdoc import MocDocAdapter
 from sm_common.integrations.adapters.openemr import OpenEmrAdapter
+from sm_common.integrations.auth import TokenCache
 from sm_common.integrations.hms_adapter import HmsAdapter
 
 
@@ -24,6 +25,16 @@ class AdapterBuildConfig:
     field_mapping: dict | None  # type: ignore[type-arg]
     hash_salt: str = ""
     transport_key: str = ""
+    # Caller-owned OAuth token store (see sm_common.integrations.auth.TokenCache).
+    # Without it a token lives only as long as the adapter. Pass one instance per
+    # integration: whatever is in it is sent to this integration's HMS.
+    token_cache: TokenCache | None = None
+
+
+def _with_cache(auth_cfg: dict, cache: TokenCache | None, slot: str) -> dict:  # type: ignore[type-arg]
+    if cache is None:
+        return auth_cfg
+    return {**auth_cfg, "_token_cache": cache, "_token_slot": slot}
 
 
 def build_adapter(cfg: AdapterBuildConfig) -> HmsAdapter:
@@ -68,11 +79,16 @@ def build_adapter(cfg: AdapterBuildConfig) -> HmsAdapter:
     if vendor == "openemr":
         auth_scheme = creds.get("auth_scheme", "private_key_jwt")
         auth_cfg = {k: v for k, v in creds.items() if k not in ("auth_scheme", "openemr")}
+        openemr: dict = dict(creds.get("openemr") or {})  # type: ignore[type-arg]
+        if isinstance(openemr.get("write_user"), dict):
+            openemr["write_user"] = _with_cache(
+                openemr["write_user"], cfg.token_cache, "write_user"
+            )
         return OpenEmrAdapter(
             base_url=base_url or creds.get("base_url", ""),
             auth_scheme=auth_scheme,
-            auth_cfg=auth_cfg,
-            openemr=dict(creds.get("openemr") or {}),
+            auth_cfg=_with_cache(auth_cfg, cfg.token_cache, "system"),
+            openemr=openemr,
             hash_salt=hash_salt,
         )
 
@@ -82,7 +98,7 @@ def build_adapter(cfg: AdapterBuildConfig) -> HmsAdapter:
         return FhirR4Adapter(
             base_url=base_url or creds.get("base_url", ""),
             auth_scheme=auth_scheme,
-            auth_cfg=auth_cfg,
+            auth_cfg=_with_cache(auth_cfg, cfg.token_cache, "system"),
             hash_salt=hash_salt,
         )
 
