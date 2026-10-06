@@ -38,7 +38,8 @@ _WHOLE_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*"), TOKEN),
     (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"), f"Bearer {TOKEN}"),
     (re.compile(r"(https?://[^\s?#\"'<>]+)\?[^\s#\"'<>]*"), rf"\1{QUERY}"),
-    (re.compile(r"/t/[^/?#\s\"'<>]+"), CAPABILITY),
+    # A route TEMPLATE segment (/t/{capability}) is not a capability: keep it.
+    (re.compile(r"/t/(?!\{[A-Za-z_]\w*\}(?=[/?#\s\"'<>]|$))[^/?#\s\"'<>]+"), CAPABILITY),
     (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), EMAIL),
 )
 # Phase 2 (digit rules) runs only OUTSIDE protected ids. Aadhaar before phone.

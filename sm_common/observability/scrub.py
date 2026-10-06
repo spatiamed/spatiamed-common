@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from sm_common.observability._controls import is_enabled
 from sm_common.observability.pii import redact_text
+from sm_common.observability.traces import strip_sql_literals
 
 if TYPE_CHECKING:
     from sentry_sdk._types import Breadcrumb, BreadcrumbHint, Event, Hint
@@ -125,6 +126,15 @@ def scrub_event(event: Event, hint: Hint) -> Event | None:
 
 def scrub_breadcrumb(crumb: Breadcrumb, hint: BreadcrumbHint) -> Breadcrumb | None:
     try:
+        c: dict[str, Any] = crumb
+        # sentry-sdk records every SQL statement as a "query" breadcrumb
+        # (tracing_utils.record_sql_queries); a literal there rides on the next error.
+        if (
+            is_enabled("span_sql")
+            and c.get("category") == "query"
+            and isinstance(c.get("message"), str)
+        ):
+            c["message"] = strip_sql_literals(c["message"])
         if is_enabled("walk"):
             return cast("Breadcrumb", _walk(crumb))
         return crumb

@@ -20,7 +20,15 @@ CONTROLS: frozenset[str] = frozenset(
         "structural",  # scrub step (V3, V7)
         "walk",  # scrub step (V3, V4, V5, V8)
         "explicit_server_name",  # SDK option: never the host name
-        "no_trace_propagation",  # SDK option: no sentry-trace/baggage on outbound calls
+        "no_trace_propagation",  # SDK option: no sentry-trace/baggage except own hosts (T6)
+        # Plan 4 (traces)
+        "transaction_name",  # scrub step: URL-sourced names -> constant (T1)
+        "span_sql",  # scrub step: SQL literals stripped (T2, T8)
+        "span_http",  # scrub step: outbound URL path/query/fragment (T3)
+        "span_redis",  # scrub step: redis key + args (T4)
+        "span_subprocess",  # scrub step: subprocess argv -> executable basename (T9)
+        "span_data_allowlist",  # scrub step: span data/tags allowlist (T3, T4)
+        "span_text",  # scrub step: redact_text on names/descriptions (T7)
     }
 )
 

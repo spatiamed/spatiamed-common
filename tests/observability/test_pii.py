@@ -58,3 +58,10 @@ def test_aadhaar_starting_6_to_9_is_one_aadhaar_not_a_phone() -> None:
 )
 def test_identifiers_survive(safe: str) -> None:
     assert redact_text(safe) == safe
+
+
+def test_route_template_capability_placeholder_is_kept() -> None:
+    assert redact_text("/t/{capability}/status") == "/t/{capability}/status"
+    assert redact_text("/t/{cap}") == "/t/{cap}"
+    assert redact_text("/t/{cap}x/status") == "/t/[REDACTED]/status"
+    assert redact_text("/t/abc123/status") == "/t/[REDACTED]/status"
