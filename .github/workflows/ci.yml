@@ -1,13 +1,27 @@
 name: CI
 
+# spatiamed-common is PUBLIC, so standard-runner minutes are free here; the
+# trigger rules still match the private repos (owner 2026-10-06): PRs into main
+# + manual dispatch, drafts skip, a newer push cancels the older run.
+# Required check names (keep stable): test, security, secrets-scan.
 on:
-  push:
-    branches: [main]
   pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -15,6 +29,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install
         run: |
@@ -38,7 +54,9 @@ jobs:
   # ambient CI env, we point it at the REAL dependency tree (via `pip install -e .`),
   # so we don't want CI permanently red on an advisory we're already mid-bumping.
   security:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
@@ -62,7 +80,9 @@ jobs:
   # Secrets: full-history gitleaks. fetch-depth: 0 scans all history. Hard-fail —
   # a committed secret must block the build. Same version + invocation as CareLoop.
   secrets-scan:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
