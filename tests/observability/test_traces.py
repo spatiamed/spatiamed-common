@@ -163,7 +163,7 @@ def case_t2_sql_literals(traced: TraceCapture, world: Any, disable: tuple[str, .
     app, _ = world
     with traced(disable) as t:
         phone, name, email = _work(app)
-    db = t.spans("db")
+    db = [s for s in t.spans("db") if not str(s.get("op")).startswith("db.redis")]
     assert any("select" in str(s.get("description", "")).lower() for s in db)
     blob = json.dumps(db)
     # phone = a BOUND parameter (SDK drops params); the rest are literals (we strip them)
@@ -323,6 +323,23 @@ def test_own_host_gets_propagation_headers(traced: TraceCapture) -> None:
         c.get("https://evil.io/?u=https://qc.staging.spatiamed.com/")
     assert "sentry-trace" in seen[0]
     assert "sentry-trace" not in seen[1] and "sentry-trace" not in seen[2]
+
+
+def test_forged_incoming_sampling_header_cannot_force_a_transaction(
+    traced: TraceCapture, world: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, _ = world
+    with traced(rate="0.1") as t:
+        monkeypatch.setattr(traces.random, "random", lambda: 0.99)  # our coin: not sampled
+        TestClient(app).get(
+            "/chart",
+            params={"mrn": "4000001"},
+            headers={
+                "sentry-trace": f"{'a' * 32}-{'b' * 16}-1",
+                "baggage": "sentry-sample_rand=0,sentry-sample_rate=1",
+            },
+        )
+    assert t.transactions == []
 
 
 def test_default_rate_is_off_and_errors_still_flow(traced: TraceCapture, world: Any) -> None:
