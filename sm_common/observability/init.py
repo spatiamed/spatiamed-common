@@ -91,9 +91,8 @@ def _build_options(
         # performance") adds sentry-trace + baggage to EVERY outbound
         # httpx/requests/urllib/aiohttp call by default (trace_propagation_targets
         # defaults to [".*"]), handing vendors (Gupshup, Exotel, Gemini...) our trace
-        # ids and baggage. An empty
-        # list matches no URL, which disables it in every HTTP integration
-        # (tracing_utils.should_propagate_trace -> match_regex_list -> False).
+        # ids and baggage. An empty list matches no URL, which disables it in every
+        # HTTP integration (tracing_utils.should_propagate_trace -> match_regex_list).
         # v0.18.0: the list is [] unless the caller passes an explicit allowlist of OUR
         # OWN hosts, turned into anchored regexes by parse_propagation_targets.
     }
