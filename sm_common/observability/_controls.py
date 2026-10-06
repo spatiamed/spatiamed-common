@@ -20,6 +20,7 @@ CONTROLS: frozenset[str] = frozenset(
         "structural",  # scrub step (V3, V7)
         "walk",  # scrub step (V3, V4, V5, V8)
         "explicit_server_name",  # SDK option: never the host name
+        "no_trace_propagation",  # SDK option: no sentry-trace/baggage on outbound calls
     }
 )
 

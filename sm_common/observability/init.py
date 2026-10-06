@@ -48,9 +48,16 @@ def _build_options(
         "enable_metrics": False,
         "before_send": scrub_event,
         "before_breadcrumb": scrub_breadcrumb,
-        # traces_sample_rate deliberately omitted: even 0 installs tracing and
-        # injects sentry-trace/baggage headers into vendor-bound httpx calls.
+        # traces_sample_rate is omitted, so no transactions/spans are sent. That does
+        # NOT stop header propagation: sentry-sdk 2.x ("tracing without performance")
+        # adds sentry-trace + baggage to EVERY outbound httpx/requests/urllib/aiohttp
+        # call by default (trace_propagation_targets defaults to [".*"]), handing
+        # vendors (Gupshup, Exotel, Gemini...) our trace ids and baggage. An empty
+        # list matches no URL, which disables it in every HTTP integration
+        # (tracing_utils.should_propagate_trace -> match_regex_list -> False).
     }
+    if is_enabled("no_trace_propagation"):
+        options["trace_propagation_targets"] = []
     if transport is not None:
         options["transport"] = transport
     return options
