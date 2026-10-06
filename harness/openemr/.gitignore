@@ -6,3 +6,6 @@ token.txt
 user_token.txt
 write_probe_client.json
 patient_probe_client.json
+# OAuth client credentials written by the local harness scripts (hold a client_secret).
+match_fixtures_client.json
+*_client.json
