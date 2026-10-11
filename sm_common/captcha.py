@@ -52,7 +52,8 @@ and passes it per call::
 
 With test mode on, exactly :data:`TURNSTILE_TEST_TOKEN` (Cloudflare's own dummy
 token, which its always-pass test sitekeys emit) passes without calling
-Cloudflare, reporting ``action=expected_action`` and the first allowed hostname.
+Cloudflare, reporting ``action=expected_action`` and the first allowed hostname
+(an empty allowlist still rejects).
 Every other token still goes to siteverify. The secret is still required.
 Test mode is refused unless ``environment`` is one of
 :data:`TURNSTILE_TEST_MODE_ENVIRONMENTS`: :func:`turnstile_test_mode` raises
@@ -238,11 +239,10 @@ async def verify_turnstile(
             return _reject("test_mode_forbidden")
         if token == TURNSTILE_TEST_TOKEN:
             allowed_sorted = sorted(h.lower() for h in allowed_hostnames)
+            if not allowed_sorted:  # an empty allowlist rejects everything, here too
+                return _reject("hostname_not_allowed", action=expected_action)
             return TurnstileResult(
-                ok=True,
-                reason="ok",
-                hostname=allowed_sorted[0] if allowed_sorted else None,
-                action=expected_action,
+                ok=True, reason="ok", hostname=allowed_sorted[0], action=expected_action
             )
 
     form: dict[str, str] = {

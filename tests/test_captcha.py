@@ -15,7 +15,14 @@ import httpx
 import pytest
 import respx
 
-from sm_common.captcha import TURNSTILE_VERIFY_URL, TurnstileResult, verify_turnstile
+from sm_common.captcha import (
+    TURNSTILE_TEST_TOKEN,
+    TURNSTILE_VERIFY_URL,
+    TurnstileResult,
+    TurnstileTestModeForbiddenError,
+    turnstile_test_mode,
+    verify_turnstile,
+)
 
 SECRET = "unit-test-secret"
 TOKEN = "unit-test-token-abc"
@@ -233,12 +240,6 @@ async def test_self_owned_client_path() -> None:
 
 BAD_TOKEN_BODY = {"success": False, "error-codes": ["invalid-input-response"]}
 
-from sm_common.captcha import (  # noqa: E402
-    TURNSTILE_TEST_TOKEN,
-    TurnstileTestModeForbiddenError,
-    turnstile_test_mode,
-)
-
 
 def test_test_token_is_cloudflares_dummy_token() -> None:
     # Cloudflare's always-pass test sitekeys emit exactly this token, so the
@@ -356,3 +357,14 @@ async def test_verify_fails_closed_when_test_mode_reaches_a_forbidden_environmen
         _never_called, token=TURNSTILE_TEST_TOKEN, test_mode=True, environment=environment
     )
     assert not result.ok and result.reason == "test_mode_forbidden"
+
+
+async def test_test_mode_with_empty_allowlist_still_rejects() -> None:
+    result = await _verify(
+        _never_called,
+        token=TURNSTILE_TEST_TOKEN,
+        test_mode=True,
+        environment="dev",
+        allowed_hostnames=frozenset(),
+    )
+    assert not result.ok and result.reason == "hostname_not_allowed"
