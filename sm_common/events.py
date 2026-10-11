@@ -34,19 +34,28 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, TypeVar
+from typing import Any, ClassVar, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializationInfo,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+)
 
 __all__ = [
     "CURRENT_ENVELOPE_VERSION",
     "EVENT_PAYLOAD_MODELS",
+    "BookingLang",
     "BookingUpdatedPayload",
     "ConsultationScheduledPayload",
     "EventEnvelope",
     "EventPayload",
     "EventSource",
     "EventType",
+    "NoticeKind",
     "PatientAppointmentCancelledPayload",
     "PatientPreRegisteredPayload",
     "ReportReadyPayload",
@@ -55,6 +64,7 @@ __all__ = [
     "VisitCompletedPayload",
     "VisitNoShowPayload",
     "VisitTokenIssuedPayload",
+    "VisitType",
     "build_envelope",
     "parse_envelope",
     "parse_payload",
@@ -102,6 +112,19 @@ class EventType(StrEnum):
 
 
 # ---------------------------------------------------------------------------
+# Booking form value sets (v0.20.0)
+# ---------------------------------------------------------------------------
+#: Patient-facing language of a web booking (booking form v1 supports en + hi only).
+BookingLang = Literal["en", "hi"]
+#: How the patient will be seen. ``booking.updated`` carries it so CareLoop can
+#: tell an in-person booking from a video one.
+VisitType = Literal["video", "in_person"]
+#: Which ``consultation.scheduled`` notice to send: the first confirmation, or
+#: the re-emit after a reschedule.
+NoticeKind = Literal["confirmed", "rescheduled"]
+
+
+# ---------------------------------------------------------------------------
 # Payload models
 # ---------------------------------------------------------------------------
 class EventPayload(BaseModel):
@@ -114,6 +137,29 @@ class EventPayload(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid")
+
+
+class _BookingFormFieldsMixin(EventPayload):
+    """Drops the optional booking-form fields (v0.20.0) from the wire when unset.
+
+    A non-form booking therefore serialises byte-for-byte as it did on v0.19.0,
+    so a consumer still pinned to an older ``sm_common`` (``extra="forbid"``)
+    can parse it, and no ``status_link: null`` noise reaches logs.
+    """
+
+    _OMIT_WHEN_NONE: ClassVar[frozenset[str]] = frozenset(
+        {"status_link", "lang", "contact_phone_encrypted", "visit_type", "notice_kind"}
+    )
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_booking_form_fields(
+        self, handler: SerializerFunctionWrapHandler, info: SerializationInfo
+    ) -> dict[str, Any]:
+        data: dict[str, Any] = handler(self)
+        for key in self._OMIT_WHEN_NONE:
+            if key in data and data[key] is None:
+                del data[key]
+        return data
 
 
 class VisitTokenIssuedPayload(EventPayload):
@@ -250,7 +296,7 @@ class ReportRevokedPayload(EventPayload):
     revoke_reason: str
 
 
-class ConsultationScheduledPayload(EventPayload):
+class ConsultationScheduledPayload(_BookingFormFieldsMixin):
     """``consultation.scheduled`` — video consult provisioned; CareLoop sends join link.
 
     Source of truth (producer): QueueCare
@@ -260,6 +306,11 @@ class ConsultationScheduledPayload(EventPayload):
     deliver_consultation_link`` (requires ``hospital_id``,
     ``patient_phone_hash``, ``join_url``; reads ``channels`` / ``provider`` /
     ``room_ref``).
+
+    v0.20.0 (booking form v1): optional ``status_link``, ``lang``,
+    ``contact_phone_encrypted`` and ``notice_kind``. ``status_link`` carries a
+    bearer capability (deliberately reversing QC#231's "no token outbound"
+    rule for this one field); consumers treat it as opaque and redact it.
     """
 
     consultation_id: str
@@ -272,8 +323,27 @@ class ConsultationScheduledPayload(EventPayload):
     scheduled_start: str
     channels: list[str] = Field(default_factory=list)
 
+    # --- booking form v1 (v0.20.0). All optional: old producers omit them. ---
+    # Patient's manage/status link for a public web booking (booking form v1):
+    # "<form origin>/book/<slug>/status/<public_ref>#t=<capability>". The capability lives in
+    # the URL FRAGMENT and in this field only. Consumers send it to the patient and
+    # MUST NOT log or persist it. None for bookings not made on the web form.
+    status_link: str | None = None
+    # Language the patient booked in. None -> consumer falls back to its profile / "en".
+    lang: BookingLang | None = None
+    # OD-1 (owner, 2026-10-09): contact phone for a FIRST-TIME web booker, whom
+    # CareLoop has no profile for. Transport-encrypted exactly like
+    # ``PatientPreRegisteredPayload.phone_encrypted``: a Fernet token under the
+    # shared ``WEBHOOK_TRANSPORT_KEY``, encrypting the E.164 contact phone. Opaque
+    # here; never a plaintext phone, never logged. None when CareLoop can resolve
+    # the patient by hash (returning patients, non-form bookings).
+    contact_phone_encrypted: str | None = None
+    # "confirmed" (first notice) or "rescheduled" (re-emit after a reschedule).
+    # None -> consumer sends the "confirmed" copy.
+    notice_kind: NoticeKind | None = None
 
-class BookingUpdatedPayload(EventPayload):
+
+class BookingUpdatedPayload(_BookingFormFieldsMixin):
     """``booking.updated`` — a booking's CURRENT state, sent on every change.
 
     Producer: QueueCare (every path that creates a booking or changes its
@@ -292,9 +362,14 @@ class BookingUpdatedPayload(EventPayload):
     * ``slot_start`` / ``updated_at`` — ISO-8601 WITH a UTC offset.
     * ``doctor_name`` — display name, or null when no doctor is assigned.
 
-    PHI: the patient is identified by ``phone_hash`` only (the same hash the
-    ``visit.*`` events carry). No name, no phone number — ``extra="forbid"``
-    rejects a producer that tries to add one.
+    PHI: the patient is identified by ``phone_hash`` (the same hash the
+    ``visit.*`` events carry). No name and no PLAINTEXT phone number —
+    ``extra="forbid"`` rejects a producer that tries to add one. The only phone
+    on the wire is ``contact_phone_encrypted`` (v0.20.0, OD-1): Fernet under
+    ``WEBHOOK_TRANSPORT_KEY``, sent only for first-time web bookers.
+
+    v0.20.0 (booking form v1): optional ``status_link``, ``lang``,
+    ``contact_phone_encrypted`` and ``visit_type``.
     """
 
     booking_id: str
@@ -303,6 +378,24 @@ class BookingUpdatedPayload(EventPayload):
     slot_start: str | None
     doctor_name: str | None
     updated_at: str
+
+    # --- booking form v1 (v0.20.0). All optional: old producers omit them. ---
+    # Patient's manage/status link for a public web booking (booking form v1):
+    # "<form origin>/book/<slug>/status/<public_ref>#t=<capability>". The capability lives in
+    # the URL FRAGMENT and in this field only. Consumers send it to the patient and
+    # MUST NOT log or persist it. None for bookings not made on the web form.
+    status_link: str | None = None
+    # Language the patient booked in. None -> consumer falls back to its profile / "en".
+    lang: BookingLang | None = None
+    # OD-1 (owner, 2026-10-09): contact phone for a FIRST-TIME web booker, whom
+    # CareLoop has no profile for. Transport-encrypted exactly like
+    # ``PatientPreRegisteredPayload.phone_encrypted``: a Fernet token under the
+    # shared ``WEBHOOK_TRANSPORT_KEY``, encrypting the E.164 contact phone. Opaque
+    # here; never a plaintext phone, never logged. None when CareLoop can resolve
+    # the patient by hash (returning patients, non-form bookings).
+    contact_phone_encrypted: str | None = None
+    # "video" | "in_person". None -> old producer; consumer sends only the cancel notice.
+    visit_type: VisitType | None = None
 
 
 class PatientPreRegisteredPayload(EventPayload):
