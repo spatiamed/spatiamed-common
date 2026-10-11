@@ -33,20 +33,51 @@ Every failure mode rejects (``ok=False``):
 * ``hostname_not_allowed``: the token was solved on a hostname outside
   ``allowed_hostnames`` (an empty allowlist rejects everything).
 
+* ``test_mode_forbidden``: ``test_mode=True`` reached a call whose
+  ``environment`` is not a local/CI one (see below), so every token is rejected.
+
 The token and the secret are never logged and never appear in the result.
+
+Test mode (OD-3, owner 2026-10-09): local/CI E2E only
+-----------------------------------------------------
+
+Playwright cannot solve a real challenge, so the local/CI E2E stack runs with
+``TURNSTILE_TEST_MODE=1``. Each service resolves the flag ONCE at startup::
+
+    TEST_MODE = turnstile_test_mode(environment=settings.ENVIRONMENT)  # raises in staging/prod
+
+and passes it per call::
+
+    await verify_turnstile(token, ..., test_mode=TEST_MODE, environment=settings.ENVIRONMENT)
+
+With test mode on, exactly :data:`TURNSTILE_TEST_TOKEN` (Cloudflare's own dummy
+token, which its always-pass test sitekeys emit) passes without calling
+Cloudflare, reporting ``action=expected_action`` and the first allowed hostname.
+Every other token still goes to siteverify. The secret is still required.
+Test mode is refused unless ``environment`` is one of
+:data:`TURNSTILE_TEST_MODE_ENVIRONMENTS`: :func:`turnstile_test_mode` raises
+:class:`TurnstileTestModeForbiddenError`, and :func:`verify_turnstile` rejects
+every token with ``test_mode_forbidden``. That covers staging, prod/production,
+and an unset or unknown environment (fail closed).
 """
 
 from __future__ import annotations
 
+import os
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 import httpx
 
 __all__ = [
+    "TURNSTILE_TEST_MODE_ENVIRONMENTS",
+    "TURNSTILE_TEST_MODE_ENV_VAR",
+    "TURNSTILE_TEST_TOKEN",
     "TURNSTILE_VERIFY_URL",
     "TurnstileResult",
+    "TurnstileTestModeForbiddenError",
+    "turnstile_test_mode",
     "verify_turnstile",
 ]
 
@@ -54,6 +85,61 @@ TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverif
 
 # Cloudflare documents a 2048-character maximum token length.
 _MAX_TOKEN_LENGTH = 2048
+
+#: The one token test mode accepts: Cloudflare's dummy token, emitted by its
+#: always-pass test sitekeys (e.g. ``1x00000000000000000000AA``).
+TURNSTILE_TEST_TOKEN: Final[str] = "XXXX.DUMMY.TOKEN.XXXX"
+
+#: Env var that switches test mode on (``1`` / ``true`` / ``yes`` / ``on``).
+TURNSTILE_TEST_MODE_ENV_VAR: Final[str] = "TURNSTILE_TEST_MODE"
+
+#: The ONLY environments where test mode may run (compared trimmed and
+#: case-insensitively). Anything else, including staging, prod, production and
+#: an empty/unknown value, is refused.
+TURNSTILE_TEST_MODE_ENVIRONMENTS: Final[frozenset[str]] = frozenset(
+    {"dev", "development", "local", "test", "ci"}
+)
+
+_TRUTHY: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
+
+
+class TurnstileTestModeForbiddenError(RuntimeError):
+    """Test mode was enabled outside a local/CI environment (e.g. staging/prod)."""
+
+
+def _test_mode_environment_allowed(environment: str | None) -> bool:
+    return (environment or "").strip().lower() in TURNSTILE_TEST_MODE_ENVIRONMENTS
+
+
+def turnstile_test_mode(*, environment: str, enabled: bool | None = None) -> bool:
+    """Resolve whether Turnstile test mode is on. Call once at service startup.
+
+    Args:
+        environment: The service's ``ENVIRONMENT`` setting (pass the validated
+            settings value, not ``os.environ``, which may be empty when the
+            settings came from a ``.env`` file).
+        enabled: Explicit switch. When ``None``, read
+            :data:`TURNSTILE_TEST_MODE_ENV_VAR` (``1``/``true``/``yes``/``on``).
+
+    Returns:
+        True when test mode is on (and allowed), False when it is off.
+
+    Raises:
+        TurnstileTestModeForbiddenError: test mode is on and ``environment`` is
+            not in :data:`TURNSTILE_TEST_MODE_ENVIRONMENTS` (staging, prod,
+            production, empty or unknown). Let it crash the startup.
+    """
+    if enabled is None:
+        raw = os.environ.get(TURNSTILE_TEST_MODE_ENV_VAR, "")
+        enabled = raw.strip().lower() in _TRUTHY
+    if not enabled:
+        return False
+    if not _test_mode_environment_allowed(environment):
+        raise TurnstileTestModeForbiddenError(
+            f"{TURNSTILE_TEST_MODE_ENV_VAR} is on but ENVIRONMENT={environment!r} is not one "
+            f"of {sorted(TURNSTILE_TEST_MODE_ENVIRONMENTS)}; refusing (local/CI E2E only)"
+        )
+    return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +201,8 @@ async def verify_turnstile(
     idempotency_key: str | None = None,
     timeout: float = 5.0,
     client: httpx.AsyncClient | None = None,
+    test_mode: bool = False,
+    environment: str | None = None,
 ) -> TurnstileResult:
     """Verify a Turnstile token with Cloudflare siteverify. Fails closed.
 
@@ -132,11 +220,30 @@ async def verify_turnstile(
         timeout: Per-attempt timeout in seconds.
         client: An ``httpx.AsyncClient`` to reuse (tests inject one). When
             omitted, a client is created and closed for this call.
+        test_mode: Local/CI E2E only (resolve it with
+            :func:`turnstile_test_mode` at startup). Accepts exactly
+            :data:`TURNSTILE_TEST_TOKEN` without calling Cloudflare.
+        environment: The service's ``ENVIRONMENT``. Required with
+            ``test_mode=True``: outside :data:`TURNSTILE_TEST_MODE_ENVIRONMENTS`
+            (or when omitted) every token is rejected with
+            ``test_mode_forbidden``.
     """
     if not secret or not secret.strip():
         return _reject("missing_secret")
     if not token or not token.strip() or len(token) > _MAX_TOKEN_LENGTH:
         return _reject("missing_token")
+
+    if test_mode:
+        if not _test_mode_environment_allowed(environment):
+            return _reject("test_mode_forbidden")
+        if token == TURNSTILE_TEST_TOKEN:
+            allowed_sorted = sorted(h.lower() for h in allowed_hostnames)
+            return TurnstileResult(
+                ok=True,
+                reason="ok",
+                hostname=allowed_sorted[0] if allowed_sorted else None,
+                action=expected_action,
+            )
 
     form: dict[str, str] = {
         "secret": secret,
