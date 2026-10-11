@@ -35,6 +35,7 @@ from sm_common import (
 from sm_common.events import (
     BookingUpdatedPayload,
     ConsultationScheduledPayload,
+    EventPayload,
     PatientAppointmentCancelledPayload,
     PatientPreRegisteredPayload,
     ReportReadyPayload,
@@ -408,6 +409,11 @@ def test_booking_updated_contract_fields() -> None:
         "slot_start",
         "doctor_name",
         "updated_at",
+        # v0.20.0 booking form (all optional, see the booking-form tests below)
+        "status_link",
+        "lang",
+        "visit_type",
+        "contact_phone_encrypted",
     }
     p = BookingUpdatedPayload.model_validate(BOOKING_UPDATED_SAMPLE)
     assert p.status == "confirmed"
@@ -450,3 +456,110 @@ def test_booking_updated_envelope_round_trip() -> None:
     assert wire["event_type"] == "booking.updated"
     assert wire["data"] == BOOKING_UPDATED_SAMPLE
     assert parse_payload(parse_envelope(wire)) == payload
+
+
+# --- booking form v1 (v0.20.0): status link, OD-6 fields, OD-1 contact phone ---
+
+STATUS_LINK = "https://book.test/book/demohospital/status/BK-7Q2X#t=opaque-capability"
+BOOKING_FORM_PAYLOADS: list[tuple[type[EventPayload], dict[str, object], EventType]] = [
+    (
+        ConsultationScheduledPayload,
+        CONSULTATION_SCHEDULED_SAMPLE,
+        EventType.CONSULTATION_SCHEDULED,
+    ),
+    (BookingUpdatedPayload, BOOKING_UPDATED_SAMPLE, EventType.BOOKING_UPDATED),
+]
+
+
+@pytest.mark.parametrize(("model", "sample", "event_type"), BOOKING_FORM_PAYLOADS)
+def test_status_link_is_optional_and_round_trips(
+    model: type[EventPayload], sample: dict[str, object], event_type: EventType
+) -> None:
+    # Old producers (no key) still validate; the default is None.
+    old = model.model_validate(sample)
+    assert old.status_link is None  # type: ignore[attr-defined]
+    assert old.lang is None  # type: ignore[attr-defined]
+    assert old.contact_phone_encrypted is None  # type: ignore[attr-defined]
+
+    new = model.model_validate(
+        {
+            **sample,
+            "status_link": STATUS_LINK,
+            "lang": "hi",
+            "contact_phone_encrypted": "gAAAAopaque",
+        }
+    )
+    wire = build_envelope(
+        event_type=event_type, payload=new, source=EventSource.QUEUECARE, tenant_id="t-1"
+    ).model_dump(mode="json")
+    assert wire["data"]["status_link"] == STATUS_LINK
+    assert wire["data"]["lang"] == "hi"
+    assert wire["data"]["contact_phone_encrypted"] == "gAAAAopaque"
+    assert parse_payload(parse_envelope(wire)) == new
+
+    # extra="forbid" still rejects an unknown key, and a plaintext phone.
+    for bad_key in ("status_url", "contact_phone", "phone"):
+        with pytest.raises(ValidationError):
+            model.model_validate({**sample, bad_key: "x"})
+
+
+@pytest.mark.parametrize(("model", "sample", "event_type"), BOOKING_FORM_PAYLOADS)
+@pytest.mark.parametrize("lang", ["mr", "EN", "english", ""])
+def test_lang_only_accepts_en_or_hi(
+    model: type[EventPayload], sample: dict[str, object], event_type: EventType, lang: str
+) -> None:
+    with pytest.raises(ValidationError):
+        model.model_validate({**sample, "lang": lang})
+
+
+@pytest.mark.parametrize("visit_type", ["video", "in_person"])
+def test_booking_updated_visit_type(visit_type: str) -> None:
+    p = BookingUpdatedPayload.model_validate({**BOOKING_UPDATED_SAMPLE, "visit_type": visit_type})
+    assert p.visit_type == visit_type
+    assert BookingUpdatedPayload.model_validate(BOOKING_UPDATED_SAMPLE).visit_type is None
+    with pytest.raises(ValidationError):
+        BookingUpdatedPayload.model_validate({**BOOKING_UPDATED_SAMPLE, "visit_type": "both"})
+    # visit_type is a booking.updated field only.
+    with pytest.raises(ValidationError):
+        ConsultationScheduledPayload.model_validate(
+            {**CONSULTATION_SCHEDULED_SAMPLE, "visit_type": visit_type}
+        )
+
+
+@pytest.mark.parametrize("notice_kind", ["confirmed", "rescheduled"])
+def test_consultation_scheduled_notice_kind(notice_kind: str) -> None:
+    p = ConsultationScheduledPayload.model_validate(
+        {**CONSULTATION_SCHEDULED_SAMPLE, "notice_kind": notice_kind}
+    )
+    assert p.notice_kind == notice_kind
+    assert (
+        ConsultationScheduledPayload.model_validate(CONSULTATION_SCHEDULED_SAMPLE).notice_kind
+        is None
+    )
+    with pytest.raises(ValidationError):
+        ConsultationScheduledPayload.model_validate(
+            {**CONSULTATION_SCHEDULED_SAMPLE, "notice_kind": "cancelled"}
+        )
+    # notice_kind is a consultation.scheduled field only.
+    with pytest.raises(ValidationError):
+        BookingUpdatedPayload.model_validate({**BOOKING_UPDATED_SAMPLE, "notice_kind": notice_kind})
+
+
+@pytest.mark.parametrize(("model", "sample", "event_type"), BOOKING_FORM_PAYLOADS)
+def test_unset_booking_form_fields_stay_off_the_wire(
+    model: type[EventPayload], sample: dict[str, object], event_type: EventType
+) -> None:
+    # A non-form booking serialises exactly as on v0.19.0 (no `status_link: null`),
+    # so a consumer pinned to an older sm_common (extra="forbid") still parses it.
+    wire = build_envelope(
+        event_type=event_type,
+        payload=model.model_validate(sample),
+        source=EventSource.QUEUECARE,
+        tenant_id="t-1",
+    ).model_dump(mode="json")
+    assert wire["data"] == sample
+    # Required nullable fields are NOT dropped.
+    if model is BookingUpdatedPayload:
+        nulls = {**sample, "slot_start": None, "doctor_name": None}
+        assert model.model_validate(nulls).model_dump()["slot_start"] is None
+        assert "slot_start" in model.model_validate(nulls).model_dump()
