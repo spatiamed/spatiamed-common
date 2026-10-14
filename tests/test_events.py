@@ -15,6 +15,7 @@ models are pinned to the real contract, not an invented one:
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 
@@ -414,6 +415,9 @@ def test_booking_updated_contract_fields() -> None:
         "lang",
         "visit_type",
         "contact_phone_encrypted",
+        # v0.21.0 post-booking AI triage call (optional)
+        "triage_call_enabled",
+        "triage_call_consent",
     }
     p = BookingUpdatedPayload.model_validate(BOOKING_UPDATED_SAMPLE)
     assert p.status == "confirmed"
@@ -563,3 +567,75 @@ def test_unset_booking_form_fields_stay_off_the_wire(
         nulls = {**sample, "slot_start": None, "doctor_name": None}
         assert model.model_validate(nulls).model_dump()["slot_start"] is None
         assert "slot_start" in model.model_validate(nulls).model_dump()
+
+
+# --- post-booking AI triage call (v0.21.0) ---
+
+# A v0.20.0 form booking payload (no triage keys): what QC sent before v0.21.0.
+FORM_BOOKING_UPDATED_V020 = {
+    **BOOKING_UPDATED_SAMPLE,
+    "status_link": STATUS_LINK,
+    "lang": "en",
+    "visit_type": "video",
+}
+
+
+@pytest.mark.parametrize(
+    ("enabled", "consent"), [(True, True), (True, False), (False, False), (False, True)]
+)
+def test_booking_updated_triage_fields_serialise(enabled: bool, consent: bool) -> None:
+    payload = BookingUpdatedPayload.model_validate(
+        {
+            **FORM_BOOKING_UPDATED_V020,
+            "triage_call_enabled": enabled,
+            "triage_call_consent": consent,
+        }
+    )
+    wire = build_envelope(
+        event_type=EventType.BOOKING_UPDATED,
+        payload=payload,
+        source=EventSource.QUEUECARE,
+        tenant_id="t-1",
+    ).model_dump(mode="json")
+    # False is a real value (switch off / consent withdrawn): never dropped.
+    assert wire["data"]["triage_call_enabled"] is enabled
+    assert wire["data"]["triage_call_consent"] is consent
+    assert parse_payload(parse_envelope(wire)) == payload
+
+
+@pytest.mark.parametrize("sample", [BOOKING_UPDATED_SAMPLE, FORM_BOOKING_UPDATED_V020])
+def test_booking_updated_without_triage_fields_is_byte_identical_to_v020(
+    sample: dict[str, object],
+) -> None:
+    payload = BookingUpdatedPayload.model_validate(sample)
+    assert payload.triage_call_enabled is None
+    assert payload.triage_call_consent is None
+    # Byte-identical: same JSON text as v0.20.0 emitted (keys in model order, no nulls).
+    assert payload.model_dump_json() == json.dumps(sample, separators=(",", ":"))
+    wire = build_envelope(
+        event_type=EventType.BOOKING_UPDATED,
+        payload=payload,
+        source=EventSource.QUEUECARE,
+        tenant_id="t-1",
+    ).model_dump(mode="json")
+    assert wire["data"] == sample
+    assert "triage_call_enabled" not in wire["data"]
+    assert "triage_call_consent" not in wire["data"]
+
+
+def test_booking_updated_triage_fields_reject_unknown_and_non_bool() -> None:
+    # extra="forbid" still rejects an unknown key next to the new fields.
+    for bad_key in ("triage_call", "triage_consent", "triage_call_summary"):
+        with pytest.raises(ValidationError):
+            BookingUpdatedPayload.model_validate(
+                {**FORM_BOOKING_UPDATED_V020, "triage_call_enabled": True, bad_key: True}
+            )
+    with pytest.raises(ValidationError):
+        BookingUpdatedPayload.model_validate(
+            {**FORM_BOOKING_UPDATED_V020, "triage_call_consent": "maybe"}
+        )
+    # The triage fields belong to booking.updated only.
+    with pytest.raises(ValidationError):
+        ConsultationScheduledPayload.model_validate(
+            {**CONSULTATION_SCHEDULED_SAMPLE, "triage_call_enabled": True}
+        )
