@@ -148,7 +148,16 @@ class _BookingFormFieldsMixin(EventPayload):
     """
 
     _OMIT_WHEN_NONE: ClassVar[frozenset[str]] = frozenset(
-        {"status_link", "lang", "contact_phone_encrypted", "visit_type", "notice_kind"}
+        {
+            "status_link",
+            "lang",
+            "contact_phone_encrypted",
+            "visit_type",
+            "notice_kind",
+            # v0.21.0 post-booking AI triage call (booking.updated only).
+            "triage_call_enabled",
+            "triage_call_consent",
+        }
     )
 
     @model_serializer(mode="wrap")
@@ -370,6 +379,9 @@ class BookingUpdatedPayload(_BookingFormFieldsMixin):
 
     v0.20.0 (booking form v1): optional ``status_link``, ``lang``,
     ``contact_phone_encrypted`` and ``visit_type``.
+
+    v0.21.0 (post-booking AI triage call): optional ``triage_call_enabled`` and
+    ``triage_call_consent``, dropped from the wire when None.
     """
 
     booking_id: str
@@ -396,6 +408,16 @@ class BookingUpdatedPayload(_BookingFormFieldsMixin):
     contact_phone_encrypted: str | None = None
     # "video" | "in_person". None -> old producer; consumer sends only the cancel notice.
     visit_type: VisitType | None = None
+
+    # --- post-booking AI triage call (v0.21.0). Optional; omitted when None. ---
+    # QueueCare sends both, always as bools, for booking-form bookings only
+    # (``BOOKING_FORM_SOURCES``); absent means "not a form booking / old producer".
+    # ``triage_call_enabled``: the hospital's ``booking_triage_call_enabled`` switch
+    # at event time. ``triage_call_consent``: this booking's ``triage_call`` grant is
+    # currently active (False after a withdrawal). CareLoop schedules the call only
+    # when both are True; QC stays the consent authority at dial time.
+    triage_call_enabled: bool | None = None
+    triage_call_consent: bool | None = None
 
 
 class PatientPreRegisteredPayload(EventPayload):
