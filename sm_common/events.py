@@ -218,6 +218,12 @@ class VisitCompletedPayload(EventPayload):
     ``exclude=`` the trio at every ``visit.completed`` emit site; dropping them
     lets producers call ``build_envelope`` directly. The drift-debt is now
     cleared for this event.
+
+    v0.22.0 (CareLoop #401): optional ``patient_name_encrypted`` (Fernet under
+    ``WEBHOOK_TRANSPORT_KEY``, never plaintext) and ``language`` (the visit's
+    token language). Both are dropped from the wire when None. CareLoop stores
+    the name only on a profile that has none, and the language only over the
+    column default.
     """
 
     phone_hash: str
@@ -227,6 +233,32 @@ class VisitCompletedPayload(EventPayload):
     department: str = ""
     doctor: str = ""
     consultation_duration_minutes: int = 0
+
+    # --- v0.22.0 (CareLoop #401). Optional; dropped from the wire when None. ---
+    # The patient's name, so CareLoop's post-visit follow-up call can greet the
+    # patient by name. Transport-encrypted exactly like
+    # ``PatientPreRegisteredPayload.patient_name_encrypted``: a Fernet token under
+    # the shared ``WEBHOOK_TRANSPORT_KEY``. Never a plaintext name, never logged.
+    # None when the producer has no usable name or no transport key.
+    patient_name_encrypted: str | None = None
+    # The language the patient chose for this visit (QueueCare ``Token.language``,
+    # e.g. the kiosk language). A base code such as ``"hi"`` / ``"or"``. Not PII.
+    # None -> old producer / unknown.
+    language: str | None = None
+
+    _OMIT_WHEN_NONE: ClassVar[frozenset[str]] = frozenset({"patient_name_encrypted", "language"})
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_optional_fields(
+        self, handler: SerializerFunctionWrapHandler, info: SerializationInfo
+    ) -> dict[str, Any]:
+        # A payload without the v0.22.0 fields is byte-identical to v0.21.0, so a
+        # consumer pinned to an older sm_common (``extra="forbid"``) still parses it.
+        data: dict[str, Any] = handler(self)
+        for key in self._OMIT_WHEN_NONE:
+            if key in data and data[key] is None:
+                del data[key]
+        return data
 
 
 class VisitNoShowPayload(EventPayload):
