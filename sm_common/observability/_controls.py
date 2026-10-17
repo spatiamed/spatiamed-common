@@ -15,7 +15,9 @@ CONTROLS: frozenset[str] = frozenset(
         "include_local_variables",  # SDK option (V1)
         "max_request_body_size",  # SDK option (V7)
         "logging_breadcrumbs_off",  # SDK option (V2)
-        "log_events",  # scrub step (V2)
+        "loguru_integration_off",  # SDK option (V2d): loguru never breadcrumbs or events
+        "log_events",  # scrub step (V2): log records -> exception-only or minimal event
+        "log_rate_limit",  # scrub step (V2e): message-only log events rate limited
         "frames_vars",  # scrub step (V1)
         "structural",  # scrub step (V3, V7)
         "walk",  # scrub step (V3, V4, V5, V8)

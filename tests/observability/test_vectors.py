@@ -42,12 +42,18 @@ def case_v1_frame_locals(capture: Capture, disable: tuple[str, ...] = ()) -> Non
     assert name not in t.blob()
 
 
-# V2a logger.error without exc_info never becomes an event
-def case_v2_log_error_dropped(capture: Capture, disable: tuple[str, ...] = ()) -> None:
-    name = fake_name()
+# V2a logger.error without exc_info becomes a MINIMAL event: code-location label only,
+# never the message, its params or an f-string's interpolated text.
+def case_v2_log_error_minimal(capture: Capture, disable: tuple[str, ...] = ()) -> None:
+    name, name2 = fake_name(), fake_name()
+    log = logging.getLogger("gt.v2")
     with capture(disable) as t:
-        logging.getLogger("gt.v2").error("intake failed for %s", name)
-    assert t.events == []
+        log.error("intake failed for %s", name)
+        log.error(f"intake failed for {name2}")
+    assert len(t.events) == 2
+    assert {e.get("message") for e in t.events} == {"gt.v2.case_v2_log_error_minimal"}
+    assert name.split()[0] not in t.blob() and name2.split()[0] not in t.blob()
+    assert "intake failed" not in t.blob()
 
 
 # V2b logger.exception keeps the exception, loses logentry/extra
@@ -84,6 +90,38 @@ def case_v2_structlog_breadcrumb(capture: Capture, disable: tuple[str, ...] = ()
         assert name not in t.blob()
     finally:
         structlog.reset_defaults()
+
+
+# V2d loguru (pipecat logs call text through it) never becomes a breadcrumb or event.
+# LoguruIntegration has its own breadcrumb level that LoggingIntegration(level=None)
+# does not cover, and names cannot be regex-redacted, so the integration must be off.
+def case_v2_loguru(capture: Capture, disable: tuple[str, ...] = ()) -> None:
+    from loguru import logger as loguru_logger
+    from sentry_sdk.integrations import _installed_integrations, _processed_integrations
+
+    def reset() -> None:
+        # setup_integrations() decides once per process ("processed"), and setup_once
+        # adds sinks to the GLOBAL loguru logger; forget both so each run decides anew.
+        loguru_logger.remove()
+        _installed_integrations.discard("loguru")
+        _processed_integrations.discard("loguru")
+        for scope in (sentry_sdk.get_isolation_scope(), sentry_sdk.get_current_scope()):
+            scope.clear_breadcrumbs()
+
+    name, marker = "Ramesh Kumar", f"GTV2L{nonce()}"
+    reset()
+    try:
+        with capture(disable) as t:
+            loguru_logger.info(f"transcript: {name} says chest pain")
+            loguru_logger.error(f"SarvamSTTService#0 exception: provider said {name} has fever")
+            _raise_in(lambda: (_ for _ in ()).throw(RuntimeError(marker)))
+        ev = t.only_event()
+        assert marker in t.blob()
+        crumbs = ev.get("breadcrumbs", {}).get("values", [])
+        assert not any(name in str(c) for c in crumbs), crumbs
+        assert name not in t.blob()
+    finally:
+        reset()
 
 
 def _app() -> FastAPI:
@@ -188,9 +226,10 @@ def case_v8_exception_message(capture: Capture, disable: tuple[str, ...] = ()) -
 
 VECTORS: dict[str, tuple[Any, tuple[str, ...]]] = {
     "V1": (case_v1_frame_locals, ("include_local_variables", "frames_vars")),
-    "V2a": (case_v2_log_error_dropped, ("log_events",)),
+    "V2a": (case_v2_log_error_minimal, ("log_events",)),
     "V2b": (case_v2_logged_exception, ("log_events",)),
     "V2c": (case_v2_structlog_breadcrumb, ("logging_breadcrumbs_off",)),
+    "V2d": (case_v2_loguru, ("loguru_integration_off",)),
     "V3": (case_v3_query_string, ("structural", "walk")),
     "V4": (case_v4_capability, ("walk",)),
     "V5": (case_v5_breadcrumb_data, ("walk",)),

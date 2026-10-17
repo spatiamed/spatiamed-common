@@ -38,12 +38,23 @@ _DISABLED_INTEGRATIONS = (
     "sentry_sdk.integrations.mcp.MCPIntegration",
 )
 
+# LoguruIntegration auto-enables wherever loguru is importable (CareLoop: pipecat logs
+# call text and provider errors that echo the transcript through loguru). It has its
+# OWN breadcrumb level (default INFO) that LoggingIntegration(level=None) does not
+# cover, and scrub_breadcrumb's redact_text cannot remove names. So loguru lines must
+# never become breadcrumbs or events: the integration is disabled outright. Errors that
+# matter reach us through stdlib/structlog (see scrub.py) or uncaught exceptions.
+_LOGURU_INTEGRATION = "sentry_sdk.integrations.loguru.LoguruIntegration"
+
 
 def _disabled_integrations() -> list[Any]:
     import importlib
 
+    paths = list(_DISABLED_INTEGRATIONS)
+    if is_enabled("loguru_integration_off"):
+        paths.append(_LOGURU_INTEGRATION)
     out: list[Any] = []
-    for path in _DISABLED_INTEGRATIONS:
+    for path in paths:
         module, _, cls = path.rpartition(".")
         try:
             out.append(getattr(importlib.import_module(module), cls))
@@ -139,4 +150,6 @@ def init_error_tracking(
         )
     )
     sentry_sdk.get_global_scope().set_tag("service", service_name)
+    # The one "is it on?" signal at startup. Never log the DSN.
+    logging.getLogger(__name__).info("error tracking on: %s-%s", service_name, environment)
     return True
