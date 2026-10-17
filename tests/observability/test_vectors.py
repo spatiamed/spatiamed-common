@@ -86,6 +86,38 @@ def case_v2_structlog_breadcrumb(capture: Capture, disable: tuple[str, ...] = ()
         structlog.reset_defaults()
 
 
+# V2d loguru (pipecat logs call text through it) never becomes a breadcrumb or event.
+# LoguruIntegration has its own breadcrumb level that LoggingIntegration(level=None)
+# does not cover, and names cannot be regex-redacted, so the integration must be off.
+def case_v2_loguru(capture: Capture, disable: tuple[str, ...] = ()) -> None:
+    from loguru import logger as loguru_logger
+    from sentry_sdk.integrations import _installed_integrations, _processed_integrations
+
+    def reset() -> None:
+        # setup_integrations() decides once per process ("processed"), and setup_once
+        # adds sinks to the GLOBAL loguru logger; forget both so each run decides anew.
+        loguru_logger.remove()
+        _installed_integrations.discard("loguru")
+        _processed_integrations.discard("loguru")
+        for scope in (sentry_sdk.get_isolation_scope(), sentry_sdk.get_current_scope()):
+            scope.clear_breadcrumbs()
+
+    name, marker = "Ramesh Kumar", f"GTV2L{nonce()}"
+    reset()
+    try:
+        with capture(disable) as t:
+            loguru_logger.info(f"transcript: {name} says chest pain")
+            loguru_logger.error(f"SarvamSTTService#0 exception: provider said {name} has fever")
+            _raise_in(lambda: (_ for _ in ()).throw(RuntimeError(marker)))
+        ev = t.only_event()
+        assert marker in t.blob()
+        crumbs = ev.get("breadcrumbs", {}).get("values", [])
+        assert not any(name in str(c) for c in crumbs), crumbs
+        assert name not in t.blob()
+    finally:
+        reset()
+
+
 def _app() -> FastAPI:
     app = FastAPI()
 
@@ -191,6 +223,7 @@ VECTORS: dict[str, tuple[Any, tuple[str, ...]]] = {
     "V2a": (case_v2_log_error_dropped, ("log_events",)),
     "V2b": (case_v2_logged_exception, ("log_events",)),
     "V2c": (case_v2_structlog_breadcrumb, ("logging_breadcrumbs_off",)),
+    "V2d": (case_v2_loguru, ("loguru_integration_off",)),
     "V3": (case_v3_query_string, ("structural", "walk")),
     "V4": (case_v4_capability, ("walk",)),
     "V5": (case_v5_breadcrumb_data, ("walk",)),

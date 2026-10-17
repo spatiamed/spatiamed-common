@@ -27,6 +27,8 @@ dev = [
     "fastapi>=0.115",
     "sentry-sdk>=2.71.0,<3",
     "structlog>=24.4",
+    # test-only: prove the auto-enabling LoguruIntegration stays off (pipecat logs via loguru)
+    "loguru>=0.7",
     # test-only: trace vectors through the real sqlalchemy + redis integrations
     "sqlalchemy>=2.0,<2.1",
     "redis>=5,<9",

@@ -15,6 +15,7 @@ CONTROLS: frozenset[str] = frozenset(
         "include_local_variables",  # SDK option (V1)
         "max_request_body_size",  # SDK option (V7)
         "logging_breadcrumbs_off",  # SDK option (V2)
+        "loguru_integration_off",  # SDK option (V2d): loguru never breadcrumbs or events
         "log_events",  # scrub step (V2)
         "frames_vars",  # scrub step (V1)
         "structural",  # scrub step (V3, V7)
