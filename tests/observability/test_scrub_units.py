@@ -24,8 +24,15 @@ def test_frames_vars_deleted_everywhere() -> None:
     assert "vars" not in out["threads"]["values"][0]["stacktrace"]["frames"][0]
 
 
-def test_log_event_without_exception_is_dropped() -> None:
-    assert scrub_event(_ev(logentry={"message": "m"}), {"log_record": object()}) is None
+def test_log_event_without_exception_keeps_only_constants() -> None:
+    out = scrub_event(
+        _ev(logentry={"message": "Zed", "params": ["Zed"]}, extra={"k": "Zed"}, message="Zed"),
+        {"log_record": object()},
+    )
+    assert out is not None
+    assert "logentry" not in out and "extra" not in out
+    assert "Zed" not in str(out)
+    assert out["message"] == "unknown.unknown"
 
 
 def test_log_event_with_exception_loses_logentry_and_extra() -> None:
@@ -114,3 +121,15 @@ def test_internal_error_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_disabled_rejects_unknown_control() -> None:
     with pytest.raises(ValueError), _controls.disabled("nope"):
         pass
+
+
+def test_log_record_already_captured_by_structlog_processor_is_dropped() -> None:
+    import logging
+
+    from sm_common.observability.logcapture import CAPTURED_MARKER
+
+    record = logging.LogRecord("app", logging.ERROR, "f.py", 1, {}, None, None)
+    record.msg = {"event": "op_failed", CAPTURED_MARKER: True}
+    with_exc = _ev(exception={"values": [{"type": "E", "value": "ok"}]})
+    assert scrub_event(with_exc, {"log_record": record}) is None
+    assert scrub_event(_ev(), {"log_record": record}) is None

@@ -150,4 +150,6 @@ def init_error_tracking(
         )
     )
     sentry_sdk.get_global_scope().set_tag("service", service_name)
+    # The one "is it on?" signal at startup. Never log the DSN.
+    logging.getLogger(__name__).info("error tracking on: %s-%s", service_name, environment)
     return True

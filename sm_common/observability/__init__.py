@@ -1,6 +1,7 @@
 """PHI-safe error tracking. See init_error_tracking."""
 
 from sm_common.observability.init import init_error_tracking
+from sm_common.observability.logcapture import ALLOWED_LOG_FIELDS, structlog_capture_exc_info
 from sm_common.observability.pii import redact_text
 from sm_common.observability.scrub import scrub_breadcrumb, scrub_event
 from sm_common.observability.traces import (
@@ -11,6 +12,7 @@ from sm_common.observability.traces import (
 )
 
 __all__ = [
+    "ALLOWED_LOG_FIELDS",
     "TRACES_SAMPLE_RATE_CEILING",
     "init_error_tracking",
     "parse_sample_rate",
@@ -19,4 +21,5 @@ __all__ = [
     "scrub_event",
     "scrub_transaction",
     "strip_sql_literals",
+    "structlog_capture_exc_info",
 ]

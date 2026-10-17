@@ -42,12 +42,18 @@ def case_v1_frame_locals(capture: Capture, disable: tuple[str, ...] = ()) -> Non
     assert name not in t.blob()
 
 
-# V2a logger.error without exc_info never becomes an event
-def case_v2_log_error_dropped(capture: Capture, disable: tuple[str, ...] = ()) -> None:
-    name = fake_name()
+# V2a logger.error without exc_info becomes a MINIMAL event: code-location label only,
+# never the message, its params or an f-string's interpolated text.
+def case_v2_log_error_minimal(capture: Capture, disable: tuple[str, ...] = ()) -> None:
+    name, name2 = fake_name(), fake_name()
+    log = logging.getLogger("gt.v2")
     with capture(disable) as t:
-        logging.getLogger("gt.v2").error("intake failed for %s", name)
-    assert t.events == []
+        log.error("intake failed for %s", name)
+        log.error(f"intake failed for {name2}")
+    assert len(t.events) == 2
+    assert {e.get("message") for e in t.events} == {"gt.v2.case_v2_log_error_minimal"}
+    assert name.split()[0] not in t.blob() and name2.split()[0] not in t.blob()
+    assert "intake failed" not in t.blob()
 
 
 # V2b logger.exception keeps the exception, loses logentry/extra
@@ -220,7 +226,7 @@ def case_v8_exception_message(capture: Capture, disable: tuple[str, ...] = ()) -
 
 VECTORS: dict[str, tuple[Any, tuple[str, ...]]] = {
     "V1": (case_v1_frame_locals, ("include_local_variables", "frames_vars")),
-    "V2a": (case_v2_log_error_dropped, ("log_events",)),
+    "V2a": (case_v2_log_error_minimal, ("log_events",)),
     "V2b": (case_v2_logged_exception, ("log_events",)),
     "V2c": (case_v2_structlog_breadcrumb, ("logging_breadcrumbs_off",)),
     "V2d": (case_v2_loguru, ("loguru_integration_off",)),

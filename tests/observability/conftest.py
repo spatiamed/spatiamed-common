@@ -12,7 +12,7 @@ import sentry_sdk
 from sentry_sdk.envelope import Envelope
 from sentry_sdk.transport import Transport
 
-from sm_common.observability import _controls, init_error_tracking
+from sm_common.observability import _controls, init_error_tracking, logcapture
 
 DUMMY_DSN = "https://public@example.ingest.sentry.io/1"
 
@@ -43,6 +43,8 @@ def capture() -> Iterator[Capture]:
     @contextmanager
     def _capture(disable: tuple[str, ...] = ()) -> Iterator[MemoryTransport]:
         transport = MemoryTransport()
+        # The log-event rate limiter is process-global; start every capture fresh.
+        logcapture.rate_limiter.reset()
         with _controls.disabled(*disable):
             init_error_tracking(
                 dsn=DUMMY_DSN,

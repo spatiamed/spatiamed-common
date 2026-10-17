@@ -1,6 +1,8 @@
 """before_send / before_breadcrumb scrubbers. Fail closed.
 
-Order: log-event filter (V2) -> frame vars (V1) -> structural deletions (V3/V7)
+Order: log events (V2: exception-bearing records lose logentry/extra; message-only
+records become a minimal, allowlisted, rate-limited event, see logcapture)
+-> frame vars (V1) -> structural deletions (V3/V7)
 -> one recursive walk over the WHOLE event (sensitive keys -> [Filtered], every
 string through redact_text) (V3/V4/V5/V8 backstop).
 
@@ -14,6 +16,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any, cast
 
+from sm_common.observability import logcapture
 from sm_common.observability._controls import is_enabled
 from sm_common.observability.pii import redact_text
 from sm_common.observability.traces import strip_sql_literals
@@ -108,10 +111,21 @@ def scrub_event(event: Event, hint: Hint) -> Event | None:
     try:
         ev = cast(dict[str, Any], event)
         if is_enabled("log_events") and "log_record" in (hint or {}):
-            if not ev.get("exception"):
+            record = hint["log_record"]
+            if logcapture.is_already_captured(record):
+                # structlog_capture_exc_info already sent this exception.
                 return None
-            ev.pop("logentry", None)
-            ev.pop("extra", None)
+            if not ev.get("exception"):
+                # Message-only ERROR record: rebuilt from code constants + allowlisted
+                # fields; the formatted message, params and kwargs never ship.
+                ev = logcapture.minimal_log_event(ev, record)
+                if is_enabled("log_rate_limit") and not logcapture.rate_limiter.allow(
+                    "\x1f".join(ev["fingerprint"])
+                ):
+                    return None
+            else:
+                ev.pop("logentry", None)
+                ev.pop("extra", None)
         if is_enabled("frames_vars"):
             for frame in _frames(ev):
                 frame.pop("vars", None)
