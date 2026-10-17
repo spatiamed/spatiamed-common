@@ -639,3 +639,48 @@ def test_booking_updated_triage_fields_reject_unknown_and_non_bool() -> None:
         ConsultationScheduledPayload.model_validate(
             {**CONSULTATION_SCHEDULED_SAMPLE, "triage_call_enabled": True}
         )
+
+
+# --- v0.22.0: visit.completed patient name + visit language (CareLoop #401) ---
+
+
+def test_visit_completed_name_and_language_round_trip() -> None:
+    payload = VisitCompletedPayload.model_validate(
+        {
+            **VISIT_COMPLETED_SAMPLE,
+            "patient_name_encrypted": "gAAAA-opaque-fernet-token",
+            "language": "or",
+        }
+    )
+    wire = build_envelope(
+        event_type=EventType.VISIT_COMPLETED,
+        payload=payload,
+        source=EventSource.QUEUECARE,
+        tenant_id="t-1",
+    ).model_dump(mode="json")
+    assert wire["data"]["patient_name_encrypted"] == "gAAAA-opaque-fernet-token"
+    assert wire["data"]["language"] == "or"
+    assert parse_payload(parse_envelope(wire)) == payload
+
+
+def test_visit_completed_without_new_fields_is_identical_to_v021() -> None:
+    payload = VisitCompletedPayload.model_validate(VISIT_COMPLETED_SAMPLE)
+    assert payload.patient_name_encrypted is None
+    assert payload.language is None
+    wire = build_envelope(
+        event_type=EventType.VISIT_COMPLETED,
+        payload=payload,
+        source=EventSource.QUEUECARE,
+        tenant_id="t-1",
+    ).model_dump(mode="json")
+    # No null keys on the wire: a consumer on an older sm_common (extra="forbid")
+    # still parses what a v0.22.0 producer sends without a name or language.
+    assert wire["data"] == VISIT_COMPLETED_SAMPLE
+    assert "patient_name_encrypted" not in json.loads(payload.model_dump_json())
+    assert "language" not in json.loads(payload.model_dump_json())
+
+
+def test_visit_completed_still_forbids_a_plaintext_name() -> None:
+    for bad_key in ("patient_name", "name", "patient_first_name"):
+        with pytest.raises(ValidationError):
+            VisitCompletedPayload.model_validate({**VISIT_COMPLETED_SAMPLE, bad_key: "Animesh"})
