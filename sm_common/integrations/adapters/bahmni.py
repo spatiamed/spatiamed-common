@@ -275,18 +275,22 @@ class BahmniAdapter(HmsAdapter):
         birth_date: date | None = None,
     ) -> list[CanonicalPatient]:
         """Every Bahmni hit. ``phone_hash`` alone matches nothing on Bahmni: ``[]``, no HTTP."""
-        if (family is None) != (birth_date is None):
-            raise ValueError("family and birth_date must be given together")
+        hits: list[CanonicalPatient]
+        if family is not None or birth_date is not None:
+            # A blank family would otherwise answer [] ("nobody"), which unlocks Create.
+            if not (family or "").strip() or birth_date is None:
+                raise ValueError("family and birth_date are searched together")
+            if phone or mrn or abha_id:
+                raise ValueError("one patient search per call")
+            hits = await self._search(q=family.strip())
+            return _dedupe([p for p in hits if p.birth_date == birth_date])
         if mrn:
             return _dedupe(await self._search(identifier=mrn))
         if phone:
-            hits: list[CanonicalPatient] = []
+            hits = []
             for variant in phone_search_variants(phone):
                 hits += await self._search(customAttribute=variant)
             return _dedupe(hits)
-        if family and birth_date is not None:
-            hits = await self._search(q=family)
-            return _dedupe([p for p in hits if p.birth_date == birth_date])
         return []
 
     async def find_patient(

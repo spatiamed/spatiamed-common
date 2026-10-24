@@ -125,9 +125,30 @@ async def test_name_dob_search_filters_exact_dob():
     assert await _adapter().search_patients(family="Verma", birth_date=date(1990, 5, 16)) == []
 
 
+@pytest.mark.parametrize("family", ["", "   ", None])
+async def test_blank_family_is_refused_not_empty(family):
+    # An empty answer would unlock Create in the HMS; refuse instead (no HTTP at all).
+    with pytest.raises(ValueError, match="searched together"):
+        await _adapter().search_patients(family=family, birth_date=date(1990, 5, 15))
+
+
 async def test_family_without_birth_date_is_refused_not_empty():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="searched together"):
         await _adapter().search_patients(family="Verma")
+
+
+@pytest.mark.parametrize("mix", [{"phone": "9876543210"}, {"mrn": "GAN200001"}, {"abha_id": "1"}])
+async def test_name_dob_mixed_with_other_key_is_refused(mix):
+    with pytest.raises(ValueError, match="one patient search per call"):
+        await _adapter().search_patients(family="Verma", birth_date=date(1990, 5, 15), **mix)
+
+
+@respx.mock
+async def test_family_is_stripped_before_search():
+    _login()
+    route = respx.get(SEARCH).mock(return_value=httpx.Response(200, json={"pageOfResults": []}))
+    await _adapter().search_patients(family="  Verma ", birth_date=date(1990, 5, 15))
+    assert route.calls[0].request.url.params["q"] == "Verma"
 
 
 @respx.mock
