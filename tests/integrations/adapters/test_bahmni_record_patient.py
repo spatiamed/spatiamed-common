@@ -12,7 +12,12 @@ from sm_common.integrations.adapters.bahmni_config import BahmniConfig
 from sm_common.integrations.adapters.bahmni_http import BahmniHttp
 from sm_common.integrations.adapters.bahmni_record import BahmniRecordClient
 from sm_common.integrations.build_adapter import AdapterBuildConfig, build_bahmni_record_client
-from sm_common.integrations.exceptions import ConfigError, ConflictError, VendorRejected
+from sm_common.integrations.exceptions import (
+    ConfigError,
+    ConflictError,
+    VendorRejected,
+    WriteNotSupported,
+)
 from sm_common.integrations.record_types import (
     RecordAddress,
     RecordPatientInput,
@@ -366,3 +371,39 @@ def test_build_bahmni_record_client():
         },
     )
     assert isinstance(build_bahmni_record_client(cfg), BahmniRecordClient)
+
+
+@respx.mock
+async def test_identifier_prefix_sent_only_when_configured():
+    _login()
+    post = respx.post(CREATE).mock(return_value=httpx.Response(200, json=CREATED))
+    await _client(identifier_prefix="GAN").create_patient(_input())
+    ident = json.loads(post.calls[0].request.content)["patient"]["identifiers"][0]
+    assert ident["identifierPrefix"] == "GAN"
+    await _client().create_patient(_input())
+    ident = json.loads(post.calls[1].request.content)["patient"]["identifiers"][0]
+    assert "identifierPrefix" not in ident
+
+
+@respx.mock
+async def test_marker_search_404_fails_closed():
+    _login()
+    respx.get(SEARCH).mock(return_value=httpx.Response(404))
+    post = respx.post(CREATE).mock(return_value=httpx.Response(200, json=CREATED))
+    with pytest.raises(WriteNotSupported):
+        await _client(**MARKER_CFG).create_patient(_input())
+    assert not post.called
+
+
+@respx.mock
+async def test_marker_search_truncated_fails_closed():
+    _login()
+    respx.get(SEARCH).mock(
+        return_value=httpx.Response(
+            200, json={"totalCount": 40, "pageOfResults": [_hit("a", MARKER_VALUE)]}
+        )
+    )
+    post = respx.post(CREATE).mock(return_value=httpx.Response(200, json=CREATED))
+    with pytest.raises(ConflictError, match="partial page"):
+        await _client(**MARKER_CFG).create_patient(_input())
+    assert not post.called

@@ -22,6 +22,8 @@ class BahmniConfig:
     location_uuid: str
     identifier_type_uuid: str
     identifier_source_uuid: str
+    # idgen prefix Bahmni needs to mint the UHID (sent as identifierPrefix when set).
+    identifier_prefix: str = ""
     # Person attribute type NAME used by bahmni/search.
     phone_attribute_name: str = "phoneNumber"
     phone_attribute_type_uuid: str = ""

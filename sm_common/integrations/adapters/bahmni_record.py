@@ -91,13 +91,15 @@ class BahmniRecordClient:
         )
 
     async def _search_raw(
-        self, params: dict[str, str], attribute: str
+        self, params: dict[str, str], attribute: str, *, missing_ok: bool = True
     ) -> tuple[list[RecordPatient], list[dict[str, Any]], bool]:
         resp = await self._http.request(
             "GET",
             f"{_REST}/bahmni/search/patient",
             params={"q": "", "s": "byIdOrNameOrVillage", "patientAttributes": attribute, **params},
         )
+        if resp.status_code == 404 and not missing_ok:
+            raise WriteNotSupported("bahmni: patient search route not found (HTTP 404)")
         body = resp.json() if resp.status_code != 404 else {}
         page = [h for h in (body.get("pageOfResults") or []) if isinstance(h, dict)]
         total = body.get("totalCount")
@@ -175,7 +177,16 @@ class BahmniRecordClient:
 
     async def _find_by_marker(self, value: str) -> list[RecordPatient]:
         name = self._config.marker_attribute_name
-        _, page, _ = await self._search_raw({"customAttribute": value}, name)
+        # Fail closed: a missing route or a partial page must not read as "no earlier
+        # create", or a retry would POST a duplicate.
+        _, page, truncated = await self._search_raw(
+            {"customAttribute": value}, name, missing_ok=False
+        )
+        if truncated:
+            raise ConflictError(
+                "bahmni: marker search returned a partial page; cannot tell whether "
+                "an earlier create exists"
+            )
         # The search is a LIKE match: keep only records whose marker is exactly ours.
         exact = []
         for hit in page:
@@ -245,6 +256,8 @@ class BahmniRecordClient:
             },
             "relationships": [],
         }
+        if c.identifier_prefix:
+            body["patient"]["identifiers"][0]["identifierPrefix"] = c.identifier_prefix
         resp = await self._http.request("POST", _PROFILE_WRITE, json=body)
         if resp.status_code == 404:
             raise WriteNotSupported("bahmni: patientprofile route not found (HTTP 404)")
