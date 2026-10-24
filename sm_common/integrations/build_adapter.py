@@ -10,11 +10,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from sm_common.integrations.adapters.bahmni import BahmniAdapter
+from sm_common.integrations.adapters.bahmni_config import BahmniConfig
+from sm_common.integrations.adapters.bahmni_http import BahmniHttp
 from sm_common.integrations.adapters.fhir_r4 import FhirR4Adapter
 from sm_common.integrations.adapters.generic_rest import GenericRestAdapter
 from sm_common.integrations.adapters.mocdoc import MocDocAdapter
 from sm_common.integrations.adapters.openemr import OpenEmrAdapter
 from sm_common.integrations.auth import TokenCache
+from sm_common.integrations.exceptions import ConfigError
 from sm_common.integrations.hms_adapter import HmsAdapter
 
 
@@ -65,14 +68,20 @@ def build_adapter(cfg: AdapterBuildConfig) -> HmsAdapter:
     vendor = cfg.vendor.lower()
 
     if vendor == "bahmni":
+        # OpenMRS only does basic/session auth; "basic" and "session" are aliases.
         _check_bahmni_auth_scheme(creds.get("auth_scheme", "basic"))
+        if not creds.get("username") or not creds.get("password"):
+            raise ConfigError("bahmni: credentials need username and password")
         return BahmniAdapter(
-            base_url=base_url or creds.get("base_url", ""),
-            # OpenMRS only does basic/session auth; "basic" and "session" are aliases.
-            auth_scheme="session",
-            api_key="",
-            username=creds.get("username", ""),
-            password=creds.get("password", ""),
+            http=BahmniHttp(
+                base_url or creds.get("base_url", ""),
+                creds["username"],
+                creds["password"],
+                ca_bundle_pem=creds.get("ca_bundle_pem"),
+                verify_tls=creds.get("verify_tls", True),
+                allow_insecure_tls=creds.get("allow_insecure_tls", False),
+            ),
+            config=BahmniConfig.from_mapping(cfg.field_mapping),
             hash_salt=hash_salt,
             transport_key=transport_key,
         )

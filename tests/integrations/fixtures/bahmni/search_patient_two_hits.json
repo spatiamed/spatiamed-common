@@ -1,0 +1,37 @@
+{
+  "totalCount": 2,
+  "pageOfResults": [
+    {
+      "uuid": "11111111-aaaa-4aaa-8aaa-000000000001",
+      "identifier": "GAN200001",
+      "givenName": "Asha",
+      "middleName": null,
+      "familyName": "Verma",
+      "gender": "F",
+      "birthDate": 642709800000,
+      "age": 30,
+      "personId": 1,
+      "addressFieldValue": null,
+      "customAttribute": "{\"phoneNumber\": \"9876543210\"}",
+      "extraIdentifiers": null,
+      "activeVisitUuid": null,
+      "hasBeenAdmitted": false
+    },
+    {
+      "uuid": "22222222-bbbb-4bbb-8bbb-000000000002",
+      "identifier": "GAN200002",
+      "givenName": "Ravi",
+      "middleName": null,
+      "familyName": "Verma",
+      "gender": "M",
+      "birthDate": 473452200000,
+      "age": 30,
+      "personId": 1,
+      "addressFieldValue": null,
+      "customAttribute": "{\"phoneNumber\": \"9876543210\"}",
+      "extraIdentifiers": null,
+      "activeVisitUuid": null,
+      "hasBeenAdmitted": false
+    }
+  ]
+}

@@ -8,6 +8,8 @@ import respx
 import httpx
 
 from sm_common.integrations.adapters.bahmni import BahmniAdapter
+from sm_common.integrations.adapters.bahmni_config import BahmniConfig
+from sm_common.integrations.adapters.bahmni_http import BahmniHttp
 from sm_common.integrations.canonical_types import (
     AdapterHealth,
     AppointmentWrite,
@@ -36,11 +38,25 @@ def _write(**over) -> AppointmentWrite:
     return AppointmentWrite(**base)
 
 
-def make_adapter(auth: str = "api_key") -> BahmniAdapter:
+BASE = "https://bahmni.example.com"
+CONFIG = BahmniConfig(location_uuid="L", identifier_type_uuid="T", identifier_source_uuid="S")
+
+
+def _login() -> None:
+    """Every adapter call logs in first; serve a session for the test."""
+    respx.get(f"{BASE}/openmrs/ws/rest/v1/session").mock(
+        return_value=httpx.Response(
+            200,
+            json={"authenticated": True},
+            headers={"set-cookie": "JSESSIONID=abc; Path=/openmrs"},
+        )
+    )
+
+
+def make_adapter() -> BahmniAdapter:
     return BahmniAdapter(
-        base_url="https://bahmni.example.com",
-        auth_scheme=auth,
-        api_key="test-key-123",
+        http=BahmniHttp(BASE, "user", "pw"),
+        config=CONFIG,
         hash_salt="test-salt",
         transport_key="test-transport-key-32-char-padding!",
     )
@@ -49,6 +65,7 @@ def make_adapter(auth: str = "api_key") -> BahmniAdapter:
 class TestBahmniAdapterAtomFeed:
     @respx.mock
     async def test_list_appointments_returns_canonical(self):
+        _login()
         respx.get("https://bahmni.example.com/openmrs/ws/atomfeed/appointment/recent").mock(
             return_value=httpx.Response(
                 200, text=ATOM_XML, headers={"Content-Type": "application/atom+xml"}
@@ -66,6 +83,7 @@ class TestBahmniAdapterAtomFeed:
 
     @respx.mock
     async def test_list_appointments_empty_feed(self):
+        _login()
         empty_xml = """<?xml version="1.0"?>
         <feed xmlns="http://www.w3.org/2005/Atom">
           <updated>2026-05-06T10:00:00Z</updated>
@@ -81,6 +99,7 @@ class TestBahmniAdapterAtomFeed:
 class TestBahmniAdapterWriteBack:
     @respx.mock
     async def test_write_back_success(self):
+        _login()
         respx.post("https://bahmni.example.com/openmrs/ws/rest/v1/appointment").mock(
             return_value=httpx.Response(
                 200, json={"uuid": "HB-001", "appointmentNumber": "APT-002"}
@@ -93,6 +112,7 @@ class TestBahmniAdapterWriteBack:
 
     @respx.mock
     async def test_write_back_conflict_raises(self):
+        _login()
         respx.post("https://bahmni.example.com/openmrs/ws/rest/v1/appointment").mock(
             return_value=httpx.Response(
                 400, json={"errorMessages": [{"message": "slot already booked for this time"}]}
@@ -104,6 +124,7 @@ class TestBahmniAdapterWriteBack:
 
     @respx.mock
     async def test_write_back_500_raises_transient(self):
+        _login()
         respx.post("https://bahmni.example.com/openmrs/ws/rest/v1/appointment").mock(
             return_value=httpx.Response(500, json={"error": "internal"})
         )
@@ -115,9 +136,7 @@ class TestBahmniAdapterWriteBack:
 class TestBahmniAdapterHealth:
     @respx.mock
     async def test_health_check_healthy(self):
-        respx.get("https://bahmni.example.com/openmrs/ws/rest/v1/session").mock(
-            return_value=httpx.Response(200, json={"authenticated": True})
-        )
+        _login()
         adapter = make_adapter()
         health = await adapter.health_check()
         assert health.healthy is True

@@ -2,6 +2,7 @@ import pytest
 
 from sm_common.integrations.adapters.fhir_r4 import FhirR4Adapter
 from sm_common.integrations.adapters.generic_rest import GenericRestAdapter
+from sm_common.integrations.exceptions import ConfigError
 from sm_common.integrations.build_adapter import (
     AdapterBuildConfig,
     build_adapter,
@@ -118,12 +119,21 @@ def test_no_token_cache_leaves_auth_cfg_unchanged():
     assert "_token_cache" not in a._cfg
 
 
-def _bahmni_cfg(creds: dict) -> AdapterBuildConfig:  # type: ignore[type-arg]
+BAHMNI_MAPPING = {
+    "location_uuid": "L",
+    "identifier_type_uuid": "T",
+    "identifier_source_uuid": "S",
+    "record_mode": True,
+}
+BAHMNI_CREDS = {"username": "u", "password": "p"}
+
+
+def _bahmni_cfg(creds: dict, field_mapping: dict | None = None) -> AdapterBuildConfig:  # type: ignore[type-arg]
     return AdapterBuildConfig(
         vendor="bahmni",
         base_url="https://bahmni.example.test",
         credentials=creds,
-        field_mapping=None,
+        field_mapping=field_mapping if field_mapping is not None else BAHMNI_MAPPING,
     )
 
 
@@ -134,8 +144,9 @@ def test_api_key_scheme_rejected():
 
 @pytest.mark.parametrize("creds", [{}, {"auth_scheme": "basic"}, {"auth_scheme": "session"}])
 def test_basic_default_and_session_alias_accepted(creds):
-    a = build_adapter(_bahmni_cfg({**creds, "username": "u", "password": "p"}))
+    a = build_adapter(_bahmni_cfg({**creds, **BAHMNI_CREDS}))
     assert a.vendor_name == "bahmni"
+    assert a._config.location_uuid == "L"
 
 
 def test_unknown_bahmni_scheme_rejected():
@@ -146,3 +157,27 @@ def test_unknown_bahmni_scheme_rejected():
 def test_bahmni_record_client_requires_bahmni_vendor():
     with pytest.raises(ValueError, match="vendor 'bahmni'"):
         build_bahmni_record_client(_cfg(vendor="fhir_r4"))
+
+
+def test_bahmni_missing_config_or_credentials_is_config_error():
+    # field_mapping=None is not "use defaults": the uuids have no safe default.
+    cfg = AdapterBuildConfig(
+        vendor="bahmni",
+        base_url="https://b.example.test",
+        credentials=BAHMNI_CREDS,
+        field_mapping=None,
+    )
+    with pytest.raises(ConfigError, match="location_uuid"):
+        build_adapter(cfg)
+    with pytest.raises(ConfigError, match="username and password"):
+        build_adapter(_bahmni_cfg({}))
+
+
+def test_bahmni_tls_options_reach_http():
+    a = build_adapter(
+        _bahmni_cfg({**BAHMNI_CREDS, "verify_tls": False, "allow_insecure_tls": True})
+    )
+    assert a._http.verify is False
+    with pytest.raises(ValueError, match="allow_insecure_tls"):
+        build_adapter(_bahmni_cfg({**BAHMNI_CREDS, "verify_tls": False}))
+    assert build_adapter(_bahmni_cfg(BAHMNI_CREDS))._http.verify is True

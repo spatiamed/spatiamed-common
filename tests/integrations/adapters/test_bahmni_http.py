@@ -11,7 +11,12 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from sm_common.integrations.adapters.bahmni_http import BahmniHttp, from_epoch_ms, to_epoch_ms
-from sm_common.integrations.exceptions import AuthError, TransientError, VendorRejected
+from sm_common.integrations.exceptions import (
+    AuthError,
+    ConfigError,
+    TransientError,
+    VendorRejected,
+)
 
 BASE = "https://bahmni.example.test"
 SESSION = f"{BASE}/openmrs/ws/rest/v1/session"
@@ -48,6 +53,8 @@ def test_to_epoch_ms_rejects_naive():
 def test_from_epoch_ms_rejects_garbage():
     with pytest.raises(ValueError):
         from_epoch_ms("not-a-number")
+    with pytest.raises(ValueError):
+        from_epoch_ms(10**18)  # beyond datetime range: overflow surfaces as ValueError
 
 
 @respx.mock
@@ -196,3 +203,20 @@ def test_insecure_requires_explicit_allow():
     with pytest.raises(ValueError, match="allow_insecure_tls"):
         BahmniHttp(BASE, "u", "p", verify_tls=False)
     assert BahmniHttp(BASE, "u", "p", verify_tls=False, allow_insecure_tls=True).verify is False
+
+
+@respx.mock
+async def test_bad_scheme_or_proxy_is_config_error_not_transient():
+    respx.get(SESSION).mock(side_effect=httpx.UnsupportedProtocol("no scheme"))
+    with pytest.raises(ConfigError):
+        await _http().request("GET", PATH)
+    respx.get(SESSION).mock(side_effect=httpx.ProxyError("bad proxy"))
+    with pytest.raises(ConfigError):
+        await _http().request("GET", PATH)
+
+
+@respx.mock
+async def test_remote_protocol_error_transient():
+    respx.get(SESSION).mock(side_effect=httpx.RemoteProtocolError("reset"))
+    with pytest.raises(TransientError):
+        await _http().request("GET", PATH)

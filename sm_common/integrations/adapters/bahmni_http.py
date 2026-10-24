@@ -15,7 +15,12 @@ from typing import Any
 
 import httpx
 
-from sm_common.integrations.exceptions import AuthError, TransientError, VendorRejected
+from sm_common.integrations.exceptions import (
+    AuthError,
+    ConfigError,
+    TransientError,
+    VendorRejected,
+)
 
 _SESSION_PATH = "/openmrs/ws/rest/v1/session"
 _COOKIE = "JSESSIONID"
@@ -34,9 +39,9 @@ def from_epoch_ms(ms: int | float | str) -> datetime:
     """Epoch milliseconds (int/float/digit string) -> aware UTC datetime."""
     try:
         value = int(ms.strip()) if isinstance(ms, str) else int(ms)
+        return _EPOCH + timedelta(milliseconds=value)
     except (ValueError, TypeError, OverflowError) as exc:
         raise ValueError(f"not an epoch-millisecond value: {ms!r}") from exc
-    return _EPOCH + timedelta(milliseconds=value)
 
 
 def _error_message(resp: httpx.Response) -> str:
@@ -95,8 +100,11 @@ class BahmniHttp:
     async def _send(self, method: str, path: str, **kw: Any) -> httpx.Response:
         try:
             return await self._client.request(method, path, **kw)
-        except httpx.TransportError as exc:  # ConnectError, timeouts, read/write errors
+        except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
             raise TransientError(f"bahmni: transport error: {type(exc).__name__}") from exc
+        except (httpx.UnsupportedProtocol, httpx.ProxyError) as exc:
+            # A bad scheme or proxy setting never heals by retrying.
+            raise ConfigError(f"bahmni: unusable connection config: {type(exc).__name__}") from exc
 
     async def _login(self, stale: str | None) -> str:
         """Establish a session; skip if another task already replaced the stale cookie."""
