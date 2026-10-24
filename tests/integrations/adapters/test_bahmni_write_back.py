@@ -10,7 +10,13 @@ from sm_common.integrations.adapters.bahmni import BahmniAdapter
 from sm_common.integrations.adapters.bahmni_config import BahmniConfig
 from sm_common.integrations.adapters.bahmni_http import BahmniHttp
 from sm_common.integrations.canonical_types import AppointmentWrite
-from sm_common.integrations.exceptions import ConfigError, ConflictError, VendorRejected
+from sm_common.integrations.exceptions import (
+    ConfigError,
+    ConflictError,
+    TransientError,
+    VendorRejected,
+    WriteNotSupported,
+)
 
 BASE = "https://bahmni.example.test"
 REST = f"{BASE}/openmrs/ws/rest/v1"
@@ -203,3 +209,64 @@ async def test_practitioner_mapped_service_used():
     post = respx.post(POST).mock(return_value=_created())
     await _adapter(service_by_practitioner={PRACT: "svc-mapped"}).write_back_idempotent(_write())
     assert json.loads(post.calls[0].request.content)["serviceUuid"] == "svc-mapped"
+
+
+@respx.mock
+async def test_search_at_row_cap_fails_closed_without_post():
+    _login()
+    rows = [_row("Scheduled", comments=f"other-{i}", uuid=f"u{i}") for i in range(50)]
+    respx.post(SEARCH).mock(return_value=httpx.Response(200, json=rows))
+    post = respx.post(POST).mock(return_value=_created())
+    with pytest.raises(TransientError):
+        await _adapter().write_back_idempotent(_write())
+    assert not post.called
+
+
+@respx.mock
+async def test_search_404_fails_closed_without_post():
+    _login()
+    respx.post(SEARCH).mock(return_value=httpx.Response(404))
+    post = respx.post(POST).mock(return_value=_created())
+    with pytest.raises(WriteNotSupported):
+        await _adapter().write_back_idempotent(_write())
+    assert not post.called
+
+
+@respx.mock
+async def test_search_non_list_body_fails_closed_without_post():
+    _login()
+    respx.post(SEARCH).mock(return_value=httpx.Response(200, json={"error": "x"}))
+    post = respx.post(POST).mock(return_value=_created())
+    with pytest.raises(TransientError):
+        await _adapter().write_back_idempotent(_write())
+    assert not post.called
+
+
+@respx.mock
+async def test_marker_prefix_of_longer_token_is_not_a_match():
+    _login()
+    longer = _row("Scheduled", comments=f"sm:{BOOKING}extra")
+    respx.post(SEARCH).mock(return_value=httpx.Response(200, json=[longer]))
+    post = respx.post(POST).mock(return_value=_created())
+    await _adapter().write_back_idempotent(_write())
+    assert post.called
+
+
+@respx.mock
+async def test_bare_marker_matches():
+    _login()
+    respx.post(SEARCH).mock(
+        return_value=httpx.Response(200, json=[_row("Scheduled", comments=f"sm:{BOOKING}")])
+    )
+    post = respx.post(POST).mock(return_value=_created())
+    r = await _adapter().write_back_idempotent(_write())
+    assert r.created is False and not post.called
+
+
+@respx.mock
+async def test_write_5xx_raises_transient():
+    _login()
+    respx.post(SEARCH).mock(return_value=httpx.Response(200, json=[]))
+    respx.post(POST).mock(return_value=httpx.Response(500, json={"error": "boom"}))
+    with pytest.raises(TransientError):
+        await _adapter().write_back_idempotent(_write())

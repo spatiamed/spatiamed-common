@@ -44,6 +44,7 @@ from sm_common.integrations.hms_adapter import HmsAdapter
 from sm_common.phone import hash_phone_for_lookup, phone_search_variants
 
 _REST = "/openmrs/ws/rest/v1"
+_SEARCH_CAP = 50
 _TERMINAL_STATUSES = frozenset({"Cancelled", "Missed"})
 _SEARCH_PAGE_CAP = 10  # pages of bahmni/search/patient followed per query
 _ROSTER_PAGE = 100
@@ -450,12 +451,23 @@ class BahmniAdapter(HmsAdapter):
                 "endDate": (write.end + timedelta(minutes=1)).astimezone(timezone.utc).isoformat(),
             },
         )
-        rows = resp.json() if resp.status_code == 200 else []
-        for row in rows if isinstance(rows, list) else []:
+        # Fail closed: a lookup we cannot trust must never fall through to a POST.
+        if resp.status_code != 200:
+            raise WriteNotSupported(
+                f"bahmni: appointment search unavailable (HTTP {resp.status_code})"
+            )
+        rows = resp.json()
+        if not isinstance(rows, list):
+            raise TransientError("bahmni: appointment search returned a non-list body")
+        if len(rows) >= _SEARCH_CAP:
+            raise TransientError(
+                "bahmni: appointment search hit its row cap; the marker lookup is unreliable"
+            )
+        for row in rows:
             comments = row.get("comments")
             if (
                 isinstance(comments, str)
-                and comments.startswith(marker)
+                and (comments == marker or comments.startswith(marker + " "))
                 and row.get("status") not in _TERMINAL_STATUSES
                 and row.get("uuid")
             ):
