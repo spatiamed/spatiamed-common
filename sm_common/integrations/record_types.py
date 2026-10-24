@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from typing import Literal
 from uuid import UUID
 
@@ -60,3 +60,75 @@ class RecordPatientPatch:
     birth_date_estimated: bool | None = None
     phone: str | None = None
     address: RecordAddress | None = None
+
+
+@dataclass(frozen=True)
+class RecordVisit:
+    uuid: str
+    visit_type: str
+    start: datetime
+    stop: datetime | None
+    location_uuid: str
+
+
+@dataclass(frozen=True)
+class RecordObs:
+    """``key`` is a key of the integration's concept map (e.g. ``chief_complaint``)."""
+
+    key: str
+    value: str | float
+
+
+@dataclass(frozen=True)
+class RecordDiagnosis:
+    code: str | None
+    title: str
+    primary: bool
+    code_system: str = "ICD-11"
+
+
+@dataclass(frozen=True)
+class RecordDrugOrder:
+    name: str
+    dose: str
+    frequency: str
+    duration_days: int | None
+    instructions: str
+
+
+@dataclass(frozen=True)
+class RecordEncounterInput:
+    """One clinical note as an encounter. ``note_id`` is the idempotency key."""
+
+    note_id: UUID
+    patient_uuid: str
+    visit_uuid: str
+    provider_uuid: str
+    encounter_at: datetime
+    obs: list[RecordObs]
+    diagnoses: list[RecordDiagnosis]
+    drug_orders: list[RecordDrugOrder]
+
+
+@dataclass(frozen=True)
+class RecordEncounterResult:
+    encounter_uuid: str
+    created: bool
+
+
+@dataclass(frozen=True)
+class RecordEncounterSummary:
+    uuid: str
+    encounter_type: str
+    at: datetime
+    provider: str
+    obs: list[tuple[str, str]]
+    # (title, comments)
+    diagnoses: list[tuple[str, str | None]]
+    drugs: list[str]
+
+
+@dataclass(frozen=True)
+class RecordVisitDetail:
+    visit: RecordVisit
+    encounters: list[RecordEncounterSummary]

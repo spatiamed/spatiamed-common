@@ -3,31 +3,80 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from typing import Any
 
 from sm_common.identity.dob import age_on
 from sm_common.integrations.adapters.bahmni_config import BahmniConfig
-from sm_common.integrations.adapters.bahmni_http import BahmniHttp
+from sm_common.integrations.adapters.bahmni_http import BahmniHttp, from_epoch_ms, to_epoch_ms
 from sm_common.integrations.adapters.bahmni_parse import birth_date as parse_birth_date
 from sm_common.integrations.adapters.bahmni_parse import flag, gender
 from sm_common.integrations.exceptions import (
     ConfigError,
     ConflictError,
+    NotFound,
     VendorRejected,
     WriteNotSupported,
 )
 from sm_common.integrations.record_types import (
     RecordAddress,
+    RecordDiagnosis,
+    RecordDrugOrder,
+    RecordEncounterInput,
+    RecordEncounterResult,
+    RecordEncounterSummary,
     RecordPatient,
     RecordPatientInput,
     RecordPatientPatch,
+    RecordVisit,
+    RecordVisitDetail,
 )
 
 _REST = "/openmrs/ws/rest/v1"
 _PROFILE_WRITE = f"{_REST}/bahmnicore/patientprofile"
 _MARKER_PREFIX = "sm:"
+_VISIT_REP = "custom:(uuid,visitType,startDatetime,stopDatetime,location)"
+_ENCOUNTER_REP = (
+    "custom:(uuid,encounterType:(display),encounterDatetime,"
+    "encounterProviders:(provider:(display)),"
+    "obs:(concept:(uuid,display),value,comment,"
+    "groupMembers:(concept:(display),value,comment)),"
+    "orders:(drugNonCoded,orderType:(display)))"
+)
+_MARKER_REP = "custom:(uuid,obs:(concept:(uuid),value))"
+_FLEXIBLE_DOSING = (
+    "org.openmrs.module.bahmniemrapi.drugorder.dosinginstructions.FlexibleDosingInstructions"
+)
+_DIAGNOSIS_GROUP = "visit diagnoses"
+_DIAGNOSIS_TITLES = ("non-coded diagnosis", "coded diagnosis")
+_OFFSET_NO_COLON = re.compile(r"([+-]\d{2})(\d{2})$")
+
+
+def _when(raw: Any) -> datetime | None:
+    """OpenMRS REST datetime (ISO with a ``+0530``-style offset, or epoch ms) -> aware UTC."""
+    if isinstance(raw, bool) or raw is None:
+        return None
+    if isinstance(raw, (int, float)) or (isinstance(raw, str) and raw.strip().isdigit()):
+        try:
+            return from_epoch_ms(raw)
+        except ValueError:
+            return None
+    if not isinstance(raw, str):
+        return None
+    text = _OFFSET_NO_COLON.sub(r"\1:\2", raw.strip().replace("Z", "+00:00"))
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _display(v: Any) -> str:
+    if isinstance(v, dict):
+        return str(v.get("display") or v.get("name") or "")
+    return "" if v is None else str(v)
 
 
 def _today() -> date:
@@ -347,3 +396,220 @@ class BahmniRecordClient:
         if resp.status_code == 404:
             raise VendorRejected(f"bahmni: patient {uuid} not found (HTTP 404)")
         return merged
+
+    # ─── Visits ──────────────────────────────────────────────────────────────
+
+    def _visit(self, raw: Any) -> RecordVisit | None:
+        if not isinstance(raw, dict) or not isinstance(raw.get("uuid"), str):
+            return None
+        start = _when(raw.get("startDatetime"))
+        if start is None:
+            return None
+        vt = raw.get("visitType")
+        loc = raw.get("location")
+        loc_uuid = loc.get("uuid") if isinstance(loc, dict) else None
+        vt_name = _display(vt) or (vt.get("uuid") if isinstance(vt, dict) else "") or ""
+        return RecordVisit(
+            uuid=raw["uuid"],
+            visit_type=str(vt_name),
+            start=start,
+            stop=_when(raw.get("stopDatetime")),
+            location_uuid=str(loc_uuid or self._config.location_uuid),
+        )
+
+    async def _visits(self, patient_uuid: str, params: dict[str, str]) -> list[RecordVisit]:
+        resp = await self._http.request(
+            "GET",
+            f"{_REST}/visit",
+            params={"patient": patient_uuid, "v": _VISIT_REP, **params},
+        )
+        if resp.status_code == 404:
+            raise NotFound("bahmni: visit route not found (HTTP 404)")
+        rows = resp.json().get("results") or []
+        return [v for r in rows if (v := self._visit(r)) is not None]
+
+    async def active_visit(self, patient_uuid: str) -> RecordVisit | None:
+        visits = await self._visits(patient_uuid, {"includeInactive": "false"})
+        active = [v for v in visits if v.stop is None]
+        return max(active, key=lambda v: v.start) if active else None
+
+    async def start_visit(
+        self, patient_uuid: str, visit_type_uuid: str | None = None
+    ) -> tuple[RecordVisit, bool]:
+        """(visit, created). An already-active visit is reused, never doubled."""
+        active = await self.active_visit(patient_uuid)
+        if active is not None:
+            return active, False
+        type_uuid = visit_type_uuid or self._config.opd_visit_type_uuid
+        if not type_uuid:
+            raise ConfigError("bahmni: opd_visit_type_uuid is required to start a visit")
+        resp = await self._http.request(
+            "POST",
+            f"{_REST}/visit",
+            json={
+                "patient": patient_uuid,
+                "visitType": type_uuid,
+                "location": self._config.location_uuid,
+            },
+        )
+        if resp.status_code == 404:
+            raise NotFound("bahmni: visit route not found (HTTP 404)")
+        visit = self._visit(resp.json() if resp.content else None)
+        if visit is None:
+            raise VendorRejected("bahmni: visit create response had no usable visit", landed=True)
+        return visit, True
+
+    async def list_visits(self, patient_uuid: str, limit: int = 20) -> list[RecordVisit]:
+        visits = await self._visits(patient_uuid, {"includeInactive": "true", "limit": str(limit)})
+        return sorted(visits, key=lambda v: v.start, reverse=True)[:limit]
+
+    @staticmethod
+    def _diagnoses(obs: list[dict[str, Any]]) -> list[tuple[str, str | None]]:
+        out: list[tuple[str, str | None]] = []
+        for o in obs:
+            if _display(o.get("concept")).lower() != _DIAGNOSIS_GROUP:
+                continue
+            for m in o.get("groupMembers") or []:
+                if isinstance(m, dict) and _display(m.get("concept")).lower() in _DIAGNOSIS_TITLES:
+                    comment = m.get("comment") or o.get("comment")
+                    out.append((_display(m.get("value")), str(comment) if comment else None))
+        return out
+
+    def _encounter_summary(self, raw: Any) -> RecordEncounterSummary | None:
+        if not isinstance(raw, dict) or not isinstance(raw.get("uuid"), str):
+            return None
+        at = _when(raw.get("encounterDatetime"))
+        if at is None:
+            return None
+        obs_rows = [o for o in raw.get("obs") or [] if isinstance(o, dict)]
+        providers = [p for p in raw.get("encounterProviders") or [] if isinstance(p, dict)]
+        return RecordEncounterSummary(
+            uuid=raw["uuid"],
+            encounter_type=_display(raw.get("encounterType")),
+            at=at,
+            provider=_display(providers[0].get("provider")) if providers else "",
+            obs=[
+                (_display(o.get("concept")), _display(o.get("value")))
+                for o in obs_rows
+                if o.get("value") is not None
+                and _display(o.get("concept")).lower() != _DIAGNOSIS_GROUP
+            ],
+            diagnoses=self._diagnoses(obs_rows),
+            drugs=[
+                str(d["drugNonCoded"])
+                for d in raw.get("orders") or []
+                if isinstance(d, dict) and d.get("drugNonCoded")
+            ],
+        )
+
+    async def _encounters(self, visit_uuid: str, rep: str) -> list[Any]:
+        resp = await self._http.request(
+            "GET", f"{_REST}/encounter", params={"visit": visit_uuid, "v": rep}
+        )
+        if resp.status_code == 404:
+            raise NotFound(f"bahmni: encounters for visit {visit_uuid} not found (HTTP 404)")
+        body = resp.json()
+        if any(
+            isinstance(link, dict) and link.get("rel") == "next" for link in body.get("links") or []
+        ):
+            raise ConflictError(
+                "bahmni: encounter list is paged; cannot tell whether a note was already filed"
+            )
+        return list(body.get("results") or [])
+
+    async def get_visit(self, visit_uuid: str) -> RecordVisitDetail | None:
+        resp = await self._http.request(
+            "GET", f"{_REST}/visit/{visit_uuid}", params={"v": _VISIT_REP}
+        )
+        if resp.status_code == 404:
+            return None
+        visit = self._visit(resp.json())
+        if visit is None:
+            return None
+        rows = await self._encounters(visit_uuid, _ENCOUNTER_REP)
+        encounters = [e for r in rows if (e := self._encounter_summary(r)) is not None]
+        return RecordVisitDetail(visit=visit, encounters=sorted(encounters, key=lambda e: e.at))
+
+    # ─── Encounter write ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _diagnosis_body(d: RecordDiagnosis) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "freeTextAnswer": d.title,
+            "order": "PRIMARY" if d.primary else "SECONDARY",
+            "certainty": "CONFIRMED",
+        }
+        # Title is free text; the code rides in the comment so a later pass can attach
+        # a coded concept without re-reading the clinical note.
+        if d.code:
+            body["comments"] = f"{d.code_system} {d.code}"
+        return body
+
+    def _drug_body(self, d: RecordDrugOrder) -> dict[str, Any]:
+        return {
+            "careSetting": "OUTPATIENT",
+            "drugNonCoded": d.name,
+            "concept": {"uuid": self._config.drug_other_concept_uuid},
+            "dosingInstructionType": _FLEXIBLE_DOSING,
+            "dosingInstructions": {
+                "administrationInstructions": json.dumps(
+                    {"dose": d.dose, "frequency": d.frequency, "instructions": d.instructions}
+                )
+            },
+            "duration": d.duration_days,
+            "durationUnits": "Days",
+        }
+
+    def _has_marker(self, row: Any, marker: str) -> str | None:
+        if not isinstance(row, dict) or not isinstance(row.get("uuid"), str):
+            return None
+        for o in row.get("obs") or []:
+            concept = o.get("concept") if isinstance(o, dict) else None
+            if (
+                isinstance(concept, dict)
+                and concept.get("uuid") == self._config.note_marker_concept_uuid
+                and o.get("value") == marker
+            ):
+                return str(row["uuid"])
+        return None
+
+    async def write_encounter(self, e: RecordEncounterInput) -> RecordEncounterResult:
+        """File one clinical note as an encounter; idempotent on ``e.note_id``."""
+        c = self._config
+        if not c.note_marker_concept_uuid:
+            raise ConfigError("bahmni: note_marker_concept_uuid is required to write encounters")
+        if not c.consultation_encounter_type_uuid:
+            raise ConfigError("bahmni: consultation_encounter_type_uuid is required")
+        if e.drug_orders and not c.drug_other_concept_uuid:
+            raise ConfigError("bahmni: drug_other_concept_uuid is required for drug orders")
+        observations: list[dict[str, Any]] = []
+        for o in e.obs:
+            concept = c.concept_map.get(o.key)
+            if not concept:
+                raise ConfigError(f"concept_map missing {o.key}")
+            observations.append({"concept": {"uuid": concept}, "value": o.value})
+        marker = str(e.note_id)
+        for row in await self._encounters(e.visit_uuid, _MARKER_REP):
+            found = self._has_marker(row, marker)
+            if found:
+                return RecordEncounterResult(encounter_uuid=found, created=False)
+        observations.append({"concept": {"uuid": c.note_marker_concept_uuid}, "value": marker})
+        body = {
+            "patientUuid": e.patient_uuid,
+            "visitUuid": e.visit_uuid,
+            "locationUuid": c.location_uuid,
+            "encounterTypeUuid": c.consultation_encounter_type_uuid,
+            "encounterDateTime": to_epoch_ms(e.encounter_at),
+            "providers": [{"uuid": e.provider_uuid}],
+            "observations": observations,
+            "bahmniDiagnoses": [self._diagnosis_body(d) for d in e.diagnoses],
+            "drugOrders": [self._drug_body(d) for d in e.drug_orders],
+        }
+        resp = await self._http.request("POST", f"{_REST}/bahmnicore/bahmniencounter", json=body)
+        if resp.status_code == 404:
+            raise WriteNotSupported("bahmni: bahmniencounter route not found (HTTP 404)")
+        parsed = resp.json() if resp.content else None
+        uuid = parsed.get("encounterUuid") if isinstance(parsed, dict) else None
+        if not isinstance(uuid, str) or not uuid:
+            raise VendorRejected("bahmni: encounter response had no encounterUuid", landed=True)
+        return RecordEncounterResult(encounter_uuid=uuid, created=True)
