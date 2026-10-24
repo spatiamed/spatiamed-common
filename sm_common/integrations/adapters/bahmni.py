@@ -53,6 +53,7 @@ _FINAL_STATUS: dict[str, BahmniStatus] = {
 }
 _REST = "/openmrs/ws/rest/v1"
 _SEARCH_CAP = 50
+_SEARCH_CALL_BUDGET = 64  # POSTs one top-level _search_window may spend
 _FEED = "/openmrs/ws/atomfeed/appointments"
 _FEED_PAGE_CAP = 20  # prev-archive pages followed beyond "recent" while hunting the cursor
 _ATOM = "{http://www.w3.org/2005/Atom}"
@@ -106,7 +107,9 @@ class BahmniAdapter(HmsAdapter):
             content = (e.findtext(f"{_ATOM}content") or "").strip()
             if eid and content:
                 entries.append((eid, content, (e.findtext(f"{_ATOM}updated") or "").strip()))
-        # Atom does not fix the order inside a page: read it off the timestamps.
+        # Atom does not fix the order inside a page: read it off the timestamps. Only a
+        # strictly newer first entry means "newest first"; a tie (e.g. a book and a cancel
+        # in the same second) keeps document order. Live page order: verified in Task 9.
         if len(entries) > 1 and entries[0][2] > entries[-1][2]:
             entries.reverse()
         prev: str | None = None
@@ -169,6 +172,8 @@ class BahmniAdapter(HmsAdapter):
             body = resp.json()
             if isinstance(body, dict):
                 appointments.append(self._appointment(body))
+            else:
+                log.warning("feed_entry_unreadable: appointment %s body is not an object", uuid)
         return appointments, new_cursor
 
     def _appointment(self, a: Mapping[str, Any]) -> CanonicalAppointment:
@@ -208,8 +213,19 @@ class BahmniAdapter(HmsAdapter):
 
         ``appointments/search`` returns at most 50 rows and cannot paginate, so a
         full answer is split in half until each part is under the cap. ``truncated``
-        is True only when a window of one minute or less still returns a full page.
+        is True when a window of one minute or less is still full, or when the call
+        budget (``_SEARCH_CALL_BUDGET`` POSTs) runs out, e.g. if the server ignores
+        the date window. Bounds are sent in whole seconds.
         """
+        calls = [0]
+        return await self._bisect(start.replace(microsecond=0), end.replace(microsecond=0), calls)
+
+    async def _bisect(
+        self, start: datetime, end: datetime, calls: list[int]
+    ) -> tuple[list[dict[str, Any]], bool]:
+        if calls[0] >= _SEARCH_CALL_BUDGET:
+            return [], True
+        calls[0] += 1
         resp = await self._http.request(
             "POST",
             f"{_REST}/appointments/search",
@@ -230,9 +246,9 @@ class BahmniAdapter(HmsAdapter):
             return rows, False
         if end - start <= timedelta(minutes=1):
             return rows, True
-        mid = start + (end - start) / 2
-        left, left_cut = await self._search_window(start, mid)
-        right, right_cut = await self._search_window(mid, end)
+        mid = (start + (end - start) / 2).replace(microsecond=0)
+        left, left_cut = await self._bisect(start, mid, calls)
+        right, right_cut = await self._bisect(mid, end, calls)
         merged: dict[str, dict[str, Any]] = {}
         for row in [*left, *right]:
             merged.setdefault(str(row.get("uuid")), row)
@@ -482,7 +498,7 @@ class BahmniAdapter(HmsAdapter):
     async def fetch_recent_bookings(
         self, hospital_id: UUID, lookback_minutes: int
     ) -> list[ExternalBooking]:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc).replace(microsecond=0)
         rows, truncated = await self._search_window(
             now - timedelta(minutes=lookback_minutes), now + timedelta(days=1)
         )

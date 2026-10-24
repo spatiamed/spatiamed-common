@@ -308,3 +308,77 @@ async def test_day_list_bisects_past_50_cap():
     got = await _adapter().fetch_recent_bookings(uuid4(), 60)
     assert len(got) == 32
     assert not any(b.appointment_id.startswith("capped") for b in got)
+
+
+@respx.mock
+async def test_search_window_has_a_call_budget():
+    _login()
+    route = respx.post(SEARCH).mock(return_value=httpx.Response(200, json=_rows(50, "full")))
+    start = datetime(2026, 10, 25, 5, 0, tzinfo=timezone.utc)
+    _, truncated = await _adapter()._search_window(start, start + timedelta(hours=25))
+    assert truncated
+    assert route.call_count <= 64
+
+
+@respx.mock
+async def test_write_back_marker_lookup_raises_when_budget_exhausted():
+    from sm_common.integrations.canonical_types import AppointmentWrite
+
+    _login()
+    respx.post(SEARCH).mock(return_value=httpx.Response(200, json=_rows(50, "full")))
+    post = respx.post(f"{REST}/appointment").mock(return_value=httpx.Response(200, json={}))
+    start = datetime(2026, 10, 25, 5, 0, tzinfo=timezone.utc)
+    w = AppointmentWrite(
+        booking_id=uuid4(),
+        patient_ref="P",
+        practitioner_ref="R",
+        start=start,
+        end=start + timedelta(hours=25),
+        reason=None,
+        service_ref="S",
+    )
+    with pytest.raises(TransientError):
+        await _adapter().write_back_idempotent(w)
+    assert not post.called
+
+
+@respx.mock
+async def test_search_bounds_are_whole_seconds():
+    _login()
+    route = respx.post(SEARCH).mock(return_value=httpx.Response(200, json=[]))
+    await _adapter().fetch_recent_bookings(uuid4(), 60)
+    for key in ("startDate", "endDate"):
+        assert (
+            datetime.fromisoformat(json.loads(route.calls[0].request.content)[key]).microsecond == 0
+        )
+
+
+@respx.mock
+async def test_feed_tied_timestamps_keep_document_order():
+    _login()
+    # a book and a cancel in the same second: first/last updated are equal
+    page = (
+        '<feed xmlns="http://www.w3.org/2005/Atom">'
+        + "".join(
+            f"<entry><id>{eid}</id><updated>2026-10-25T05:00:00Z</updated>"
+            f"<content>{REST}/appointments/{u}</content></entry>"
+            for eid, u in (("e1", U1), ("e2", U2))
+        )
+        + "</feed>"
+    )
+    _feed("recent", page)
+    _serve_appts()
+    got, cursor = await _adapter().list_appointments_modified_since("e1", UNTIL)
+    assert [a.appointment_id for a in got] == [U2]
+    assert cursor == "e2"
+
+
+@respx.mock
+async def test_feed_non_object_entry_body_is_logged(caplog: pytest.LogCaptureFixture):
+    _login()
+    _feed("recent", _page([("e1", U1)]))
+    respx.get(f"{REST}/appointments/{U1}").mock(return_value=httpx.Response(200, json=[1]))
+    with caplog.at_level(logging.WARNING):
+        got, _ = await _adapter().list_appointments_modified_since("", UNTIL)
+    assert got == []
+    assert "feed_entry_unreadable" in caplog.text
