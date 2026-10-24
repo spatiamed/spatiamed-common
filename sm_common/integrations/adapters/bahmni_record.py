@@ -17,7 +17,10 @@ from sm_common.integrations.adapters.bahmni_parse import flag, gender
 from sm_common.integrations.exceptions import (
     ConfigError,
     ConflictError,
+    DocumentFilingFailed,
+    HmsAdapterError,
     NotFound,
+    TransientError,
     VendorRejected,
     WriteNotSupported,
 )
@@ -639,22 +642,22 @@ class BahmniRecordClient:
             raise VendorRejected("bahmni: appointment services response was not a list")
         out: list[RecordService] = []
         for row in body:
-            if not isinstance(row, dict):
-                continue
-            uuid, name = row.get("uuid"), row.get("name")
+            uuid = row.get("uuid") if isinstance(row, dict) else None
+            name = row.get("name") if isinstance(row, dict) else None
             if not isinstance(uuid, str) or not uuid or not isinstance(name, str) or not name:
-                continue
+                raise VendorRejected("bahmni: appointment service row missing uuid or name")
             mins = row.get("durationMins")
             ok = isinstance(mins, int) and not isinstance(mins, bool)
             out.append(RecordService(uuid, name, mins if ok else None))
         return out
 
     async def allergies(self, patient_uuid: str) -> list[str] | None:
-        """Allergen names, or None when the FHIR2 route is absent (HTTP 404).
+        """Allergen names; None means UNKNOWN (route absent, HTTP 404), never "no allergies".
 
-        Unverified, Task 9: standard OpenMRS FHIR2 shape, not yet proven live.
-        An entry with no readable name is reported as "Unspecified allergen"
-        rather than dropped, and a paged/truncated bundle raises.
+        An empty list is a positive "none recorded". Unverified, Task 9: standard
+        OpenMRS FHIR2 shape, not yet proven live. Nothing is dropped silently: only
+        OperationOutcome and search.mode "include" entries are skipped; any other
+        oddity, a paged bundle, or ``total`` above the entries returned raises.
         """
         resp = await self._http.request("GET", _ALLERGY, params={"patient": patient_uuid})
         if resp.status_code == 404:
@@ -669,12 +672,30 @@ class BahmniRecordClient:
             raise VendorRejected(
                 "bahmni: allergy bundle truncated (paged), refusing a partial list"
             )
+        entries = body.get("entry")
+        if entries is None:
+            entries = []
+        if not isinstance(entries, list):
+            raise VendorRejected("bahmni: allergy bundle entry was not a list")
         names: list[str] = []
-        for entry in body.get("entry") or []:
-            res = entry.get("resource") if isinstance(entry, dict) else None
-            if not isinstance(res, dict) or res.get("resourceType") != "AllergyIntolerance":
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise VendorRejected("bahmni: allergy bundle entry was not an object")
+            search = entry.get("search")
+            if isinstance(search, dict) and search.get("mode") == "include":
                 continue
+            res = entry.get("resource")
+            if not isinstance(res, dict):
+                raise VendorRejected("bahmni: allergy bundle entry had no resource")
+            rtype = res.get("resourceType")
+            if rtype == "OperationOutcome":
+                continue
+            if rtype != "AllergyIntolerance":
+                raise VendorRejected(f"bahmni: unexpected resource {rtype!r} in allergy bundle")
             names.append(self._allergen_name(res))
+        total = body.get("total")
+        if isinstance(total, int) and not isinstance(total, bool) and total > len(names):
+            raise VendorRejected("bahmni: allergy bundle total exceeds entries returned")
         return names
 
     @staticmethod
@@ -685,26 +706,37 @@ class BahmniRecordClient:
             if isinstance(text, str) and text.strip():
                 return text.strip()
             for c in code.get("coding") or []:
-                disp = c.get("display") if isinstance(c, dict) else None
-                if isinstance(disp, str) and disp.strip():
-                    return disp.strip()
+                if not isinstance(c, dict):
+                    continue
+                for key in ("display", "code"):
+                    v = c.get(key)
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
         return "Unspecified allergen"
 
-    async def upload_document(self, d: RecordDocumentInput) -> RecordDocumentResult:
-        """Upload a file then attach it to a document encounter (two calls).
-
-        Unverified, Task 9: both payload shapes follow Bahmni's open-source
-        frontend and have not been proven live. Not idempotent: a retry after a
-        failure in the second call leaves an orphan uploaded file.
-        """
+    def _document_concept(self, doc_type: str) -> str:
         c = self._config
-        concept = c.document_type_concepts.get(d.doc_type)
+        concept = c.document_type_concepts.get(doc_type)
         if not concept:
-            raise ConfigError(f"bahmni: document_type_concepts missing {d.doc_type!r}")
+            raise ConfigError(f"bahmni: document_type_concepts missing {doc_type!r}")
         if not c.document_visit_type_uuid or not c.document_encounter_type_uuid:
             raise ConfigError(
                 "bahmni: document_visit_type_uuid and document_encounter_type_uuid are required"
             )
+        return concept
+
+    async def upload_document(self, d: RecordDocumentInput) -> RecordDocumentResult:
+        """Upload a file, then attach it to a document encounter (two calls).
+
+        Unverified, Task 9: both payload shapes follow Bahmni's open-source
+        frontend and have not been proven live. If the second call fails this
+        raises ``DocumentFilingFailed`` carrying ``uploaded_url``; resume with
+        ``file_uploaded_document`` rather than calling this again (which would
+        orphan another file).
+        """
+        self._document_concept(d.doc_type)
+        if not d.patient_uuid or not d.provider_uuid:
+            raise ValueError("bahmni: patient_uuid and provider_uuid are required")
         kind = _DOC_MIME.get(d.mime)
         if kind is None:
             raise ValueError(f"bahmni: unsupported document mime {d.mime!r}")
@@ -728,27 +760,64 @@ class BahmniRecordClient:
         url = parsed.get("url") if isinstance(parsed, dict) else None
         if not isinstance(url, str) or not url:
             raise VendorRejected("bahmni: document upload response had no url")
-        at = to_epoch_ms(d.taken_at)
-        resp = await self._http.request(
-            "POST",
-            _DOC_FILE,
-            json={
-                "patientUuid": d.patient_uuid,
-                "visitTypeUuid": c.document_visit_type_uuid,
-                "encounterTypeUuid": c.document_encounter_type_uuid,
-                "providerUuid": d.provider_uuid,
-                "locationUuid": c.location_uuid,
-                "encounterDateTime": at,
-                "documents": [{"testUuid": concept, "image": url, "obsDateTime": at}],
-            },
+        return await self.file_uploaded_document(
+            d.patient_uuid, url, d.doc_type, d.provider_uuid, d.taken_at
         )
+
+    async def file_uploaded_document(
+        self,
+        patient_uuid: str,
+        uploaded_url: str,
+        doc_type: str,
+        provider_uuid: str,
+        taken_at: datetime,
+    ) -> RecordDocumentResult:
+        """Step 2 alone: attach an already-uploaded file. Every failure is DocumentFilingFailed.
+
+        ``landed`` on the error is True when the encounter may already exist
+        (5xx, transport error, malformed success): check before resuming.
+        """
+        c = self._config
+        concept = self._document_concept(doc_type)
+        if not patient_uuid or not provider_uuid or not uploaded_url:
+            raise ValueError("bahmni: patient_uuid, provider_uuid and uploaded_url are required")
+        at = to_epoch_ms(taken_at)
+        try:
+            resp = await self._http.request(
+                "POST",
+                _DOC_FILE,
+                json={
+                    "patientUuid": patient_uuid,
+                    "visitTypeUuid": c.document_visit_type_uuid,
+                    "encounterTypeUuid": c.document_encounter_type_uuid,
+                    "providerUuid": provider_uuid,
+                    "locationUuid": c.location_uuid,
+                    "encounterDateTime": at,
+                    "documents": [{"testUuid": concept, "image": uploaded_url, "obsDateTime": at}],
+                },
+            )
+        except HmsAdapterError as exc:
+            may_have_landed = isinstance(exc, TransientError) or exc.landed
+            raise DocumentFilingFailed(
+                f"bahmni: document upload succeeded but filing failed: {exc}",
+                uploaded_url=uploaded_url,
+                cause=type(exc).__name__,
+                landed=may_have_landed,
+            ) from exc
         if resp.status_code == 404:
-            raise WriteNotSupported("bahmni: visitDocument route not found (HTTP 404)")
+            raise DocumentFilingFailed(
+                "bahmni: visitDocument route not found (HTTP 404)",
+                uploaded_url=uploaded_url,
+                cause="NotFound",
+            )
         out = resp.json() if resp.content else None
         visit = out.get("visitUuid") if isinstance(out, dict) else None
         enc = out.get("encounterUuid") if isinstance(out, dict) else None
         if not isinstance(visit, str) or not visit or not isinstance(enc, str) or not enc:
-            raise VendorRejected(
-                "bahmni: document filing response had no visitUuid/encounterUuid", landed=True
+            raise DocumentFilingFailed(
+                "bahmni: document filing response had no visitUuid/encounterUuid",
+                uploaded_url=uploaded_url,
+                cause="MalformedResponse",
+                landed=True,
             )
-        return RecordDocumentResult(visit_uuid=visit, encounter_uuid=enc, url=url)
+        return RecordDocumentResult(visit_uuid=visit, encounter_uuid=enc, url=uploaded_url)

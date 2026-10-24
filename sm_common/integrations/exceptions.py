@@ -42,3 +42,19 @@ class ConfigError(HmsAdapterError):
 
 class NotFound(HmsAdapterError):  # noqa: N818
     """The HMS has no such record (HTTP 404). Terminal."""
+
+
+class DocumentFilingFailed(VendorRejected):  # noqa: N818
+    """The file upload succeeded but attaching it to a document encounter failed.
+
+    ``uploaded_url`` lets a caller resume with ``file_uploaded_document`` instead of
+    re-uploading. ``landed`` is True when the encounter may already exist (5xx or a
+    malformed success), so a resume must first check for a duplicate.
+    """
+
+    def __init__(
+        self, message: str, *, uploaded_url: str, cause: str = "", landed: bool = False
+    ) -> None:
+        super().__init__(message, landed=landed)
+        self.uploaded_url = uploaded_url
+        self.cause = cause

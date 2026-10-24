@@ -9,7 +9,12 @@ import respx
 from sm_common.integrations.adapters.bahmni_config import BahmniConfig
 from sm_common.integrations.adapters.bahmni_http import BahmniHttp
 from sm_common.integrations.adapters.bahmni_record import BahmniRecordClient
-from sm_common.integrations.exceptions import ConfigError, VendorRejected, WriteNotSupported
+from sm_common.integrations.exceptions import (
+    ConfigError,
+    DocumentFilingFailed,
+    VendorRejected,
+    WriteNotSupported,
+)
 from sm_common.integrations.record_types import RecordDocumentInput, RecordDocumentResult
 
 BASE = "https://bahmni.example.test"
@@ -105,7 +110,7 @@ async def test_upload_missing_config_raises_before_upload() -> None:
 
 
 @respx.mock
-async def test_upload_failures_are_loud() -> None:
+async def test_upload_step1_failures_are_loud() -> None:
     _login()
     respx.post(UPLOAD).mock(return_value=httpx.Response(404))
     with pytest.raises(WriteNotSupported):
@@ -113,8 +118,52 @@ async def test_upload_failures_are_loud() -> None:
     respx.post(UPLOAD).mock(return_value=httpx.Response(200, json={}))
     with pytest.raises(VendorRejected):
         await _client().upload_document(_doc())
-    respx.post(UPLOAD).mock(return_value=httpx.Response(200, json={"url": "f"}))
-    respx.post(FILE).mock(return_value=httpx.Response(200, json={"visitUuid": "v"}))
-    with pytest.raises(VendorRejected) as ei:
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("resp", "landed", "cause"),
+    [
+        (httpx.Response(404), False, "NotFound"),
+        (httpx.Response(500), True, "TransientError"),
+        (httpx.Response(400, json={"error": {"message": "bad"}}), False, "VendorRejected"),
+        (httpx.Response(200, json={"visitUuid": "v"}), True, "MalformedResponse"),
+    ],
+)
+async def test_step2_failures_carry_uploaded_url(
+    resp: httpx.Response, landed: bool, cause: str
+) -> None:
+    _login()
+    respx.post(UPLOAD).mock(return_value=httpx.Response(200, json={"url": "2026/f.pdf"}))
+    respx.post(FILE).mock(return_value=resp)
+    with pytest.raises(DocumentFilingFailed) as ei:
         await _client().upload_document(_doc())
-    assert ei.value.landed is True
+    assert ei.value.uploaded_url == "2026/f.pdf"
+    assert ei.value.landed is landed
+    assert ei.value.cause == cause
+
+
+@respx.mock
+async def test_file_uploaded_document_resumes_without_reupload() -> None:
+    _login()
+    up = respx.post(UPLOAD).mock(return_value=httpx.Response(200, json={"url": "x"}))
+    fl = respx.post(FILE).mock(
+        return_value=httpx.Response(200, json={"visitUuid": "v-1", "encounterUuid": "e-1"})
+    )
+    out = await _client().file_uploaded_document("p-1", "2026/f.pdf", "lab_report", "prov-1", AT)
+    assert out == RecordDocumentResult("v-1", "e-1", "2026/f.pdf")
+    assert up.call_count == 0
+    assert json.loads(fl.calls[0].request.content)["documents"][0]["image"] == "2026/f.pdf"
+
+
+@respx.mock
+async def test_empty_ids_rejected_before_upload() -> None:
+    _login()
+    up = respx.post(UPLOAD).mock(return_value=httpx.Response(200, json={"url": "f"}))
+    bad = RecordDocumentInput("", b"x", "application/pdf", "lab_report", "prov-1", AT)
+    with pytest.raises(ValueError):
+        await _client().upload_document(bad)
+    bad2 = RecordDocumentInput("p", b"x", "application/pdf", "lab_report", "", AT)
+    with pytest.raises(ValueError):
+        await _client().upload_document(bad2)
+    assert up.call_count == 0

@@ -105,3 +105,67 @@ async def test_allergies_truncated_or_malformed_is_loud() -> None:
     respx.get(ALLERGY).mock(return_value=httpx.Response(200, json={"resourceType": "Other"}))
     with pytest.raises(VendorRejected):
         await _client().allergies("p-1")
+
+
+@respx.mock
+async def test_list_services_row_missing_name_raises() -> None:
+    _login()
+    respx.get(SERVICES).mock(return_value=httpx.Response(200, json=[{"uuid": "s1"}]))
+    with pytest.raises(VendorRejected):
+        await _client().list_services()
+
+
+@respx.mock
+async def test_allergy_code_only_coding_falls_back_to_code() -> None:
+    _login()
+    body = {
+        "resourceType": "Bundle",
+        "entry": [
+            {
+                "resource": {
+                    "resourceType": "AllergyIntolerance",
+                    "code": {"coding": [{"code": "7980"}]},
+                }
+            }
+        ],
+    }
+    respx.get(ALLERGY).mock(return_value=httpx.Response(200, json=body))
+    assert await _client().allergies("p-1") == ["7980"]
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"resourceType": "Bundle", "entry": "nope"},
+        {"resourceType": "Bundle", "entry": ["junk"]},
+        {"resourceType": "Bundle", "entry": [{"resource": {"resourceType": "Patient"}}]},
+        {"resourceType": "Bundle", "entry": [{}]},
+        {
+            "resourceType": "Bundle",
+            "total": 2,
+            "entry": [{"resource": {"resourceType": "AllergyIntolerance", "code": {"text": "A"}}}],
+        },
+    ],
+)
+async def test_allergy_bundle_oddities_raise(body: dict) -> None:
+    _login()
+    respx.get(ALLERGY).mock(return_value=httpx.Response(200, json=body))
+    with pytest.raises(VendorRejected):
+        await _client().allergies("p-1")
+
+
+@respx.mock
+async def test_allergy_skips_only_outcome_and_include() -> None:
+    _login()
+    body = {
+        "resourceType": "Bundle",
+        "total": 1,
+        "entry": [
+            {"resource": {"resourceType": "OperationOutcome"}},
+            {"search": {"mode": "include"}, "resource": {"resourceType": "Patient"}},
+            {"resource": {"resourceType": "AllergyIntolerance", "code": {"text": "A"}}},
+        ],
+    }
+    respx.get(ALLERGY).mock(return_value=httpx.Response(200, json=body))
+    assert await _client().allergies("p-1") == ["A"]
