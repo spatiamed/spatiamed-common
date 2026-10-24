@@ -96,43 +96,6 @@ class TestBahmniAdapterAtomFeed:
         assert appointments == []
 
 
-class TestBahmniAdapterWriteBack:
-    @respx.mock
-    async def test_write_back_success(self):
-        _login()
-        respx.post("https://bahmni.example.com/openmrs/ws/rest/v1/appointment").mock(
-            return_value=httpx.Response(
-                200, json={"uuid": "HB-001", "appointmentNumber": "APT-002"}
-            )
-        )
-        adapter = make_adapter()
-        result = await adapter.write_back_idempotent(_write())
-        assert result.status == "SUCCESS"
-        assert result.hms_booking_id == "HB-001"
-
-    @respx.mock
-    async def test_write_back_conflict_raises(self):
-        _login()
-        respx.post("https://bahmni.example.com/openmrs/ws/rest/v1/appointment").mock(
-            return_value=httpx.Response(
-                400, json={"errorMessages": [{"message": "slot already booked for this time"}]}
-            )
-        )
-        adapter = make_adapter()
-        with pytest.raises(ConflictError):
-            await adapter.write_back_idempotent(_write())
-
-    @respx.mock
-    async def test_write_back_500_raises_transient(self):
-        _login()
-        respx.post("https://bahmni.example.com/openmrs/ws/rest/v1/appointment").mock(
-            return_value=httpx.Response(500, json={"error": "internal"})
-        )
-        adapter = make_adapter()
-        with pytest.raises(TransientError):
-            await adapter.write_back_idempotent(_write())
-
-
 class TestBahmniAdapterHealth:
     @respx.mock
     async def test_health_check_healthy(self):

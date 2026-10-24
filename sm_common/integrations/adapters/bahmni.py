@@ -12,7 +12,7 @@ import feedparser
 
 from sm_common.identity.dob import age_on
 from sm_common.integrations.adapters.bahmni_config import BahmniConfig
-from sm_common.integrations.adapters.bahmni_http import BahmniHttp
+from sm_common.integrations.adapters.bahmni_http import BahmniHttp, from_epoch_ms, to_epoch_ms
 from sm_common.integrations.adapters.bahmni_parse import birth_date as _birth_date
 from sm_common.integrations.adapters.bahmni_parse import flag as _flag
 from sm_common.integrations.adapters.bahmni_parse import gender as _gender
@@ -41,10 +41,10 @@ from sm_common.integrations.exceptions import (
     WriteNotSupported,
 )
 from sm_common.integrations.hms_adapter import HmsAdapter
-from sm_common.integrations.legacy_payload import legacy_payload
 from sm_common.phone import hash_phone_for_lookup, phone_search_variants
 
 _REST = "/openmrs/ws/rest/v1"
+_TERMINAL_STATUSES = frozenset({"Cancelled", "Missed"})
 _SEARCH_PAGE_CAP = 10  # pages of bahmni/search/patient followed per query
 _ROSTER_PAGE = 100
 _ROSTER_PAGE_CAP = 50
@@ -430,20 +430,65 @@ class BahmniAdapter(HmsAdapter):
         return bookings
 
     async def write_back_idempotent(self, write: AppointmentWrite) -> WriteBackResult:
-        payload = legacy_payload(write)
-        body = {**payload, "externalReference": str(write.booking_id)}
-        try:
-            resp = await self._http.request("POST", f"{_REST}/appointment", json=body)
-        except VendorRejected as exc:
-            if "slot" in str(exc).lower():
-                raise ConflictError(str(exc)) from exc
-            raise
-        if resp.status_code == 404:
+        """Create the appointment unless a live one carrying our marker exists.
+
+        Bahmni neither dedupes nor reports slot conflicts, so idempotency is
+        client-side: appointments written here start their ``comments`` with
+        ``sm:<booking_id>``. Cancelled and Missed rows are terminal and never
+        match, so a retry of a cancelled booking creates a fresh appointment.
+        """
+        marker = f"sm:{write.booking_id}"
+        # Resolve config first: an unmapped service must fail before any I/O.
+        service_uuid = write.service_ref or self._config.service_for(write.practitioner_ref)
+        # The search returns at most 50 rows and cannot paginate, so keep the
+        # window tight around the slot.
+        resp = await self._http.request(
+            "POST",
+            f"{_REST}/appointments/search",
+            json={
+                "startDate": (write.start - timedelta(minutes=1)).astimezone(timezone.utc).isoformat(),
+                "endDate": (write.end + timedelta(minutes=1)).astimezone(timezone.utc).isoformat(),
+            },
+        )
+        rows = resp.json() if resp.status_code == 200 else []
+        for row in rows if isinstance(rows, list) else []:
+            comments = row.get("comments")
+            if (
+                isinstance(comments, str)
+                and comments.startswith(marker)
+                and row.get("status") not in _TERMINAL_STATUSES
+                and row.get("uuid")
+            ):
+                return WriteBackResult(
+                    status="SUCCESS",
+                    hms_booking_id=str(row["uuid"]),
+                    hms_start=from_epoch_ms(row["startDateTime"]),
+                    created=False,
+                )
+        body = {
+            "patientUuid": write.patient_ref,
+            "serviceUuid": service_uuid,
+            "providers": (
+                [{"uuid": write.practitioner_ref, "response": "ACCEPTED"}]
+                if write.practitioner_ref
+                else []
+            ),
+            "locationUuid": self._config.location_uuid,
+            "startDateTime": to_epoch_ms(write.start),
+            "endDateTime": to_epoch_ms(write.end),
+            "appointmentKind": "Scheduled",
+            "comments": marker + (f" {write.reason}" if write.reason else ""),
+        }
+        # A 400 propagates as VendorRejected (never retried); 5xx as TransientError.
+        created = await self._http.request("POST", f"{_REST}/appointment", json=body)
+        if created.status_code == 404:
             raise WriteNotSupported("bahmni: appointment route not found (HTTP 404)")
-        data = resp.json()
+        data = created.json()
         return WriteBackResult(
             status="SUCCESS",
-            hms_booking_id=data.get("uuid") or data.get("appointmentNumber"),
+            hms_booking_id=str(data["uuid"]),
+            hms_start=from_epoch_ms(data["startDateTime"]),
+            created=True,
         )
 
     async def cancel(self, hms_booking_id: str, reason: str) -> CancelResult:

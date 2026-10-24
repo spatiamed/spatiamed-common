@@ -140,3 +140,8 @@ def test_write_back_result_defaults_keep_old_callers_working():
 def test_canonical_patient_resource_id_defaults_to_none():
     p = CanonicalPatient(mrn="1", abha_id=None, phone_hash="", name_token="", age=None, gender=None)
     assert p.resource_id is None
+
+
+def test_appointment_write_service_ref_defaults_none():
+    assert _write().service_ref is None
+    assert _write(service_ref="svc").service_ref == "svc"
