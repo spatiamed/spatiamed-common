@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
+from urllib.parse import urlsplit
 from uuid import UUID
-
-import feedparser
 
 from sm_common.identity.dob import age_on
 from sm_common.integrations.adapters.bahmni_config import BahmniConfig
@@ -52,6 +53,11 @@ _FINAL_STATUS: dict[str, BahmniStatus] = {
 }
 _REST = "/openmrs/ws/rest/v1"
 _SEARCH_CAP = 50
+_FEED = "/openmrs/ws/atomfeed/appointments"
+_FEED_PAGE_CAP = 20  # prev-archive pages followed beyond "recent" while hunting the cursor
+_ATOM = "{http://www.w3.org/2005/Atom}"
+_MARKER = re.compile(r"^sm:\S+\s*")
+log = logging.getLogger(__name__)
 _TERMINAL_STATUSES = frozenset({"Cancelled", "Missed"})
 _SEARCH_PAGE_CAP = 10  # pages of bahmni/search/patient followed per query
 _ROSTER_PAGE = 100
@@ -81,93 +87,156 @@ class BahmniAdapter(HmsAdapter):
         self._transport_key = transport_key
         self._record = BahmniRecordClient(http, config)
 
-    def _parse_atom_entry(self, entry: Any) -> CanonicalAppointment | None:
-        content = getattr(entry, "content", [])
-        if not content:
-            return None
-        xml_str = content[0].get("value", "")
-        if not xml_str:
-            return None
-        try:
-            root = ET.fromstring(xml_str.strip())
-        except ET.ParseError:
-            return None
-
-        def _text(tag: str) -> str:
-            el = root.find(tag)
-            return el.text.strip() if el is not None and el.text else ""
-
-        slot_str = _text("startDateTime")
-        try:
-            slot_start = datetime.fromisoformat(slot_str.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-
-        patient_el = root.find("patient")
-        mrn = ""
-        if patient_el is not None:
-            id_el = patient_el.find("identifier")
-            mrn = id_el.text.strip() if id_el is not None and id_el.text else ""
-
-        provider_el = root.find("provider")
-        doctor_id = ""
-        if provider_el is not None:
-            u = provider_el.find("uuid")
-            doctor_id = u.text.strip() if u is not None and u.text else ""
-
-        service_el = root.find("service")
-        dept_id = ""
-        if service_el is not None:
-            u = service_el.find("uuid")
-            dept_id = u.text.strip() if u is not None and u.text else ""
-
-        apt_num = _text("appointmentNumber")
-        try:
-            hms_version = int(_text("version") or "0")
-        except ValueError:
-            hms_version = 0
-
-        patient = CanonicalPatient(
-            mrn=mrn,
-            abha_id=None,
-            phone_hash="",
-            name_token="",
-            age=None,
-            gender=None,
-        )
-        return CanonicalAppointment(
-            appointment_id=apt_num,
-            hms_version=hms_version,
-            patient=patient,
-            doctor_external_id=doctor_id,
-            department_external_id=dept_id,
-            slot_start=slot_start,
-            slot_duration_min=15,
-            payer_type="CASH",
-            reason_text=None,
-            status=_text("status") or "Scheduled",
-        )
-
     @staticmethod
     def _require_found(resp: Any, what: str) -> None:
         if resp.status_code == 404:
             raise VendorRejected(f"bahmni: {what} not found (HTTP 404)")
 
+    async def _feed_page(self, path: str) -> tuple[list[tuple[str, str]], str | None]:
+        """One AtomFeed page -> ([(entry id, content path)] oldest first, prev-archive path)."""
+        resp = await self._http.request("GET", path, expect=(200,))
+        self._require_found(resp, "appointment feed")
+        try:
+            root = ET.fromstring(resp.text)
+        except ET.ParseError as exc:
+            raise TransientError(f"bahmni: unreadable appointment feed ({exc})") from exc
+        entries: list[tuple[str, str, str]] = []
+        for e in root.findall(f"{_ATOM}entry"):
+            eid = (e.findtext(f"{_ATOM}id") or "").strip()
+            content = (e.findtext(f"{_ATOM}content") or "").strip()
+            if eid and content:
+                entries.append((eid, content, (e.findtext(f"{_ATOM}updated") or "").strip()))
+        # Atom does not fix the order inside a page: read it off the timestamps.
+        if len(entries) > 1 and entries[0][2] > entries[-1][2]:
+            entries.reverse()
+        prev: str | None = None
+        for link in root.findall(f"{_ATOM}link"):
+            if link.get("rel") == "prev-archive" and link.get("href"):
+                parts = urlsplit(link.get("href", ""))
+                prev = parts.path + (f"?{parts.query}" if parts.query else "")
+        return [(eid, content) for eid, content, _ in entries], prev
+
     async def list_appointments_modified_since(
         self, cursor: str, until_date: date
     ) -> tuple[list[CanonicalAppointment], str]:
-        resp = await self._http.request(
-            "GET", "/openmrs/ws/atomfeed/appointment/recent", expect=(200,)
-        )
-        self._require_found(resp, "appointment feed")
-        feed = feedparser.parse(resp.text)
-        new_cursor: str = getattr(feed.feed, "updated", cursor) or cursor
-        appointments = []
-        for entry in feed.entries:
-            apt = self._parse_atom_entry(entry)
-            if apt is not None:
-                appointments.append(apt)
+        """Appointments changed since ``cursor`` (an atom entry id), oldest change first.
+
+        An empty or non-atom cursor (e.g. a legacy ISO timestamp) means first run:
+        only the ``recent`` page is read. Otherwise ``prev-archive`` is followed
+        (at most ``_FEED_PAGE_CAP`` pages) until the cursor is found. A cursor that
+        is never found is logged as ``cursor_lost`` and everything walked is returned.
+        """
+        tracking = bool(cursor) and not _is_timestamp(cursor)
+        pages: list[list[tuple[str, str]]] = []  # newest page first
+        path: str | None = f"{_FEED}/recent"
+        found = False
+        walked = 0
+        while path is not None:
+            entries, prev = await self._feed_page(path)
+            pages.append(entries)
+            if tracking and any(eid == cursor for eid, _ in entries):
+                found = True
+                break
+            if not tracking or walked >= _FEED_PAGE_CAP or prev in (None, path):
+                break
+            path = prev
+            walked += 1
+        chronological = [e for page in reversed(pages) for e in page]
+        if tracking and found:
+            at = max(i for i, (eid, _) in enumerate(chronological) if eid == cursor)
+            chronological = chronological[at + 1 :]
+        elif tracking:
+            log.warning(
+                "cursor_lost: %r not in %d feed page(s); processing what was walked",
+                cursor,
+                len(pages),
+            )
+        if not chronological:
+            return [], cursor
+        new_cursor = chronological[-1][0]
+        # Dedupe by appointment, keeping the last event (a cancel repeats the uuid).
+        order: dict[str, None] = {}
+        for _, content in chronological:
+            uuid = content.rstrip("/").rsplit("/", 1)[-1]
+            order.pop(uuid, None)
+            order[uuid] = None
+        appointments: list[CanonicalAppointment] = []
+        for uuid in order:
+            resp = await self._http.request("GET", f"{_REST}/appointments/{uuid}")
+            if resp.status_code == 404:
+                log.warning("feed_entry_gone: appointment %s", uuid)
+                continue
+            body = resp.json()
+            if isinstance(body, dict):
+                appointments.append(self._appointment(body))
         return appointments, new_cursor
+
+    def _appointment(self, a: Mapping[str, Any]) -> CanonicalAppointment:
+        start = int(a["startDateTime"])
+        end = int(a["endDateTime"])
+        p = a.get("patient") or {}
+        service = a.get("service") or {}
+        providers = a.get("providers") or []
+        comments = a.get("comments")
+        reason = _MARKER.sub("", comments).strip() if isinstance(comments, str) else ""
+        age = p.get("age")
+        return CanonicalAppointment(
+            appointment_id=str(a["uuid"]),
+            hms_version=int(a.get("dateChanged") or a.get("dateCreated") or 0),
+            patient=CanonicalPatient(
+                mrn=str(p.get("identifier") or ""),
+                abha_id=None,
+                phone_hash="",
+                name_token="",
+                age=age if isinstance(age, int) and not isinstance(age, bool) else None,
+                gender=_gender(p.get("gender")),
+                resource_id=str(p["uuid"]) if p.get("uuid") else None,
+            ),
+            doctor_external_id=str(providers[0].get("uuid") or "") if providers else "",
+            department_external_id=str(service.get("uuid") or ""),
+            slot_start=from_epoch_ms(start),
+            slot_duration_min=(end - start) // 60000,
+            payer_type="CASH",
+            reason_text=reason or None,
+            status=str(a.get("status") or "Scheduled"),
+        )
+
+    async def _search_window(
+        self, start: datetime, end: datetime
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Appointments in [start, end] -> (rows, truncated).
+
+        ``appointments/search`` returns at most 50 rows and cannot paginate, so a
+        full answer is split in half until each part is under the cap. ``truncated``
+        is True only when a window of one minute or less still returns a full page.
+        """
+        resp = await self._http.request(
+            "POST",
+            f"{_REST}/appointments/search",
+            json={
+                "startDate": start.astimezone(timezone.utc).isoformat(),
+                "endDate": end.astimezone(timezone.utc).isoformat(),
+            },
+        )
+        # Fail closed: a lookup we cannot trust must never fall through to a POST.
+        if resp.status_code != 200:
+            raise WriteNotSupported(
+                f"bahmni: appointment search unavailable (HTTP {resp.status_code})"
+            )
+        rows = resp.json()
+        if not isinstance(rows, list):
+            raise TransientError("bahmni: appointment search returned a non-list body")
+        if len(rows) < _SEARCH_CAP:
+            return rows, False
+        if end - start <= timedelta(minutes=1):
+            return rows, True
+        mid = start + (end - start) / 2
+        left, left_cut = await self._search_window(start, mid)
+        right, right_cut = await self._search_window(mid, end)
+        merged: dict[str, dict[str, Any]] = {}
+        for row in [*left, *right]:
+            merged.setdefault(str(row.get("uuid")), row)
+        return list(merged.values()), left_cut or right_cut
 
     # ─── Patient read ────────────────────────────────────────────────────────
 
@@ -340,7 +409,9 @@ class BahmniAdapter(HmsAdapter):
                 exclude_ids=patient.exclude_ids,
             )
         )
-        return PatientCreateResult(resource_id=rec.uuid, mrn=rec.identifier or None, created=created)
+        return PatientCreateResult(
+            resource_id=rec.uuid, mrn=rec.identifier or None, created=created
+        )
 
     # ─── Roster ──────────────────────────────────────────────────────────────
 
@@ -411,30 +482,27 @@ class BahmniAdapter(HmsAdapter):
     async def fetch_recent_bookings(
         self, hospital_id: UUID, lookback_minutes: int
     ) -> list[ExternalBooking]:
-        resp = await self._http.request(
-            "GET",
-            f"{_REST}/appointment",
-            params={"startDate": datetime.now(timezone.utc).isoformat(), "v": "full"},
+        now = datetime.now(timezone.utc)
+        rows, truncated = await self._search_window(
+            now - timedelta(minutes=lookback_minutes), now + timedelta(days=1)
         )
-        self._require_found(resp, "appointment list")
+        if truncated:
+            log.warning("search_truncated: a one-minute window still returned %d rows", _SEARCH_CAP)
         bookings = []
-        for b in resp.json().get("results", []):
+        for b in rows:
+            changed = b.get("dateChanged") or b.get("dateCreated")
             try:
-                slot_start = datetime.fromisoformat(b["startDateTime"].replace("Z", "+00:00"))
-                updated_at = datetime.fromisoformat(
-                    b.get("dateChanged", b["startDateTime"]).replace("Z", "+00:00")
+                bookings.append(
+                    ExternalBooking(
+                        appointment_id=str(b["uuid"]),
+                        doctor_external_id=str(((b.get("providers") or [{}])[0]).get("uuid") or ""),
+                        slot_start=from_epoch_ms(b["startDateTime"]),
+                        status=str(b.get("status") or ""),
+                        updated_at=from_epoch_ms(changed),
+                    )
                 )
-            except (KeyError, ValueError):
-                continue
-            bookings.append(
-                ExternalBooking(
-                    appointment_id=b.get("appointmentNumber", ""),
-                    doctor_external_id=(b.get("provider") or {}).get("uuid", ""),
-                    slot_start=slot_start,
-                    status=b.get("status", ""),
-                    updated_at=updated_at,
-                )
-            )
+            except (KeyError, ValueError, TypeError):
+                log.warning("search row skipped: %r", b.get("uuid"))
         return bookings
 
     async def write_back_idempotent(self, write: AppointmentWrite) -> WriteBackResult:
@@ -448,25 +516,10 @@ class BahmniAdapter(HmsAdapter):
         marker = f"sm:{write.booking_id}"
         # Resolve config first: an unmapped service must fail before any I/O.
         service_uuid = write.service_ref or self._config.service_for(write.practitioner_ref)
-        # The search returns at most 50 rows and cannot paginate, so keep the
-        # window tight around the slot.
-        resp = await self._http.request(
-            "POST",
-            f"{_REST}/appointments/search",
-            json={
-                "startDate": (write.start - timedelta(minutes=1)).astimezone(timezone.utc).isoformat(),
-                "endDate": (write.end + timedelta(minutes=1)).astimezone(timezone.utc).isoformat(),
-            },
+        rows, truncated = await self._search_window(
+            write.start - timedelta(minutes=1), write.end + timedelta(minutes=1)
         )
-        # Fail closed: a lookup we cannot trust must never fall through to a POST.
-        if resp.status_code != 200:
-            raise WriteNotSupported(
-                f"bahmni: appointment search unavailable (HTTP {resp.status_code})"
-            )
-        rows = resp.json()
-        if not isinstance(rows, list):
-            raise TransientError("bahmni: appointment search returned a non-list body")
-        if len(rows) >= _SEARCH_CAP:
+        if truncated:
             raise TransientError(
                 "bahmni: appointment search hit its row cap; the marker lookup is unreliable"
             )
@@ -585,6 +638,14 @@ class BahmniAdapter(HmsAdapter):
             latency_ms=int((time.monotonic() - start) * 1000),
             message="OK",
         )
+
+
+def _is_timestamp(value: str) -> bool:
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _dedupe(patients: list[CanonicalPatient]) -> list[CanonicalPatient]:

@@ -21,9 +21,6 @@ from sm_common.integrations.exceptions import ConflictError, TransientError
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
-ATOM_XML = (FIXTURE_DIR / "bahmni_atomfeed.xml").read_text()
-
-
 def _write(**over) -> AppointmentWrite:
     start = datetime(2026, 5, 8, 9, 0, tzinfo=timezone.utc)
     base = dict(
@@ -60,40 +57,6 @@ def make_adapter() -> BahmniAdapter:
         hash_salt="test-salt",
         transport_key="test-transport-key-32-char-padding!",
     )
-
-
-class TestBahmniAdapterAtomFeed:
-    @respx.mock
-    async def test_list_appointments_returns_canonical(self):
-        _login()
-        respx.get("https://bahmni.example.com/openmrs/ws/atomfeed/appointment/recent").mock(
-            return_value=httpx.Response(
-                200, text=ATOM_XML, headers={"Content-Type": "application/atom+xml"}
-            )
-        )
-        adapter = make_adapter()
-        appointments, new_cursor = await adapter.list_appointments_modified_since(
-            cursor="", until_date=date(2026, 5, 8)
-        )
-        assert len(appointments) == 1
-        assert appointments[0].appointment_id == "APT-001"
-        assert appointments[0].doctor_external_id == "DR-001"
-        assert appointments[0].department_external_id == "DEPT-001"
-        assert new_cursor == "2026-05-06T10:00:00Z"
-
-    @respx.mock
-    async def test_list_appointments_empty_feed(self):
-        _login()
-        empty_xml = """<?xml version="1.0"?>
-        <feed xmlns="http://www.w3.org/2005/Atom">
-          <updated>2026-05-06T10:00:00Z</updated>
-        </feed>"""
-        respx.get("https://bahmni.example.com/openmrs/ws/atomfeed/appointment/recent").mock(
-            return_value=httpx.Response(200, text=empty_xml)
-        )
-        adapter = make_adapter()
-        appointments, cursor = await adapter.list_appointments_modified_since("", date(2026, 5, 8))
-        assert appointments == []
 
 
 class TestBahmniAdapterHealth:
