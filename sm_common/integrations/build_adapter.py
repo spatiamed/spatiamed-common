@@ -7,11 +7,11 @@ the per-service factories in QueueCare and hms-connector-agent.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from sm_common.integrations.adapters.bahmni import BahmniAdapter
 from sm_common.integrations.adapters.bahmni_config import BahmniConfig
 from sm_common.integrations.adapters.bahmni_http import BahmniHttp
+from sm_common.integrations.adapters.bahmni_record import BahmniRecordClient
 from sm_common.integrations.adapters.fhir_r4 import FhirR4Adapter
 from sm_common.integrations.adapters.generic_rest import GenericRestAdapter
 from sm_common.integrations.adapters.mocdoc import MocDocAdapter
@@ -48,11 +48,29 @@ def _check_bahmni_auth_scheme(scheme: str) -> None:
         raise ValueError(f"bahmni: unknown auth_scheme {scheme!r}; use basic")
 
 
-def build_bahmni_record_client(cfg: AdapterBuildConfig) -> Any:
-    """Build the Bahmni record client (BahmniRecordClient). Filled in by Plan 02 Task 3."""
+def _bahmni_parts(cfg: AdapterBuildConfig) -> tuple[BahmniHttp, BahmniConfig]:
+    creds: dict = cfg.credentials or {}  # type: ignore[type-arg]
+    # OpenMRS only does basic/session auth; "basic" and "session" are aliases.
+    _check_bahmni_auth_scheme(creds.get("auth_scheme", "basic"))
+    if not creds.get("username") or not creds.get("password"):
+        raise ConfigError("bahmni: credentials need username and password")
+    http = BahmniHttp(
+        cfg.base_url or creds.get("base_url", ""),
+        creds["username"],
+        creds["password"],
+        ca_bundle_pem=creds.get("ca_bundle_pem"),
+        verify_tls=creds.get("verify_tls", True),
+        allow_insecure_tls=creds.get("allow_insecure_tls", False),
+    )
+    return http, BahmniConfig.from_mapping(cfg.field_mapping)
+
+
+def build_bahmni_record_client(cfg: AdapterBuildConfig) -> BahmniRecordClient:
+    """Build the Bahmni patient record client (search / create / update)."""
     if cfg.vendor.lower() != "bahmni":
         raise ValueError(f"build_bahmni_record_client needs vendor 'bahmni', got {cfg.vendor!r}")
-    raise NotImplementedError("BahmniRecordClient is not implemented yet")
+    http, config = _bahmni_parts(cfg)
+    return BahmniRecordClient(http, config)
 
 
 def build_adapter(cfg: AdapterBuildConfig) -> HmsAdapter:
@@ -68,22 +86,9 @@ def build_adapter(cfg: AdapterBuildConfig) -> HmsAdapter:
     vendor = cfg.vendor.lower()
 
     if vendor == "bahmni":
-        # OpenMRS only does basic/session auth; "basic" and "session" are aliases.
-        _check_bahmni_auth_scheme(creds.get("auth_scheme", "basic"))
-        if not creds.get("username") or not creds.get("password"):
-            raise ConfigError("bahmni: credentials need username and password")
+        http, config = _bahmni_parts(cfg)
         return BahmniAdapter(
-            http=BahmniHttp(
-                base_url or creds.get("base_url", ""),
-                creds["username"],
-                creds["password"],
-                ca_bundle_pem=creds.get("ca_bundle_pem"),
-                verify_tls=creds.get("verify_tls", True),
-                allow_insecure_tls=creds.get("allow_insecure_tls", False),
-            ),
-            config=BahmniConfig.from_mapping(cfg.field_mapping),
-            hash_salt=hash_salt,
-            transport_key=transport_key,
+            http=http, config=config, hash_salt=hash_salt, transport_key=transport_key
         )
 
     if vendor == "mocdoc":

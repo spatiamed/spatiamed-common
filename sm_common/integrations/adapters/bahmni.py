@@ -12,7 +12,12 @@ import feedparser
 
 from sm_common.identity.dob import age_on
 from sm_common.integrations.adapters.bahmni_config import BahmniConfig
-from sm_common.integrations.adapters.bahmni_http import BahmniHttp, from_epoch_ms
+from sm_common.integrations.adapters.bahmni_http import BahmniHttp
+from sm_common.integrations.adapters.bahmni_parse import birth_date as _birth_date
+from sm_common.integrations.adapters.bahmni_parse import flag as _flag
+from sm_common.integrations.adapters.bahmni_parse import gender as _gender
+from sm_common.integrations.adapters.bahmni_record import BahmniRecordClient
+from sm_common.integrations.record_types import RecordAddress, RecordPatientInput
 from sm_common.integrations.canonical_types import (
     AdapterHealth,
     AppointmentWrite,
@@ -21,6 +26,8 @@ from sm_common.integrations.canonical_types import (
     CanonicalDoctor,
     CanonicalPatient,
     ExternalBooking,
+    PatientCreate,
+    PatientCreateResult,
     VisitCheckedIn,
     VisitConsultationStarted,
     VisitFinalized,
@@ -41,35 +48,6 @@ _REST = "/openmrs/ws/rest/v1"
 _SEARCH_PAGE_CAP = 10  # pages of bahmni/search/patient followed per query
 _ROSTER_PAGE = 100
 _ROSTER_PAGE_CAP = 50
-
-
-def _gender(raw: Any) -> Literal["M", "F", "O"] | None:
-    if not isinstance(raw, str) or not raw.strip():
-        return None
-    first = raw.strip()[0].upper()
-    return "M" if first == "M" else "F" if first == "F" else "O"
-
-
-def _birth_date(raw: Any) -> date | None:
-    """Epoch ms or ``YYYY-MM-DD[...]`` -> the calendar date Bahmni holds.
-
-    Bahmni encodes a birth date as the server-local midnight, so the UTC date of
-    the epoch value can be the day before. Rounding to the nearest UTC midnight
-    (add 12h, take the date) recovers the stored day for any server offset
-    within +-12h. Strings are already local, so their first 10 chars are the date.
-    """
-    if raw is None or isinstance(raw, bool):
-        return None
-    try:
-        if isinstance(raw, str) and not raw.strip().lstrip("-").isdigit():
-            return date.fromisoformat(raw.strip()[:10])
-        return (from_epoch_ms(raw) + timedelta(hours=12)).date()
-    except (ValueError, TypeError):
-        return None
-
-
-def _flag(v: Any) -> bool:
-    return v is True or (isinstance(v, str) and v.lower() == "true")
 
 
 class BahmniAdapter(HmsAdapter):
@@ -93,6 +71,7 @@ class BahmniAdapter(HmsAdapter):
         self._config = config
         self._hash_salt = hash_salt
         self._transport_key = transport_key
+        self._record = BahmniRecordClient(http, config)
 
     def _parse_atom_entry(self, entry: Any) -> CanonicalAppointment | None:
         content = getattr(entry, "content", [])
@@ -337,6 +316,23 @@ class BahmniAdapter(HmsAdapter):
             estimated=_flag(person.get("birthdateEstimated")),
             phone=phone if isinstance(phone, str) else None,
         )
+
+    async def create_patient(self, patient: PatientCreate) -> PatientCreateResult:
+        """Register a NEW patient via the record client (idempotent on the marker, if configured)."""
+        rec, created = await self._record.create_patient(
+            RecordPatientInput(
+                marker=patient.patient_marker,
+                given=" ".join(patient.given),
+                family=patient.family,
+                gender=patient.gender,
+                birth_date=patient.birth_date,
+                birth_date_estimated=False,
+                phone=patient.phone,
+                address=RecordAddress(),
+                exclude_ids=patient.exclude_ids,
+            )
+        )
+        return PatientCreateResult(resource_id=rec.uuid, mrn=rec.identifier or None, created=created)
 
     # ─── Roster ──────────────────────────────────────────────────────────────
 
