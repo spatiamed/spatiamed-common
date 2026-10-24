@@ -18,7 +18,6 @@ from sm_common.integrations.exceptions import (
     ConfigError,
     ConflictError,
     DocumentFilingFailed,
-    HmsAdapterError,
     NotFound,
     TransientError,
     VendorRejected,
@@ -796,7 +795,8 @@ class BahmniRecordClient:
                     "documents": [{"testUuid": concept, "image": uploaded_url, "obsDateTime": at}],
                 },
             )
-        except HmsAdapterError as exc:
+        except (TransientError, VendorRejected, WriteNotSupported, NotFound) as exc:
+            # AuthError and ConfigError propagate unchanged (health check / config handling).
             may_have_landed = isinstance(exc, TransientError) or exc.landed
             raise DocumentFilingFailed(
                 f"bahmni: document upload succeeded but filing failed: {exc}",

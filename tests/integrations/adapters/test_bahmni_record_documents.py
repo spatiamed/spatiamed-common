@@ -10,6 +10,7 @@ from sm_common.integrations.adapters.bahmni_config import BahmniConfig
 from sm_common.integrations.adapters.bahmni_http import BahmniHttp
 from sm_common.integrations.adapters.bahmni_record import BahmniRecordClient
 from sm_common.integrations.exceptions import (
+    AuthError,
     ConfigError,
     DocumentFilingFailed,
     VendorRejected,
@@ -167,3 +168,13 @@ async def test_empty_ids_rejected_before_upload() -> None:
     with pytest.raises(ValueError):
         await _client().upload_document(bad2)
     assert up.call_count == 0
+
+
+@respx.mock
+@pytest.mark.parametrize("status", [401, 403])
+async def test_step2_auth_failures_propagate_as_auth_error(status: int) -> None:
+    _login()
+    respx.post(UPLOAD).mock(return_value=httpx.Response(200, json={"url": "2026/f.pdf"}))
+    respx.post(FILE).mock(return_value=httpx.Response(status))
+    with pytest.raises(AuthError):
+        await _client().upload_document(_doc())
