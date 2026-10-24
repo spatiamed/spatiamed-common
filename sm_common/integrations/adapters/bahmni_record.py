@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from dataclasses import replace
@@ -23,6 +24,8 @@ from sm_common.integrations.exceptions import (
 from sm_common.integrations.record_types import (
     RecordAddress,
     RecordDiagnosis,
+    RecordDocumentInput,
+    RecordDocumentResult,
     RecordDrugOrder,
     RecordEncounterInput,
     RecordEncounterResult,
@@ -30,12 +33,23 @@ from sm_common.integrations.record_types import (
     RecordPatient,
     RecordPatientInput,
     RecordPatientPatch,
+    RecordService,
     RecordVisit,
     RecordVisitDetail,
 )
 
 _REST = "/openmrs/ws/rest/v1"
 _PROFILE_WRITE = f"{_REST}/bahmnicore/patientprofile"
+_SERVICES = f"{_REST}/appointmentService/all/default"
+_ALLERGY = "/openmrs/ws/fhir2/R4/AllergyIntolerance"
+_DOC_UPLOAD = f"{_REST}/bahmnicore/visitDocument/uploadDocument"
+_DOC_FILE = f"{_REST}/bahmnicore/visitDocument"
+# mime -> (format extension, Bahmni fileType)
+_DOC_MIME = {
+    "application/pdf": ("pdf", "pdf"),
+    "image/jpeg": ("jpeg", "image"),
+    "image/png": ("png", "image"),
+}
 _MARKER_PREFIX = "sm:"
 _VISIT_REP = "custom:(uuid,visitType,startDatetime,stopDatetime,location)"
 _ENCOUNTER_REP = (
@@ -613,3 +627,128 @@ class BahmniRecordClient:
         if not isinstance(uuid, str) or not uuid:
             raise VendorRejected("bahmni: encounter response had no encounterUuid", landed=True)
         return RecordEncounterResult(encounter_uuid=uuid, created=True)
+
+    # ─── Services, allergies, documents ──────────────────────────────────────
+
+    async def list_services(self) -> list[RecordService]:
+        resp = await self._http.request("GET", _SERVICES)
+        if resp.status_code == 404:
+            raise NotFound("bahmni: appointmentService route not found (HTTP 404)")
+        body = resp.json() if resp.content else None
+        if not isinstance(body, list):
+            raise VendorRejected("bahmni: appointment services response was not a list")
+        out: list[RecordService] = []
+        for row in body:
+            if not isinstance(row, dict):
+                continue
+            uuid, name = row.get("uuid"), row.get("name")
+            if not isinstance(uuid, str) or not uuid or not isinstance(name, str) or not name:
+                continue
+            mins = row.get("durationMins")
+            ok = isinstance(mins, int) and not isinstance(mins, bool)
+            out.append(RecordService(uuid, name, mins if ok else None))
+        return out
+
+    async def allergies(self, patient_uuid: str) -> list[str] | None:
+        """Allergen names, or None when the FHIR2 route is absent (HTTP 404).
+
+        Unverified, Task 9: standard OpenMRS FHIR2 shape, not yet proven live.
+        An entry with no readable name is reported as "Unspecified allergen"
+        rather than dropped, and a paged/truncated bundle raises.
+        """
+        resp = await self._http.request("GET", _ALLERGY, params={"patient": patient_uuid})
+        if resp.status_code == 404:
+            return None
+        body = resp.json() if resp.content else None
+        if not isinstance(body, dict) or body.get("resourceType") != "Bundle":
+            raise VendorRejected("bahmni: allergy response was not a FHIR Bundle")
+        links = body.get("link")
+        if isinstance(links, list) and any(
+            isinstance(x, dict) and x.get("relation") == "next" for x in links
+        ):
+            raise VendorRejected(
+                "bahmni: allergy bundle truncated (paged), refusing a partial list"
+            )
+        names: list[str] = []
+        for entry in body.get("entry") or []:
+            res = entry.get("resource") if isinstance(entry, dict) else None
+            if not isinstance(res, dict) or res.get("resourceType") != "AllergyIntolerance":
+                continue
+            names.append(self._allergen_name(res))
+        return names
+
+    @staticmethod
+    def _allergen_name(res: dict[str, Any]) -> str:
+        code = res.get("code")
+        if isinstance(code, dict):
+            text = code.get("text")
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+            for c in code.get("coding") or []:
+                disp = c.get("display") if isinstance(c, dict) else None
+                if isinstance(disp, str) and disp.strip():
+                    return disp.strip()
+        return "Unspecified allergen"
+
+    async def upload_document(self, d: RecordDocumentInput) -> RecordDocumentResult:
+        """Upload a file then attach it to a document encounter (two calls).
+
+        Unverified, Task 9: both payload shapes follow Bahmni's open-source
+        frontend and have not been proven live. Not idempotent: a retry after a
+        failure in the second call leaves an orphan uploaded file.
+        """
+        c = self._config
+        concept = c.document_type_concepts.get(d.doc_type)
+        if not concept:
+            raise ConfigError(f"bahmni: document_type_concepts missing {d.doc_type!r}")
+        if not c.document_visit_type_uuid or not c.document_encounter_type_uuid:
+            raise ConfigError(
+                "bahmni: document_visit_type_uuid and document_encounter_type_uuid are required"
+            )
+        kind = _DOC_MIME.get(d.mime)
+        if kind is None:
+            raise ValueError(f"bahmni: unsupported document mime {d.mime!r}")
+        if not d.content:
+            raise ValueError("bahmni: empty document content")
+        ext, file_type = kind
+        up = await self._http.request(
+            "POST",
+            _DOC_UPLOAD,
+            json={
+                "content": base64.b64encode(d.content).decode("ascii"),
+                "format": ext,
+                "patientUuid": d.patient_uuid,
+                "encounterTypeName": "Patient Document",
+                "fileType": file_type,
+            },
+        )
+        if up.status_code == 404:
+            raise WriteNotSupported("bahmni: uploadDocument route not found (HTTP 404)")
+        parsed = up.json() if up.content else None
+        url = parsed.get("url") if isinstance(parsed, dict) else None
+        if not isinstance(url, str) or not url:
+            raise VendorRejected("bahmni: document upload response had no url")
+        at = to_epoch_ms(d.taken_at)
+        resp = await self._http.request(
+            "POST",
+            _DOC_FILE,
+            json={
+                "patientUuid": d.patient_uuid,
+                "visitTypeUuid": c.document_visit_type_uuid,
+                "encounterTypeUuid": c.document_encounter_type_uuid,
+                "providerUuid": d.provider_uuid,
+                "locationUuid": c.location_uuid,
+                "encounterDateTime": at,
+                "documents": [{"testUuid": concept, "image": url, "obsDateTime": at}],
+            },
+        )
+        if resp.status_code == 404:
+            raise WriteNotSupported("bahmni: visitDocument route not found (HTTP 404)")
+        out = resp.json() if resp.content else None
+        visit = out.get("visitUuid") if isinstance(out, dict) else None
+        enc = out.get("encounterUuid") if isinstance(out, dict) else None
+        if not isinstance(visit, str) or not visit or not isinstance(enc, str) or not enc:
+            raise VendorRejected(
+                "bahmni: document filing response had no visitUuid/encounterUuid", landed=True
+            )
+        return RecordDocumentResult(visit_uuid=visit, encounter_uuid=enc, url=url)

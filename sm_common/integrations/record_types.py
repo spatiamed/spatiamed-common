@@ -132,3 +132,27 @@ class RecordEncounterSummary:
 class RecordVisitDetail:
     visit: RecordVisit
     encounters: list[RecordEncounterSummary]
+
+
+@dataclass(frozen=True)
+class RecordService:
+    uuid: str
+    name: str
+    duration_min: int | None
+
+
+@dataclass(frozen=True)
+class RecordDocumentInput:
+    patient_uuid: str
+    content: bytes
+    mime: Literal["application/pdf", "image/jpeg", "image/png"]
+    doc_type: str
+    provider_uuid: str
+    taken_at: datetime
+
+
+@dataclass(frozen=True)
+class RecordDocumentResult:
+    visit_uuid: str
+    encounter_uuid: str
+    url: str
