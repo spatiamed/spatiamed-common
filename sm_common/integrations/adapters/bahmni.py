@@ -36,6 +36,7 @@ from sm_common.integrations.canonical_types import (
 from sm_common.integrations.exceptions import (
     AuthError,
     ConflictError,
+    NotFound,
     TransientError,
     VendorRejected,
     WriteNotSupported,
@@ -43,6 +44,12 @@ from sm_common.integrations.exceptions import (
 from sm_common.integrations.hms_adapter import HmsAdapter
 from sm_common.phone import hash_phone_for_lookup, phone_search_variants
 
+BahmniStatus = Literal["Scheduled", "CheckedIn", "Completed", "Cancelled", "Missed"]
+_FINAL_STATUS: dict[str, BahmniStatus] = {
+    "completed": "Completed",
+    "no_show": "Missed",
+    "cancelled_after_arrival": "Cancelled",
+}
 _REST = "/openmrs/ws/rest/v1"
 _SEARCH_CAP = 50
 _TERMINAL_STATUSES = frozenset({"Cancelled", "Missed"})
@@ -503,44 +510,56 @@ class BahmniAdapter(HmsAdapter):
             created=True,
         )
 
+    async def _set_status(
+        self, appointment_uuid: str, to_status: BahmniStatus, comments: str | None = None
+    ) -> str:
+        """Move an appointment to ``to_status``; idempotent on the current status.
+
+        Bahmni answers 500 to a repeat change, so the current status is read first.
+        Raises ``NotFound`` on 404, ``TransientError`` on 5xx.
+        """
+        current = await self._http.request("GET", f"{_REST}/appointments/{appointment_uuid}")
+        if current.status_code == 404:
+            raise NotFound(f"bahmni: appointment {appointment_uuid} not found (HTTP 404)")
+        data = current.json()
+        status = str(data.get("status")) if isinstance(data, dict) else ""
+        if status == to_status:
+            return status
+        body: dict[str, Any] = {
+            "toStatus": to_status,
+            "onDate": None,
+            "timeZone": "Asia/Kolkata",
+        }
+        if comments:
+            body["comments"] = comments
+        resp = await self._http.request(
+            "POST", f"{_REST}/appointments/{appointment_uuid}/status-change", json=body
+        )
+        if resp.status_code == 404:
+            raise NotFound(f"bahmni: appointment {appointment_uuid} not found (HTTP 404)")
+        return to_status
+
     async def cancel(self, hms_booking_id: str, reason: str) -> CancelResult:
         try:
-            resp = await self._http.request(
-                "POST",
-                f"{_REST}/appointment/{hms_booking_id}/changeStatus",
-                json={"toStatus": "Cancelled", "onDate": datetime.now(timezone.utc).isoformat()},
-            )
+            await self._set_status(hms_booking_id, "Cancelled", reason)
+        except NotFound:
+            return CancelResult(status="NOT_FOUND")
         except TransientError as exc:
             return CancelResult(status="FAILED", error_detail=str(exc))
-        if resp.status_code == 404:
-            return CancelResult(status="NOT_FOUND")
         return CancelResult(status="SUCCESS")
 
     async def push_visit_event(
         self,
         event: VisitCheckedIn | VisitConsultationStarted | VisitFinalized,
     ) -> None:
+        if isinstance(event, VisitConsultationStarted):
+            return  # Bahmni has no in-consultation status
+        to_status: BahmniStatus
         if isinstance(event, VisitCheckedIn):
-            payload = {"status": "CheckedIn", "idempotencyKey": str(event.event_uuid)}
-        elif isinstance(event, VisitConsultationStarted):
-            payload = {"status": "InConsultation", "idempotencyKey": str(event.event_uuid)}
+            to_status = "CheckedIn"
         else:
-            status_map = {
-                "completed": "Completed",
-                "no_show": "Missed",
-                "cancelled_after_arrival": "Cancelled",
-            }
-            payload = {
-                "status": status_map.get(event.final_status, "Completed"),
-                "idempotencyKey": str(event.event_uuid),
-            }
-        resp = await self._http.request(
-            "POST",
-            f"{_REST}/appointment/{event.appointment_id}/changeStatus",
-            json=payload,
-            expect=(200, 201, 204),
-        )
-        self._require_found(resp, "appointment")
+            to_status = _FINAL_STATUS[event.final_status]
+        await self._set_status(event.appointment_id, to_status)
 
     async def health_check(self) -> AdapterHealth:
         start = time.monotonic()

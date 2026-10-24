@@ -38,3 +38,7 @@ class SearchNotSupported(HmsAdapterError):  # noqa: N818
 
 class ConfigError(HmsAdapterError):
     """The integration config is missing or inconsistent (e.g. no appointment service for a provider). Terminal."""
+
+
+class NotFound(HmsAdapterError):  # noqa: N818
+    """The HMS has no such record (HTTP 404). Terminal."""
