@@ -7,6 +7,7 @@ the per-service factories in QueueCare and hms-connector-agent.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from sm_common.integrations.adapters.bahmni import BahmniAdapter
 from sm_common.integrations.adapters.fhir_r4 import FhirR4Adapter
@@ -37,6 +38,20 @@ def _with_cache(auth_cfg: dict, cache: TokenCache | None, slot: str) -> dict:  #
     return {**auth_cfg, "_token_cache": cache, "_token_slot": slot}
 
 
+def _check_bahmni_auth_scheme(scheme: str) -> None:
+    if scheme == "api_key":
+        raise ValueError("bahmni: api_key auth is not supported by OpenMRS; use basic")
+    if scheme not in ("basic", "session"):
+        raise ValueError(f"bahmni: unknown auth_scheme {scheme!r}; use basic")
+
+
+def build_bahmni_record_client(cfg: AdapterBuildConfig) -> Any:
+    """Build the Bahmni record client (BahmniRecordClient). Filled in by Plan 02 Task 3."""
+    if cfg.vendor.lower() != "bahmni":
+        raise ValueError(f"build_bahmni_record_client needs vendor 'bahmni', got {cfg.vendor!r}")
+    raise NotImplementedError("BahmniRecordClient is not implemented yet")
+
+
 def build_adapter(cfg: AdapterBuildConfig) -> HmsAdapter:
     """Return an initialised HmsAdapter for the given config.
 
@@ -50,10 +65,12 @@ def build_adapter(cfg: AdapterBuildConfig) -> HmsAdapter:
     vendor = cfg.vendor.lower()
 
     if vendor == "bahmni":
+        _check_bahmni_auth_scheme(creds.get("auth_scheme", "basic"))
         return BahmniAdapter(
             base_url=base_url or creds.get("base_url", ""),
-            auth_scheme=creds.get("auth_scheme", "api_key"),
-            api_key=creds.get("api_key", ""),
+            # OpenMRS only does basic/session auth; "basic" and "session" are aliases.
+            auth_scheme="session",
+            api_key="",
             username=creds.get("username", ""),
             password=creds.get("password", ""),
             hash_salt=hash_salt,

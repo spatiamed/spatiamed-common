@@ -2,7 +2,11 @@ import pytest
 
 from sm_common.integrations.adapters.fhir_r4 import FhirR4Adapter
 from sm_common.integrations.adapters.generic_rest import GenericRestAdapter
-from sm_common.integrations.build_adapter import AdapterBuildConfig, build_adapter
+from sm_common.integrations.build_adapter import (
+    AdapterBuildConfig,
+    build_adapter,
+    build_bahmni_record_client,
+)
 
 
 def _cfg(**kw):
@@ -112,3 +116,33 @@ def test_no_token_cache_leaves_auth_cfg_unchanged():
         _cfg(credentials={"auth_scheme": "oauth2_client_credentials", "token_url": "t"})
     )
     assert "_token_cache" not in a._cfg
+
+
+def _bahmni_cfg(creds: dict) -> AdapterBuildConfig:  # type: ignore[type-arg]
+    return AdapterBuildConfig(
+        vendor="bahmni",
+        base_url="https://bahmni.example.test",
+        credentials=creds,
+        field_mapping=None,
+    )
+
+
+def test_api_key_scheme_rejected():
+    with pytest.raises(ValueError, match="api_key auth is not supported by OpenMRS; use basic"):
+        build_adapter(_bahmni_cfg({"auth_scheme": "api_key", "api_key": "k"}))
+
+
+@pytest.mark.parametrize("creds", [{}, {"auth_scheme": "basic"}, {"auth_scheme": "session"}])
+def test_basic_default_and_session_alias_accepted(creds):
+    a = build_adapter(_bahmni_cfg({**creds, "username": "u", "password": "p"}))
+    assert a.vendor_name == "bahmni"
+
+
+def test_unknown_bahmni_scheme_rejected():
+    with pytest.raises(ValueError, match="unknown auth_scheme"):
+        build_adapter(_bahmni_cfg({"auth_scheme": "bearer"}))
+
+
+def test_bahmni_record_client_requires_bahmni_vendor():
+    with pytest.raises(ValueError, match="vendor 'bahmni'"):
+        build_bahmni_record_client(_cfg(vendor="fhir_r4"))

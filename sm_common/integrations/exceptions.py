@@ -34,3 +34,7 @@ class VendorRejected(HmsAdapterError):  # noqa: N818
 
 class SearchNotSupported(HmsAdapterError):  # noqa: N818
     """This vendor cannot run the requested patient search (e.g. name + DOB). Terminal."""
+
+
+class ConfigError(HmsAdapterError):
+    """The integration config is missing or inconsistent (e.g. no appointment service for a provider). Terminal."""
