@@ -292,9 +292,9 @@ every uuid-less write fails with a bare HTTP 500 ("More than one encounter match
     a 1 to 2 s clock skew is enough to trigger it. `write_encounter` and `write_disposition` now check the
     visit's range (read in the same call as the marker lookup) and raise this before any write; a 500 on a
     visit closed meanwhile is diagnosed the same way.
-  - `EncounterMatchAmbiguous` (`code="encounter_match_ambiguous"`): a uuid-less write (`admit`,
-    `transfer`, `discharge`) got a 500 while the visit holds two or more unvoided encounters of that type
-    by the same provider. Any other 500 stays `TransientError`.
+  - `EncounterMatchAmbiguous` (`code="encounter_match_ambiguous"`): a uuid-less `bahmniencounter` write
+    (the ADMISSION of `admit` into an open visit, and `transfer`) got a 500 while the visit holds two or
+    more unvoided encounters of that type by the same provider. Any other 500 stays `TransientError`.
   - `HmsAdapterError.code` is the new class attribute (`None` on the general types), and
     `TransientError.status_code` carries the HTTP status (`None` for a transport failure).
 - **`get_visit` drug names are read per drug order.** The generic encounter order rep no longer names
