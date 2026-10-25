@@ -82,6 +82,9 @@ def _results(body: Any) -> list[dict[str, Any]]:
 def _named(c: httpx.Client, resource: str, name: str) -> str | None:
     """Exact (case-insensitive) display-name match among ``?q=`` hits."""
     rows = _results(_ok(c.get(f"{R}/{resource}", params={"q": name, "v": "custom:(uuid,display)"})))
+    if not rows:
+        # Some resources (e.g. conceptdatatype) ignore q=; list them all instead.
+        rows = _results(_ok(c.get(f"{R}/{resource}", params={"v": "custom:(uuid,display)"})))
     for r in rows:
         if str(r.get("display") or "").strip().lower() == name.lower():
             return str(r["uuid"])

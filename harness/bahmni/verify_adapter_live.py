@@ -23,6 +23,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
@@ -194,13 +195,11 @@ async def search_paging(x: Ctx) -> tuple[bool, str]:
     u1 = {h["uuid"] for h in page1}
     total = p0.get("totalCount")
     via_adapter = await x.adapter.search_patients(phone=x.h["paging_phone"])
-    ok = (
-        isinstance(total, int)
-        and total > len(page0)
-        and bool(u1)
-        and not (u0 & u1)
-        and len(via_adapter) >= size + 2
-    )
+    # totalCount is NOT a total on Bahmni (it equals the rows returned); what matters is
+    # that startIndex pages and that the adapter walks every page.
+    ok = bool(u1) and not (u0 & u1) and len(via_adapter) >= size + 2
+    if isinstance(total, int):
+        x.state["totalcount_is_page_count"] = total == len(page0)
     return ok, (
         f"page_size={size} probe_total={probe.get('totalCount')} household={size + 2} "
         f"p0={len(page0)} p1={len(page1)} totalCount={total} overlap={len(u0 & u1)} "
@@ -329,6 +328,15 @@ async def feed_page_order(x: Ctx) -> tuple[bool, str]:
     resp = await x.http.request("GET", FEED, expect=(200,))
     x.sample("feed_recent", resp.text)
     root = ET.fromstring(resp.text)
+    for link in root.findall(f"{ATOM}link"):
+        # The recent page can hold a single entry right after a rollover: read the
+        # previous (full) archive page instead.
+        if len(root.findall(f"{ATOM}entry")) < 2 and link.get("rel") == "prev-archive":
+            href = urlsplit(link.get("href") or "")
+            prev = await x.http.request("GET", href.path + (f"?{href.query}" if href.query else ""))
+            x.sample("feed_prev_archive", prev.text)
+            root = ET.fromstring(prev.text)
+            break
     updated = [(e.findtext(f"{ATOM}updated") or "").strip() for e in root.findall(f"{ATOM}entry")]
     if len(updated) < 2:
         return False, f"only {len(updated)} entries on the recent page"
@@ -444,9 +452,12 @@ async def start_visit(x: Ctx) -> tuple[bool, str]:
     )
 
 
+RUN = uuid4().hex[:6]
+# Per-run names: Bahmni merges notes into one encounter per visit/provider/session and
+# refuses a diagnosis or active drug it already holds there.
 DRUGS = (
-    RecordDrugOrder("LT-ADAPTER Paracetamol 500", "1 tab", "TDS", 5, "after food"),
-    RecordDrugOrder("LT-ADAPTER Cetirizine 10", "1 tab", "OD", 3, "at night"),
+    RecordDrugOrder(f"LT-ADAPTER Paracetamol 500 {RUN}", "1 tab", "TDS", 5, "after food"),
+    RecordDrugOrder(f"LT-ADAPTER Cetirizine 10 {RUN}", "1 tab", "OD", 3, "at night"),
 )
 
 
@@ -459,9 +470,12 @@ def _encounter(x: Ctx, note_id: Any) -> RecordEncounterInput:
         patient_uuid=x.h["patient_uuid"],
         visit_uuid=x.state["visit"],
         provider_uuid=x.h["provider_uuid"],
-        encounter_at=datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=1),
+        # Bahmni rejects an encounter dated before its visit started.
+        encounter_at=datetime.now(UTC).replace(microsecond=0),
         obs=obs,
-        diagnoses=[RecordDiagnosis(code=ICD, title="LT-ADAPTER synthetic fever", primary=True)],
+        diagnoses=[
+            RecordDiagnosis(code=ICD, title=f"LT-ADAPTER fever {note_id.hex[:6]}", primary=True)
+        ],
         drug_orders=list(DRUGS),
     )
 
