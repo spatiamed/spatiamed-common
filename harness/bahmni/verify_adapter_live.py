@@ -154,8 +154,9 @@ async def hit_fields(x: Ctx) -> tuple[bool, str]:
     bd = hit.get("birthDate")
     epoch = isinstance(bd, int) and not isinstance(bd, bool)
     types = {k: type(hit.get(k)).__name__ for k in want}
-    # Search hits do not say whether the DOB is estimated: both clients must report
-    # UNKNOWN there; the profile read is authoritative (the seed DOB is exact).
+    # Search hits do not say whether the DOB is estimated: the adapter reports "year"
+    # (coarsest real precision), the record client None; the profile read is
+    # authoritative (the seed DOB is exact).
     found = await x.adapter.search_patients(phone=x.h["patient_phone"])
     a_hit = next((p for p in found if p.resource_id == x.h["patient_uuid"]), None)
     r_hits, _ = await x.record.search(phone=x.h["patient_phone"])
@@ -165,7 +166,7 @@ async def hit_fields(x: Ctx) -> tuple[bool, str]:
     unknown_on_search = (
         a_hit is not None
         and a_hit.birth_date is not None
-        and a_hit.birth_date_precision is None
+        and a_hit.birth_date_precision == "year"
         and r_hit is not None
         and r_hit.birth_date_estimated is None
     )
@@ -178,7 +179,7 @@ async def hit_fields(x: Ctx) -> tuple[bool, str]:
     ok = not missing and epoch and unknown_on_search and profile_real
     return ok, (
         f"missing={missing} types={types} raw_has_birthdateEstimated={'birthdateEstimated' in hit} "
-        f"search_precision_unknown={unknown_on_search} profile_precision_real={profile_real}"
+        f"search_dob_year_record_none={unknown_on_search} profile_precision_real={profile_real}"
     )
 
 

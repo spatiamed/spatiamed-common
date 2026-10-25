@@ -269,12 +269,11 @@ class BahmniAdapter(HmsAdapter):
         family: str,
         gender: Any,
         birth: Any,
-        estimated: bool | None,
+        estimated: bool,
         phone: Any,
     ) -> CanonicalPatient:
-        """``estimated=None``: the source cannot say, so precision is unknown (None)."""
         dob = _birth_date(birth)
-        precision = None if estimated is None else ("year" if estimated else "exact")
+        precision = "year" if estimated else "exact"
         return CanonicalPatient(
             mrn=mrn,
             abha_id=None,
@@ -305,9 +304,11 @@ class BahmniAdapter(HmsAdapter):
             family=str(hit.get("familyName") or ""),
             gender=hit.get("gender"),
             birth=hit.get("birthDate"),
-            # Search hits carry no birthdateEstimated: precision is unknown, never
-            # "exact". get_patient (patientprofile) is the authoritative source.
-            estimated=None,
+            # Search hits carry no birthdateEstimated. Report "year", the coarsest real
+            # precision: never "exact" (an estimated DOB must not falsely disagree), yet
+            # not None, which would switch off QueueCare's DOB-disagreement guard (a
+            # different year still disagrees). get_patient (patientprofile) is exact.
+            estimated=True,
             phone=phone,
         )
 

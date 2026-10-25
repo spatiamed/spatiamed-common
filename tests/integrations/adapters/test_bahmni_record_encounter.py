@@ -38,6 +38,7 @@ def _client(**over: object) -> BahmniRecordClient:
         "consultation_encounter_type_uuid": "et-consult",
         "note_marker_concept_uuid": "c-marker",
         "drug_other_concept_uuid": "c-drug-other",
+        "drug_quantity_units": "Tablet",
         "concept_map": {"chief_complaint": "c-cc", "vitals_pulse": "c-pulse"},
     }
     base.update(over)
@@ -278,7 +279,7 @@ async def test_write_encounter_payload():
                     # Bahmni NPEs without asNeeded/quantity; quantityUnits must be a concept.
                     "asNeeded": False,
                     "quantity": 1,
-                    "quantityUnits": "Unit",
+                    "quantityUnits": "Tablet",  # the configured name is what is sent
                 },
                 "duration": 5,
                 "durationUnits": "Days",
@@ -371,3 +372,22 @@ async def test_write_encounter_requires_marker_concept_and_types():
     with pytest.raises(ConfigError):
         await _client(drug_other_concept_uuid="").write_encounter(_input())
     assert post.call_count == 0
+
+
+@respx.mock
+async def test_drug_orders_without_quantity_units_raise_before_any_call():
+    _login()
+    lookup = _no_existing()
+    post = respx.post(WRITE).mock(return_value=httpx.Response(200, json={"encounterUuid": "e-9"}))
+    with pytest.raises(ConfigError, match="drug_quantity_units"):
+        await _client(drug_quantity_units="").write_encounter(_input())
+    assert post.call_count == 0 and lookup.call_count == 0
+
+
+@respx.mock
+async def test_no_drug_orders_needs_no_quantity_units():
+    _login()
+    _no_existing()
+    post = respx.post(WRITE).mock(return_value=httpx.Response(200, json={"encounterUuid": "e-9"}))
+    res = await _client(drug_quantity_units="").write_encounter(_input(drug_orders=[]))
+    assert res.created and post.call_count == 1

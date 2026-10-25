@@ -283,6 +283,10 @@ class BahmniRecordClient:
 
         A phone already held by other patients is fine (households share numbers);
         idempotency comes from the marker, never from phone uniqueness.
+
+        An idempotent hit (``created=False``) returns the patient as the marker
+        SEARCH returned it, so ``birth_date_estimated`` is ``None`` (search hits do
+        not carry it); call ``get_patient`` for the profile value.
         """
         c = self._config
         use_marker = self._marker_configured()
@@ -620,6 +624,8 @@ class BahmniRecordClient:
             raise ConfigError("bahmni: consultation_encounter_type_uuid is required")
         if e.drug_orders and not c.drug_other_concept_uuid:
             raise ConfigError("bahmni: drug_other_concept_uuid is required for drug orders")
+        if e.drug_orders and not c.drug_quantity_units:
+            raise ConfigError("bahmni: drug_quantity_units is required for drug orders")
         observations: list[dict[str, Any]] = []
         for o in e.obs:
             concept = c.concept_map.get(o.key)

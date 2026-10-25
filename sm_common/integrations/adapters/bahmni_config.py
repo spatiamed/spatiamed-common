@@ -47,7 +47,8 @@ class BahmniConfig:
     drug_other_concept_uuid: str = ""
     # Dispensing-unit concept NAME sent as quantityUnits on drug orders (Bahmni NPEs
     # without asNeeded/quantity, and validates quantityUnits against its concepts).
-    drug_quantity_units: str = "Unit"
+    # Install-specific: required for drug orders, no default.
+    drug_quantity_units: str = ""
     # our doc_type -> Bahmni concept uuid
     document_type_concepts: Mapping[str, str] = field(default_factory=dict)
     system_provider_identifiers: frozenset[str] = frozenset(

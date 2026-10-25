@@ -9,7 +9,7 @@ Re-running changes nothing. Synthetic data only.
 
 Env (required): BAHMNI_BASE_URL, BAHMNI_USER, BAHMNI_PASS, BAHMNI_CONFIG_JSON (output path).
 Optional: BAHMNI_CA_PEM (PEM path), BAHMNI_INSECURE_TLS=1 (throwaway test box only),
-BAHMNI_LOCATION_NAME (default "OPD-1").
+BAHMNI_LOCATION_NAME (default "OPD-1"), BAHMNI_DRUG_QUANTITY_UNITS (default "Unit").
 Exit: 0 written, 1 a required Bahmni object could not be resolved, 2 bad env.
 """
 
@@ -39,6 +39,8 @@ NOTE_MARKER_CONCEPT = "SM Note Id"
 VITALS = {"vitals_pulse": "Pulse"}
 TEXT_NOTE_CANDIDATES = ("Consultation Note", "Chief Complaint Notes")
 DOC_TYPE = "lab_report"
+# quantityUnits concept name for drug orders; must be in the install's dosing-units set.
+DRUG_QUANTITY_UNITS = os.environ.get("BAHMNI_DRUG_QUANTITY_UNITS", "Unit")
 DOC_CONCEPT_CANDIDATES = ("Patient Document", "Document", "Lab Report", "Radiology")
 
 
@@ -293,6 +295,7 @@ def build_config(c: httpx.Client) -> dict[str, Any]:
             "note_marker_concept_uuid": ensure_text_concept(c, NOTE_MARKER_CONCEPT),
             "concept_map": concept_map,
             "drug_other_concept_uuid": drug_other_concept(c),
+            "drug_quantity_units": DRUG_QUANTITY_UNITS,
             "document_type_concepts": {DOC_TYPE: doc_concept},
         },
         "harness": {

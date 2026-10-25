@@ -65,8 +65,8 @@ async def test_search_by_phone_returns_all_household_hits():
     assert first.name_token == "Asha Verma"
     assert first.gender == "F"
     assert first.birth_date == date(1990, 5, 15)  # IST-midnight epoch is still the 15th
-    # Search hits carry no birthdateEstimated: precision is unknown, never "exact".
-    assert first.birth_date_precision is None
+    # Search hits carry no birthdateEstimated: coarsest real precision, never "exact".
+    assert first.birth_date_precision == "year"
 
 
 @respx.mock
@@ -284,10 +284,31 @@ async def test_400_on_search_is_vendor_rejected():
 
 
 @respx.mock
-async def test_search_hit_precision_unknown_even_if_hit_claims_a_flag():
+async def test_search_hit_precision_is_year_even_if_hit_claims_a_flag():
+    # "year" keeps QueueCare's DOB-disagreement guard on (a different year still
+    # disagrees) without ever calling an estimated DOB exact.
     _login()
     body = _fx("search_patient_two_hits.json")
     body["pageOfResults"][0]["birthdateEstimated"] = False
     respx.get(SEARCH).mock(return_value=httpx.Response(200, json=body))
     hits = await _adapter().search_patients(mrn="GAN")
-    assert hits[0].birth_date is not None and hits[0].birth_date_precision is None
+    assert hits[0].birth_date is not None and hits[0].birth_date_precision == "year"
+
+
+@respx.mock
+async def test_search_stops_at_page_cap_when_pages_stay_full():
+    from sm_common.integrations.adapters.bahmni import _SEARCH_PAGE_CAP
+
+    _login()
+    hit = _fx("search_patient_two_hits.json")["pageOfResults"][0]
+    calls = {"n": 0}
+
+    def full_page(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        rows = [{**hit, "uuid": f"u-{calls['n']}-{i}"} for i in range(50)]
+        return httpx.Response(200, json={"totalCount": 50, "pageOfResults": rows})
+
+    route = respx.get(SEARCH).mock(side_effect=full_page)
+    hits = await _adapter().search_patients(mrn="GAN")
+    assert route.call_count == _SEARCH_PAGE_CAP
+    assert len(hits) == 50 * _SEARCH_PAGE_CAP
