@@ -61,6 +61,7 @@ _MARKER = re.compile(r"^sm:\S+\s*")
 log = logging.getLogger(__name__)
 _TERMINAL_STATUSES = frozenset({"Cancelled", "Missed"})
 _SEARCH_PAGE_CAP = 10  # pages of bahmni/search/patient followed per query
+_SEARCH_PAGE_ROWS = 50  # rows Bahmni returns per bahmni/search/patient page
 _ROSTER_PAGE = 100
 _ROSTER_PAGE_CAP = 50
 
@@ -310,6 +311,8 @@ class BahmniAdapter(HmsAdapter):
         params = {
             "q": "",
             "patientAttributes": self._config.phone_attribute_name,
+            # Without this Bahmni returns customAttribute "" and the phone is lost.
+            "patientSearchResultsConfig": self._config.phone_attribute_name,
             "s": "byIdOrNameOrVillage",
             **query,
         }
@@ -332,8 +335,10 @@ class BahmniAdapter(HmsAdapter):
                 p = self._from_search_hit(hit) if isinstance(hit, dict) else None
                 if p is not None:
                     found.append(p)
+            # Bahmni caps totalCount at the page it returned (50 rows), so a full page
+            # means "maybe more": only a short page, with totalCount reached, ends the walk.
             total = body.get("totalCount")
-            if not isinstance(total, int) or seen >= total:
+            if len(page) < _SEARCH_PAGE_ROWS and (not isinstance(total, int) or seen >= total):
                 break
         return found
 

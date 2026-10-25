@@ -40,3 +40,12 @@ def test_service_for_falls_back_then_raises():
     bare = BahmniConfig.from_mapping(REQ)
     with pytest.raises(ConfigError):
         bare.service_for("p1")
+
+
+def test_drug_quantity_units_defaults_and_overrides():
+    req = {"location_uuid": "L", "identifier_type_uuid": "T", "identifier_source_uuid": "S"}
+    assert BahmniConfig.from_mapping(req).drug_quantity_units == "Unit"
+    assert (
+        BahmniConfig.from_mapping({**req, "drug_quantity_units": "Tablet"}).drug_quantity_units
+        == "Tablet"
+    )

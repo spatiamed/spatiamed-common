@@ -9,7 +9,8 @@ import respx
 from sm_common.integrations.adapters.bahmni_config import BahmniConfig
 from sm_common.integrations.adapters.bahmni_http import BahmniHttp
 from sm_common.integrations.adapters.bahmni_record import BahmniRecordClient
-from sm_common.integrations.exceptions import ConfigError, ConflictError, NotFound
+from sm_common.integrations.adapters.bahmni_record import _ENCOUNTER_REP, _MARKER_REP
+from sm_common.integrations.exceptions import ConfigError, NotFound, VendorRejected
 from sm_common.integrations.record_types import (
     RecordDiagnosis,
     RecordDrugOrder,
@@ -84,8 +85,19 @@ def _input(**over: object) -> RecordEncounterInput:
     return RecordEncounterInput(**base)  # type: ignore[arg-type]
 
 
+def _encounters(rows: list, visit: dict | None = None) -> respx.Route:  # type: ignore[type-arg]
+    """GET visit/v-1: the encounter-bearing rep returns rows, any other rep the visit."""
+
+    def answer(req: httpx.Request) -> httpx.Response:
+        if "encounters:(" in req.url.params.get("v", ""):
+            return httpx.Response(200, json={"uuid": "v-1", "encounters": rows})
+        return httpx.Response(200, json=visit or _visit())
+
+    return respx.get(f"{VISIT}/v-1").mock(side_effect=answer)
+
+
 def _no_existing() -> respx.Route:
-    return respx.get(ENC_LIST).mock(return_value=httpx.Response(200, json={"results": []}))
+    return _encounters([])
 
 
 # ─── visits ──────────────────────────────────────────────────────────────────
@@ -168,7 +180,7 @@ ENC_ROW = {
     "uuid": "e-1",
     "encounterType": {"display": "Consultation"},
     "encounterDatetime": "2026-10-01T10:00:00.000+0530",
-    "encounterProviders": [{"provider": {"display": "Dr Rao"}}],
+    "encounterProviders": [{"display": "Dr Rao: Clinician"}],
     "obs": [
         {"concept": {"uuid": "c-cc", "display": "Chief Complaint"}, "value": "Cough"},
         {
@@ -191,10 +203,11 @@ ENC_ROW = {
 @respx.mock
 async def test_get_visit_maps_encounters():
     _login()
-    respx.get(f"{VISIT}/v-1").mock(return_value=httpx.Response(200, json=_visit()))
-    enc = respx.get(ENC_LIST).mock(return_value=httpx.Response(200, json={"results": [ENC_ROW]}))
+    enc = _encounters([ENC_ROW])
     detail = await _client().get_visit("v-1")
-    assert enc.calls[0].request.url.params["visit"] == "v-1"
+    reps = [c.request.url.params["v"] for c in enc.calls]
+    assert f"custom:(uuid,encounters:({_ENCOUNTER_REP[8:-1]}))" in reps
+    assert not respx.get(ENC_LIST).called  # encounter?visit= without patient 500s
     assert detail is not None and detail.visit.uuid == "v-1"
     e = detail.encounters[0]
     assert (e.uuid, e.encounter_type, e.provider) == ("e-1", "Consultation", "Dr Rao")
@@ -206,8 +219,7 @@ async def test_get_visit_maps_encounters():
 @respx.mock
 async def test_get_visit_returns_diagnosis_comments():
     _login()
-    respx.get(f"{VISIT}/v-1").mock(return_value=httpx.Response(200, json=_visit()))
-    respx.get(ENC_LIST).mock(return_value=httpx.Response(200, json={"results": [ENC_ROW]}))
+    _encounters([ENC_ROW])
     detail = await _client().get_visit("v-1")
     assert detail is not None
     assert detail.encounters[0].diagnoses == [("Pneumonia", "ICD-11 CA40.Z")]
@@ -230,7 +242,9 @@ async def test_write_encounter_payload():
     post = respx.post(WRITE).mock(return_value=httpx.Response(200, json={"encounterUuid": "e-9"}))
     res = await _client().write_encounter(_input())
     assert (res.encounter_uuid, res.created) == ("e-9", True)
-    assert lookup.calls[0].request.url.params["visit"] == "v-1"
+    assert lookup.calls[0].request.url.params["v"] == (
+        f"custom:(uuid,encounters:({_MARKER_REP[8:-1]}))"
+    )
     assert json.loads(post.calls[0].request.content) == {
         "patientUuid": "p-1",
         "visitUuid": "v-1",
@@ -260,7 +274,11 @@ async def test_write_encounter_payload():
                 "dosingInstructions": {
                     "administrationInstructions": json.dumps(
                         {"dose": "1 tab", "frequency": "TDS", "instructions": "after food"}
-                    )
+                    ),
+                    # Bahmni NPEs without asNeeded/quantity; quantityUnits must be a concept.
+                    "asNeeded": False,
+                    "quantity": 1,
+                    "quantityUnits": "Unit",
                 },
                 "duration": 5,
                 "durationUnits": "Days",
@@ -295,7 +313,7 @@ async def test_write_encounter_idempotent_on_marker():
             {"concept": {"uuid": "c-marker"}, "value": str(NOTE)},
         ],
     }
-    respx.get(ENC_LIST).mock(return_value=httpx.Response(200, json={"results": [row]}))
+    _encounters([row])
     post = respx.post(WRITE).mock(return_value=httpx.Response(200, json={"encounterUuid": "x"}))
     res = await _client().write_encounter(_input())
     assert (res.encounter_uuid, res.created) == ("e-old", False)
@@ -306,7 +324,7 @@ async def test_write_encounter_idempotent_on_marker():
 async def test_write_encounter_other_note_marker_does_not_match():
     _login()
     row = {"uuid": "e-old", "obs": [{"concept": {"uuid": "c-marker"}, "value": "someone-else"}]}
-    respx.get(ENC_LIST).mock(return_value=httpx.Response(200, json={"results": [row]}))
+    _encounters([row])
     post = respx.post(WRITE).mock(return_value=httpx.Response(200, json={"encounterUuid": "e-9"}))
     res = await _client().write_encounter(_input())
     assert res.created is True and post.call_count == 1
@@ -316,17 +334,20 @@ async def test_write_encounter_other_note_marker_does_not_match():
 async def test_write_encounter_marker_lookup_fails_closed():
     _login()
     post = respx.post(WRITE).mock(return_value=httpx.Response(200, json={"encounterUuid": "e-9"}))
-    respx.get(ENC_LIST).mock(return_value=httpx.Response(404))
+    respx.get(f"{VISIT}/v-1").mock(return_value=httpx.Response(404))
     with pytest.raises(NotFound):
         await _client().write_encounter(_input())
-    respx.get(ENC_LIST).mock(
-        return_value=httpx.Response(
-            200, json={"results": [], "links": [{"rel": "next", "uri": "https://x/next"}]}
-        )
-    )
-    with pytest.raises(ConflictError):
+    respx.get(f"{VISIT}/v-1").mock(return_value=httpx.Response(200, json={"uuid": "v-1"}))
+    with pytest.raises(VendorRejected):
         await _client().write_encounter(_input())
     assert post.call_count == 0
+
+
+def test_custom_reps_never_continue_after_a_double_close():
+    # OpenMRS's custom-rep parser misreads "...)),next": every deep nest must sit last.
+    for rep in (_ENCOUNTER_REP, _MARKER_REP):
+        nested = f"custom:(uuid,encounters:({rep[8:-1]}))"
+        assert "))," not in rep and "))," not in nested
 
 
 @respx.mock

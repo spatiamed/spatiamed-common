@@ -45,6 +45,9 @@ class BahmniConfig:
     # vitals_sbp, vitals_dbp, vitals_temp, vitals_spo2, vitals_weight, vitals_height
     concept_map: Mapping[str, str] = field(default_factory=dict)
     drug_other_concept_uuid: str = ""
+    # Dispensing-unit concept NAME sent as quantityUnits on drug orders (Bahmni NPEs
+    # without asNeeded/quantity, and validates quantityUnits against its concepts).
+    drug_quantity_units: str = "Unit"
     # our doc_type -> Bahmni concept uuid
     document_type_concepts: Mapping[str, str] = field(default_factory=dict)
     system_provider_identifiers: frozenset[str] = frozenset(

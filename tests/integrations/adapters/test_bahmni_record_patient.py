@@ -169,6 +169,8 @@ async def test_create_with_marker_returns_existing():
     params = search.calls[0].request.url.params
     assert params["customAttribute"] == MARKER_VALUE
     assert params["patientAttributes"] == "smMarker"
+    # Without it Bahmni returns customAttribute "" and the exact-marker match never fires.
+    assert params["patientSearchResultsConfig"] == "smMarker"
 
 
 @respx.mock
@@ -328,6 +330,7 @@ async def test_search_truncated_flag():
     params = route.calls[0].request.url.params
     assert params["customAttribute"] == "9876543210"
     assert params["patientAttributes"] == "phoneNumber"
+    assert params["patientSearchResultsConfig"] == "phoneNumber"
     assert params["s"] == "byIdOrNameOrVillage"
     respx.get(SEARCH).mock(
         return_value=httpx.Response(200, json={"totalCount": 1, "pageOfResults": [_hit("u1")]})
@@ -403,6 +406,27 @@ async def test_marker_search_truncated_fails_closed():
             200, json={"totalCount": 40, "pageOfResults": [_hit("a", MARKER_VALUE)]}
         )
     )
+    post = respx.post(CREATE).mock(return_value=httpx.Response(200, json=CREATED))
+    with pytest.raises(ConflictError, match="partial page"):
+        await _client(**MARKER_CFG).create_patient(_input())
+    assert not post.called
+
+
+@respx.mock
+async def test_full_page_counts_as_truncated_even_when_total_equals_page():
+    # Bahmni caps totalCount at the rows returned, so 50 of 50 may hide more hits.
+    _login()
+    page = {"totalCount": 50, "pageOfResults": [_hit(f"u{i}") for i in range(50)]}
+    respx.get(SEARCH).mock(return_value=httpx.Response(200, json=page))
+    hits, truncated = await _client().search(phone="9876543210")
+    assert len(hits) == 50 and truncated is True
+
+
+@respx.mock
+async def test_marker_search_full_page_fails_closed():
+    _login()
+    page = {"totalCount": 50, "pageOfResults": [_hit(f"u{i}", "sm:other") for i in range(50)]}
+    respx.get(SEARCH).mock(return_value=httpx.Response(200, json=page))
     post = respx.post(CREATE).mock(return_value=httpx.Response(200, json=CREATED))
     with pytest.raises(ConflictError, match="partial page"):
         await _client(**MARKER_CFG).create_patient(_input())

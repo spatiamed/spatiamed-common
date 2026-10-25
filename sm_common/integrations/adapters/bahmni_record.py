@@ -53,13 +53,14 @@ _DOC_MIME = {
     "image/png": ("png", "image"),
 }
 _MARKER_PREFIX = "sm:"
+_SEARCH_PAGE_ROWS = 50  # rows Bahmni returns per bahmni/search/patient page
 _VISIT_REP = "custom:(uuid,visitType,startDatetime,stopDatetime,location)"
+# OpenMRS's custom-representation parser breaks when anything follows a double
+# close "))", so every doubly nested group sits last in its parent.
 _ENCOUNTER_REP = (
-    "custom:(uuid,encounterType:(display),encounterDatetime,"
-    "encounterProviders:(provider:(display)),"
-    "obs:(concept:(uuid,display),value,comment,"
-    "groupMembers:(concept:(display),value,comment)),"
-    "orders:(drugNonCoded,orderType:(display)))"
+    "custom:(uuid,encounterDatetime,encounterType:(display),encounterProviders:(display),"
+    "orders:(drugNonCoded),"
+    "obs:(value,comment,concept:(uuid,display),groupMembers:(value,comment,concept:(display))))"
 )
 _MARKER_REP = "custom:(uuid,obs:(concept:(uuid),value))"
 _FLEXIBLE_DOSING = (
@@ -161,14 +162,23 @@ class BahmniRecordClient:
         resp = await self._http.request(
             "GET",
             f"{_REST}/bahmni/search/patient",
-            params={"q": "", "s": "byIdOrNameOrVillage", "patientAttributes": attribute, **params},
+            # patientAttributes filters on the attribute; patientSearchResultsConfig is what
+            # makes Bahmni return its value in customAttribute (otherwise "").
+            params={
+                "q": "",
+                "s": "byIdOrNameOrVillage",
+                "patientAttributes": attribute,
+                "patientSearchResultsConfig": attribute,
+                **params,
+            },
         )
         if resp.status_code == 404 and not missing_ok:
             raise WriteNotSupported("bahmni: patient search route not found (HTTP 404)")
         body = resp.json() if resp.status_code != 404 else {}
         page = [h for h in (body.get("pageOfResults") or []) if isinstance(h, dict)]
         total = body.get("totalCount")
-        truncated = isinstance(total, int) and total > len(page)
+        # totalCount is capped at the page size, so a full page may hide more hits.
+        truncated = len(page) >= _SEARCH_PAGE_ROWS or (isinstance(total, int) and total > len(page))
         patients = [p for h in page if (p := self._from_search_hit(h, attribute)) is not None]
         return patients, page, truncated
 
@@ -503,7 +513,8 @@ class BahmniRecordClient:
             uuid=raw["uuid"],
             encounter_type=_display(raw.get("encounterType")),
             at=at,
-            provider=_display(providers[0].get("provider")) if providers else "",
+            # encounterProviders display is "<provider name>: <encounter role>".
+            provider=_display(providers[0]).rsplit(": ", 1)[0] if providers else "",
             obs=[
                 (_display(o.get("concept")), _display(o.get("value")))
                 for o in obs_rows
@@ -519,19 +530,24 @@ class BahmniRecordClient:
         )
 
     async def _encounters(self, visit_uuid: str, rep: str) -> list[Any]:
+        """Every encounter of a visit, read through the visit (unpaged).
+
+        ``GET encounter?visit=`` without ``patient`` answers 500 on Bahmni, so the
+        encounters come nested in ``GET visit/<uuid>``.
+        """
+        inner = rep.removeprefix("custom:(").removesuffix(")")
         resp = await self._http.request(
-            "GET", f"{_REST}/encounter", params={"visit": visit_uuid, "v": rep}
+            "GET",
+            f"{_REST}/visit/{visit_uuid}",
+            params={"v": f"custom:(uuid,encounters:({inner}))"},
         )
         if resp.status_code == 404:
             raise NotFound(f"bahmni: encounters for visit {visit_uuid} not found (HTTP 404)")
         body = resp.json()
-        if any(
-            isinstance(link, dict) and link.get("rel") == "next" for link in body.get("links") or []
-        ):
-            raise ConflictError(
-                "bahmni: encounter list is paged; cannot tell whether a note was already filed"
-            )
-        return list(body.get("results") or [])
+        rows = body.get("encounters") if isinstance(body, dict) else None
+        if not isinstance(rows, list):
+            raise VendorRejected("bahmni: visit response carried no encounter list")
+        return rows
 
     async def get_visit(self, visit_uuid: str) -> RecordVisitDetail | None:
         resp = await self._http.request(
@@ -570,7 +586,12 @@ class BahmniRecordClient:
             "dosingInstructions": {
                 "administrationInstructions": json.dumps(
                     {"dose": d.dose, "frequency": d.frequency, "instructions": d.instructions}
-                )
+                ),
+                # Required by Bahmni (null asNeeded/quantity -> HTTP 500). The dispensed
+                # quantity is unknown at prescribing time: 1 placeholder unit.
+                "asNeeded": False,
+                "quantity": 1,
+                "quantityUnits": self._config.drug_quantity_units,
             },
             "duration": d.duration_days,
             "durationUnits": "Days",
@@ -792,6 +813,10 @@ class BahmniRecordClient:
                     "providerUuid": provider_uuid,
                     "locationUuid": c.location_uuid,
                     "encounterDateTime": at,
+                    # Bahmni opens a document visit and rejects it without a start date;
+                    # the same end date closes it so it never counts as an open visit.
+                    "visitStartDate": at,
+                    "visitEndDate": at,
                     "documents": [{"testUuid": concept, "image": uploaded_url, "obsDateTime": at}],
                 },
             )

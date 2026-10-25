@@ -77,6 +77,8 @@ async def test_upload_document_two_calls_in_order() -> None:
     assert b2["providerUuid"] == "prov-1"
     assert b2["locationUuid"] == "loc-1"
     assert b2["encounterDateTime"] == AT_MS
+    # Bahmni 500s on a document visit with no start date; the end date keeps it closed.
+    assert (b2["visitStartDate"], b2["visitEndDate"]) == (AT_MS, AT_MS)
     assert b2["documents"] == [{"testUuid": "c-lab", "image": "2026/f.pdf", "obsDateTime": AT_MS}]
 
 

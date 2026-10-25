@@ -57,6 +57,7 @@ async def test_search_by_phone_returns_all_household_hits():
     params = route.calls[0].request.url.params
     assert params["customAttribute"] == "+919876543210"
     assert params["patientAttributes"] == "phoneNumber"
+    assert params["patientSearchResultsConfig"] == "phoneNumber"  # else no phone in hits
     assert params["s"] == "byIdOrNameOrVillage"
     assert params["q"] == ""
     first = hits[0]
@@ -163,6 +164,24 @@ async def test_search_follows_pages_until_total():
     hits = await _adapter().search_patients(mrn="GAN")
     assert [h.resource_id for h in hits] == [UUID_1, UUID_2]
     assert [c.request.url.params["startIndex"] for c in route.calls] == ["0", "1"]
+
+
+@respx.mock
+async def test_search_walks_full_pages_despite_capped_total():
+    # Bahmni reports totalCount == rows on the page (50), not the real total.
+    _login()
+    hit = _fx("search_patient_two_hits.json")["pageOfResults"][0]
+
+    def page(start: int, n: int) -> dict:  # type: ignore[type-arg]
+        rows = [{**hit, "uuid": f"u-{start + i}"} for i in range(n)]
+        return {"totalCount": n, "pageOfResults": rows}
+
+    route = respx.get(SEARCH).mock(
+        side_effect=[httpx.Response(200, json=page(0, 50)), httpx.Response(200, json=page(50, 2))]
+    )
+    hits = await _adapter().search_patients(mrn="GAN")
+    assert len(hits) == 52
+    assert [c.request.url.params["startIndex"] for c in route.calls] == ["0", "50"]
 
 
 @respx.mock
