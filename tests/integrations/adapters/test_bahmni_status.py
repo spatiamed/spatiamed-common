@@ -25,9 +25,7 @@ NOW = datetime(2026, 10, 25, 5, 0, tzinfo=timezone.utc)
 
 
 def _adapter() -> BahmniAdapter:
-    config = BahmniConfig(
-        location_uuid="LOC", identifier_type_uuid="T", identifier_source_uuid="S"
-    )
+    config = BahmniConfig(location_uuid="LOC", identifier_type_uuid="T", identifier_source_uuid="S")
     return BahmniAdapter(
         http=BahmniHttp(BASE, "u", "p"), config=config, hash_salt="s", transport_key="k"
     )
@@ -94,8 +92,11 @@ async def test_push_checked_in():
     _current("Scheduled")
     post = respx.post(CHANGE).mock(return_value=httpx.Response(200, json={}))
     ev = VisitCheckedIn(
-        event_uuid=uuid4(), appointment_id=APT, queuecare_visit_id=uuid4(),
-        arrived_at=NOW, token_number="A1",
+        event_uuid=uuid4(),
+        appointment_id=APT,
+        queuecare_visit_id=uuid4(),
+        arrived_at=NOW,
+        token_number="A1",
     )
     await _adapter().push_visit_event(ev)
     assert json.loads(post.calls[0].request.content) == {
@@ -127,7 +128,9 @@ async def test_push_finalized_maps_status(final, to):
     _login()
     _current("CheckedIn")
     post = respx.post(CHANGE).mock(return_value=httpx.Response(200, json={}))
-    ev = VisitFinalized(event_uuid=uuid4(), appointment_id=APT, final_status=final, finalized_at=NOW)
+    ev = VisitFinalized(
+        event_uuid=uuid4(), appointment_id=APT, final_status=final, finalized_at=NOW
+    )
     await _adapter().push_visit_event(ev)
     assert json.loads(post.calls[0].request.content)["toStatus"] == to
 

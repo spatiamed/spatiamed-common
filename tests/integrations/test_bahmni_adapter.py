@@ -21,6 +21,7 @@ from sm_common.integrations.exceptions import ConflictError, TransientError
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
+
 def _write(**over) -> AppointmentWrite:
     start = datetime(2026, 5, 8, 9, 0, tzinfo=timezone.utc)
     base = dict(

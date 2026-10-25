@@ -36,7 +36,9 @@ async def test_bahmni_roster_builds_with_defaults():
     respx.get("https://bahmni.example.com/openmrs/ws/rest/v1/provider").mock(
         return_value=httpx.Response(
             200,
-            json={"results": [{"uuid": "prov-1", "identifier": "D1", "person": {"display": "Dr A"}}]},
+            json={
+                "results": [{"uuid": "prov-1", "identifier": "D1", "person": {"display": "Dr A"}}]
+            },
         )
     )
     a = BahmniAdapter(
