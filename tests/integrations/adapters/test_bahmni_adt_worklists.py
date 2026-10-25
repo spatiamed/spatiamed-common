@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
@@ -12,6 +12,7 @@ from sm_common.integrations.adapters.bahmni_config import BahmniConfig
 from sm_common.integrations.adapters.bahmni_http import BahmniHttp
 from sm_common.integrations.adapters.bahmni_record import BahmniRecordClient
 from sm_common.integrations.exceptions import (
+    EncounterOutsideVisit,
     AuthError,
     ConfigError,
     NotFound,
@@ -74,6 +75,10 @@ def _row(**extra: Any) -> dict[str, Any]:
         "activeVisitUuid": VISIT,
         **extra,
     }
+
+
+def _echo(req: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, json={"encounterUuid": json.loads(req.content)["encounterUuid"]})
 
 
 def _visit_with(*encounters: dict[str, Any]) -> httpx.Response:
@@ -268,13 +273,13 @@ async def _dispose(
 async def test_write_disposition_payload_exact() -> None:
     _login()
     lookup = respx.get(f"{REST}/visit/{VISIT}").mock(return_value=_visit_with())
-    post = respx.post(ENCOUNTER).mock(
-        return_value=httpx.Response(200, json={"encounterUuid": "enc-1"})
-    )
+    post = respx.post(ENCOUNTER).mock(side_effect=_echo)
     result = await _dispose(_client(), "discharge", "Stable, review in 7 days")
-    assert result == RecordEncounterResult(encounter_uuid="enc-1", created=True)
+    assert result == RecordEncounterResult(encounter_uuid=str(EVENT), created=True)
     assert "obs:(concept:(uuid),value)" in lookup.calls[0].request.url.params["v"]
     assert json.loads(post.calls[0].request.content) == {
+        # Its own encounter: a uuid-less write fails once two candidates exist.
+        "encounterUuid": str(EVENT),
         "patientUuid": PATIENT,
         "visitUuid": VISIT,
         "locationUuid": LOGIN_LOC,
@@ -298,9 +303,7 @@ async def test_write_disposition_payload_exact() -> None:
 async def test_write_disposition_admit_without_note() -> None:
     _login()
     respx.get(f"{REST}/visit/{VISIT}").mock(return_value=_visit_with())
-    post = respx.post(ENCOUNTER).mock(
-        return_value=httpx.Response(200, json={"encounterUuid": "enc-2"})
-    )
+    post = respx.post(ENCOUNTER).mock(side_effect=_echo)
     await _dispose(_client(concept_map={}), "admit", None)
     disposition = json.loads(post.calls[0].request.content)["disposition"]
     assert disposition["code"] == "ADMIT"
@@ -382,3 +385,45 @@ async def test_write_disposition_rejects_malformed_visit_uuid_before_http() -> N
                 note=None,
             )
         assert mock.calls.call_count == 0
+
+
+@respx.mock
+async def test_write_disposition_caller_encounter_uuid_and_range() -> None:
+    _login()
+    respx.get(f"{REST}/visit/{VISIT}").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "uuid": VISIT,
+                "startDatetime": "2026-10-01T10:00:00.000+0530",  # == AT
+                "stopDatetime": None,
+                "encounters": [],
+            },
+        )
+    )
+    post = respx.post(ENCOUNTER).mock(side_effect=_echo)
+    given = UUID("4f6a1c2e-8b3d-4e5f-9a0b-1c2d3e4f5a6b")
+    client = _client()
+    r = await client.write_disposition(
+        event_id=EVENT,
+        patient_uuid=PATIENT,
+        visit_uuid=VISIT,
+        provider_uuid=PROVIDER,
+        kind="admit",
+        at=AT,
+        note=None,
+        encounter_uuid=given,
+    )
+    assert r.encounter_uuid == str(given)
+    assert json.loads(post.calls[0].request.content)["encounterUuid"] == str(given)
+    with pytest.raises(EncounterOutsideVisit):
+        await client.write_disposition(
+            event_id=EVENT,
+            patient_uuid=PATIENT,
+            visit_uuid=VISIT,
+            provider_uuid=PROVIDER,
+            kind="admit",
+            at=AT - timedelta(seconds=1),
+            note=None,
+        )
+    assert post.call_count == 1

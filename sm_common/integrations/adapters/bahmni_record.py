@@ -11,7 +11,7 @@ from typing import Any
 from uuid import UUID
 
 from sm_common.identity.dob import age_on
-from sm_common.integrations.adapters.bahmni_adt import BahmniAdtMixin
+from sm_common.integrations.adapters.bahmni_adt import _ENCOUNTER, BahmniAdtMixin, _sent_uuid
 from sm_common.integrations.adapters.bahmni_config import BahmniConfig
 from sm_common.integrations.adapters.bahmni_http import BahmniHttp, from_epoch_ms, to_epoch_ms
 from sm_common.integrations.adapters.bahmni_parse import birth_date as parse_birth_date
@@ -60,11 +60,19 @@ _SEARCH_PAGE_ROWS = 50  # rows Bahmni returns per bahmni/search/patient page
 _VISIT_REP = "custom:(uuid,visitType,startDatetime,stopDatetime,location)"
 # OpenMRS's custom-representation parser breaks when anything follows a double
 # close "))", so every doubly nested group sits last in its parent.
+# The order list names Order fields only: Bahmni's lab orders are plain Orders, and a
+# DrugOrder-only field (drug, drugNonCoded, dose...) in a generic order rep fails the
+# whole read ("Unknown property ... on class org.openmrs.Order") once a visit holds one.
+# Drug names are read per drug order through the order resource (_DRUG_ORDER_REP).
 _ENCOUNTER_REP = (
     "custom:(uuid,encounterDatetime,encounterType:(display),encounterProviders:(display),"
-    "orders:(drugNonCoded),"
+    "orders:(uuid,orderType),"
     "obs:(value,comment,concept:(uuid,display),groupMembers:(value,comment,concept:(display))))"
 )
+_DRUG_ORDER_REP = "custom:(uuid,drugNonCoded)"
+# OpenMRS core's Drug Order type (OrderType.DRUG_ORDER_TYPE_UUID).
+_DRUG_ORDER_TYPE_UUID = "131168f4-15f5-102d-96e4-000c29c2a5d7"
+_ORDER_UUID = re.compile(r"[A-Za-z0-9-]{1,38}")
 _MARKER_REP = "custom:(uuid,obs:(concept:(uuid),value))"
 _FLEXIBLE_DOSING = (
     "org.openmrs.module.bahmniemrapi.drugorder.dosinginstructions.FlexibleDosingInstructions"
@@ -529,7 +537,9 @@ class BahmniRecordClient(BahmniAdtMixin):
                     out.append((_display(m.get("value")), str(comment) if comment else None))
         return out
 
-    def _encounter_summary(self, raw: Any) -> RecordEncounterSummary | None:
+    def _encounter_summary(
+        self, raw: Any, drug_names: dict[str, str] | None = None
+    ) -> RecordEncounterSummary | None:
         if not isinstance(raw, dict) or not isinstance(raw.get("uuid"), str):
             return None
         at = _when(raw.get("encounterDatetime"))
@@ -551,11 +561,41 @@ class BahmniRecordClient(BahmniAdtMixin):
             ],
             diagnoses=self._diagnoses(obs_rows),
             drugs=[
-                str(d["drugNonCoded"])
-                for d in raw.get("orders") or []
-                if isinstance(d, dict) and d.get("drugNonCoded")
+                (drug_names or {})[o["uuid"]]
+                for o in raw.get("orders") or []
+                if isinstance(o, dict) and o.get("uuid") in (drug_names or {})
             ],
         )
+
+    @staticmethod
+    def _is_drug_order(order: Any) -> bool:
+        kind = order.get("orderType") if isinstance(order, dict) else None
+        if not isinstance(kind, dict):
+            return False
+        label = str(kind.get("display") or kind.get("name") or "").strip().lower()
+        return kind.get("uuid") == _DRUG_ORDER_TYPE_UUID or label == "drug order"
+
+    async def _drug_names(self, rows: list[Any]) -> dict[str, str]:
+        """Non-coded drug name per drug order uuid, read through the order resource."""
+        names: dict[str, str] = {}
+        for row in rows:
+            for o in (row.get("orders") if isinstance(row, dict) else None) or []:
+                uuid = o.get("uuid") if isinstance(o, dict) else None
+                if (
+                    not isinstance(uuid, str)
+                    or not _ORDER_UUID.fullmatch(uuid)
+                    or uuid in names
+                    or not self._is_drug_order(o)
+                ):
+                    continue
+                resp = await self._http.request(
+                    "GET", f"{_REST}/order/{uuid}", params={"v": _DRUG_ORDER_REP}
+                )
+                body = resp.json() if resp.status_code == 200 and resp.content else None
+                name = body.get("drugNonCoded") if isinstance(body, dict) else None
+                if isinstance(name, str) and name:
+                    names[uuid] = name
+        return names
 
     async def _encounters(self, visit_uuid: str, rep: str) -> list[Any]:
         """Every encounter of a visit, read through the visit (unpaged).
@@ -587,7 +627,10 @@ class BahmniRecordClient(BahmniAdtMixin):
         if visit is None:
             return None
         rows = await self._encounters(visit_uuid, _ENCOUNTER_REP)
-        encounters = [e for r in rows if (e := self._encounter_summary(r)) is not None]
+        drug_names = await self._drug_names(rows)
+        encounters = [
+            e for r in rows if (e := self._encounter_summary(r, drug_names)) is not None
+        ]
         return RecordVisitDetail(visit=visit, encounters=sorted(encounters, key=lambda e: e.at))
 
     # ─── Encounter write ─────────────────────────────────────────────────────
@@ -639,7 +682,15 @@ class BahmniRecordClient(BahmniAdtMixin):
         return None
 
     async def write_encounter(self, e: RecordEncounterInput) -> RecordEncounterResult:
-        """File one clinical note as an encounter; idempotent on ``e.note_id``.
+        """File one clinical note as its own encounter; idempotent on ``e.note_id``.
+
+        The write always names its encounter (``e.encounter_uuid``, else ``e.note_id``),
+        which Bahmni honours: each note is its own encounter, and writes still land once
+        a visit holds two encounters of one provider and type (a write naming no uuid
+        then fails). The marker lookup runs first and stays mandatory: re-sending a
+        diagnosis into an existing encounter is a Bahmni 500. ``e.encounter_at`` outside
+        the visit's start/stop range raises ``EncounterOutsideVisit`` before any write
+        (exactly the start is accepted).
 
         The encounter type is ``e.encounter_type_uuid`` when given, else the configured
         consultation type. A given but empty type, or one of the configured ADMISSION,
@@ -676,12 +727,16 @@ class BahmniRecordClient(BahmniAdtMixin):
                 raise ConfigError(f"concept_map missing {o.key}")
             observations.append({"concept": {"uuid": concept}, "value": o.value})
         marker = str(e.note_id)
-        for row in await self._encounters(e.visit_uuid, _MARKER_REP):
+        visit, rows = await self._visit_and_encounters(e.visit_uuid, _MARKER_REP)
+        for row in rows:
             found = self._has_marker(row, marker)
             if found:
                 return RecordEncounterResult(encounter_uuid=found, created=False)
+        self._check_in_visit(visit, e.encounter_at)
         observations.append({"concept": {"uuid": c.note_marker_concept_uuid}, "value": marker})
+        sent = str(e.encounter_uuid or e.note_id)
         body = {
+            "encounterUuid": sent,
             "patientUuid": e.patient_uuid,
             "visitUuid": e.visit_uuid,
             "locationUuid": c.location_uuid,
@@ -692,14 +747,11 @@ class BahmniRecordClient(BahmniAdtMixin):
             "bahmniDiagnoses": [self._diagnosis_body(d) for d in e.diagnoses],
             "drugOrders": [self._drug_body(d) for d in e.drug_orders],
         }
-        resp = await self._http.request("POST", f"{_REST}/bahmnicore/bahmniencounter", json=body)
+        resp = await self._post_encounter(_ENCOUNTER, body, None, e.encounter_at)
         if resp.status_code == 404:
             raise WriteNotSupported("bahmni: bahmniencounter route not found (HTTP 404)")
         parsed = resp.json() if resp.content else None
-        uuid = parsed.get("encounterUuid") if isinstance(parsed, dict) else None
-        if not isinstance(uuid, str) or not uuid:
-            raise VendorRejected("bahmni: encounter response had no encounterUuid", landed=True)
-        return RecordEncounterResult(encounter_uuid=uuid, created=True)
+        return RecordEncounterResult(encounter_uuid=_sent_uuid(sent, parsed), created=True)
 
     # ─── Services, allergies, documents ──────────────────────────────────────
 

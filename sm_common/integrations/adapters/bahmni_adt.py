@@ -58,6 +58,9 @@ from sm_common.integrations.adapters.bahmni_parse import when
 from sm_common.integrations.exceptions import (
     ConfigError,
     ConflictError,
+    EncounterMatchAmbiguous,
+    EncounterOutsideVisit,
+    HmsAdapterError,
     NotFound,
     TransientError,
     VendorRejected,
@@ -122,6 +125,11 @@ _ADT_VISIT_REP = (
     "encounters:(uuid,voided,encounterType:(uuid),obs:(concept:(uuid),value)))"
 )
 _ADT_MARKER = "sm:adt:"
+# Read after a bare HTTP 500 from bahmniencounter, to tell its terminal causes apart.
+_ENCOUNTER_500_REP = (
+    "custom:(uuid,startDatetime,stopDatetime,"
+    "encounters:(uuid,voided,encounterType:(uuid),encounterProviders:(provider:(uuid))))"
+)
 # OpenMRS uuids are up to 38 chars of [A-Za-z0-9-]; anything else could reach another route.
 _UUID_SHAPE = re.compile(r"[A-Za-z0-9-]{1,38}")
 # Bahmni pages admissionLocation (50 rows by default); more pages than this is not a ward list.
@@ -145,6 +153,29 @@ def _label(v: Any) -> str:
 def _ref_uuid(v: Any) -> str | None:
     uuid = v.get("uuid") if isinstance(v, dict) else None
     return uuid if isinstance(uuid, str) else None
+
+
+def _outside_visit(visit: dict[str, Any], at: datetime) -> bool:
+    """True when ``at`` is before the visit's start or after its stop (bounds included)."""
+    at_ms = to_epoch_ms(at)
+    start = when(visit.get("startDatetime"))
+    stop = when(visit.get("stopDatetime"))
+    if start is not None and at_ms < to_epoch_ms(start):
+        return True
+    return stop is not None and at_ms > to_epoch_ms(stop)
+
+
+def _sent_uuid(sent: str, parsed: Any) -> str:
+    """The response's encounterUuid, which must be the one the write named."""
+    uuid = parsed.get("encounterUuid") if isinstance(parsed, dict) else None
+    if not isinstance(uuid, str) or not uuid:
+        raise VendorRejected("bahmni: encounter response had no encounterUuid", landed=True)
+    if uuid != sent:
+        raise VendorRejected(
+            "bahmni: encounter response named another encounterUuid than the one sent",
+            landed=True,
+        )
+    return uuid
 
 
 def _check_uuid(name: str, value: str) -> None:
@@ -282,6 +313,100 @@ class BahmniAdtMixin:
         ) -> tuple[RecordVisit, bool]: ...
 
         async def list_visits(self, patient_uuid: str, limit: int = 20) -> list[RecordVisit]: ...
+
+    # ─── Encounter writes (shared) ───────────────────────────────────────────
+
+    async def _visit_and_encounters(
+        self, visit_uuid: str, rep: str
+    ) -> tuple[dict[str, Any], list[Any]]:
+        """One visit with its start/stop and its encounters in ``rep`` (one GET)."""
+        inner = rep.removeprefix("custom:(").removesuffix(")")
+        resp = await self._http.request(
+            "GET",
+            f"{_REST}/visit/{visit_uuid}",
+            params={"v": f"custom:(uuid,startDatetime,stopDatetime,encounters:({inner}))"},
+        )
+        if resp.status_code == 404:
+            raise NotFound(f"bahmni: encounters for visit {visit_uuid} not found (HTTP 404)")
+        body = resp.json() if resp.content else None
+        rows = body.get("encounters") if isinstance(body, dict) else None
+        if not isinstance(body, dict) or not isinstance(rows, list):
+            raise VendorRejected("bahmni: visit response carried no encounter list")
+        return body, rows
+
+    @staticmethod
+    def _check_in_visit(visit: dict[str, Any], at: datetime) -> None:
+        """Refuse, before writing, an encounter time Bahmni would answer with a bare 500."""
+        if _outside_visit(visit, at):
+            raise EncounterOutsideVisit(
+                "bahmni: encounter time is outside the visit's start/stop range"
+            )
+
+    async def _diagnose_encounter_500(
+        self, body: dict[str, Any], at: datetime | None
+    ) -> HmsAdapterError | None:
+        """The terminal cause of a bare HTTP 500 from ``bahmniencounter``, if one shows.
+
+        Bahmni answers both causes with the same HTML 500 page, so the visit is read
+        again: an encounter time outside it (it may have been closed meanwhile), or,
+        for a write naming no ``encounterUuid``, two or more unvoided encounters of the
+        same type by the same provider (Bahmni then cannot pick one to merge into). Any
+        other 500 stays transient. The provider is matched, not the session window, so
+        this can call ambiguous a 500 that had another cause.
+        """
+        visit_uuid = body.get("visitUuid")
+        if not isinstance(visit_uuid, str) or not _UUID_SHAPE.fullmatch(visit_uuid):
+            return None
+        try:
+            resp = await self._http.request(
+                "GET", f"{_REST}/visit/{visit_uuid}", params={"v": _ENCOUNTER_500_REP}
+            )
+            visit = resp.json() if resp.status_code == 200 and resp.content else None
+        except (HmsAdapterError, ValueError):
+            return None
+        if not isinstance(visit, dict):
+            return None
+        if at is not None and _outside_visit(visit, at):
+            return EncounterOutsideVisit(
+                "bahmni: encounter time is outside the visit's start/stop range"
+            )
+        if "encounterUuid" in body:
+            return None
+        providers = {
+            p.get("uuid") for p in body.get("providers") or [] if isinstance(p, dict)
+        }
+        matching = 0
+        for row in visit.get("encounters") or []:
+            if not isinstance(row, dict) or row.get("voided") is True:
+                continue
+            if _ref_uuid(row.get("encounterType")) != body.get("encounterTypeUuid"):
+                continue
+            by = {
+                _ref_uuid(ep.get("provider"))
+                for ep in row.get("encounterProviders") or []
+                if isinstance(ep, dict)
+            }
+            if by & providers:
+                matching += 1
+        if matching >= 2:
+            return EncounterMatchAmbiguous(
+                "bahmni: more than one encounter matches; the write must name its encounterUuid"
+            )
+        return None
+
+    async def _post_encounter(
+        self, url: str, body: dict[str, Any], params: dict[str, str] | None, at: datetime | None
+    ) -> Any:
+        """POST an encounter write; a bare 500 with a terminal cause raises that cause."""
+        try:
+            return await self._http.request("POST", url, params=params, json=body)
+        except TransientError as exc:
+            if exc.status_code != 500 or url != _ENCOUNTER:
+                raise
+            terminal = await self._diagnose_encounter_500(body, at)
+            if terminal is None:
+                raise
+            raise terminal from exc
 
     # ─── Wards and beds (read) ───────────────────────────────────────────────
 
@@ -765,6 +890,7 @@ class BahmniAdtMixin:
         kind: Literal["admit", "discharge"],
         at: datetime,
         note: str | None,
+        encounter_uuid: UUID | None = None,
     ) -> RecordEncounterResult:
         """An ADMIT/DISCHARGE disposition on a consultation encounter; idempotent on
         ``event_id``.
@@ -774,9 +900,13 @@ class BahmniAdtMixin:
         but not read by the server. It is the concept name Bahmni's stock worklist
         SQL matches (e.g. "Admit Patient"), so editing it does not change what is
         written. A note needs ``concept_map["disposition_note"]`` (a
-        concept uuid): Bahmni resolves disposition notes by uuid only. Bahmni may merge
-        this into an encounter of the same type/provider/visit, so the returned
-        ``encounter_uuid`` can be shared with other writes.
+        concept uuid): Bahmni resolves disposition notes by uuid only.
+
+        The write names its own encounter: ``encounter_uuid``, else ``event_id``. Bahmni
+        honours it, so the disposition is never merged into another encounter, and
+        it still lands once two consultation encounters of one provider exist in the
+        visit (a write without a uuid then fails). ``at`` outside the visit's start/stop
+        range raises ``EncounterOutsideVisit`` before any write.
         """
         c = self._config
         if not c.note_marker_concept_uuid:
@@ -791,12 +921,16 @@ class BahmniAdtMixin:
             raise ConfigError("bahmni: concept_map['disposition_note'] is required for a note")
         _check_uuid("visit_uuid", visit_uuid)
         marker = f"{_ADT_MARKER}{event_id}"
-        for row in await self._encounters(visit_uuid, _MARKER_REP):
+        visit, rows = await self._visit_and_encounters(visit_uuid, _MARKER_REP)
+        for row in rows:
             found = self._has_marker(row, marker)
             if found:
                 return RecordEncounterResult(encounter_uuid=found, created=False)
+        self._check_in_visit(visit, at)
+        sent = str(encounter_uuid or event_id)
         at_ms = to_epoch_ms(at)
         body = {
+            "encounterUuid": sent,
             "patientUuid": patient_uuid,
             "visitUuid": visit_uuid,
             "locationUuid": c.location_uuid,
@@ -813,14 +947,11 @@ class BahmniAdtMixin:
                 ),
             },
         }
-        resp = await self._http.request("POST", _ENCOUNTER, json=body)
+        resp = await self._post_encounter(_ENCOUNTER, body, None, at)
         if resp.status_code == 404:
             raise WriteNotSupported("bahmni: bahmniencounter route not found (HTTP 404)")
         parsed = resp.json() if resp.content else None
-        uuid = parsed.get("encounterUuid") if isinstance(parsed, dict) else None
-        if not isinstance(uuid, str) or not uuid:
-            raise VendorRejected("bahmni: encounter response had no encounterUuid", landed=True)
-        return RecordEncounterResult(encounter_uuid=uuid, created=True)
+        return RecordEncounterResult(encounter_uuid=_sent_uuid(sent, parsed), created=True)
 
     # ─── Admit and transfer ──────────────────────────────────────────────────
 
@@ -949,8 +1080,12 @@ class BahmniAdtMixin:
     async def _post_adt(
         self, url: str, body: dict[str, Any], params: dict[str, str] | None = None
     ) -> tuple[str, str | None]:
-        """(encounter uuid, visit uuid) from an ADT encounter write."""
-        resp = await self._http.request("POST", url, params=params, json=body)
+        """(encounter uuid, visit uuid) from an ADT encounter write.
+
+        These writes name no ``encounterUuid`` (the server stamps the time); a bare 500
+        that Bahmni gives because two encounters match raises ``EncounterMatchAmbiguous``.
+        """
+        resp = await self._post_encounter(url, body, params, None)
         if resp.status_code == 404:
             if url in _NOT_FOUND_ROUTES:
                 raise NotFound(f"bahmni: {_NOT_FOUND_ROUTES[url]} route not found (HTTP 404)")

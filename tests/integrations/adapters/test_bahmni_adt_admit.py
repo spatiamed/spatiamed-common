@@ -13,7 +13,13 @@ import respx
 from sm_common.integrations.adapters.bahmni_config import BahmniConfig
 from sm_common.integrations.adapters.bahmni_http import BahmniHttp
 from sm_common.integrations.adapters.bahmni_record import BahmniRecordClient
-from sm_common.integrations.exceptions import ConfigError, ConflictError, NotFound, TransientError
+from sm_common.integrations.exceptions import (
+    ConfigError,
+    ConflictError,
+    EncounterMatchAmbiguous,
+    NotFound,
+    TransientError,
+)
 from sm_common.integrations.record_types import RecordAdtInput, RecordBedAssignment
 
 BASE = "https://bahmni.example.test"
@@ -806,3 +812,56 @@ async def test_adt_without_bed_uuid_goes_by_bed_id(kind: str) -> None:
     )
     assert fake.bed_posts() == [(f"beds/{BED_ID}", {"patientUuid": PATIENT, "encounterUuid": ENC})]
     assert result.bed.bed_uuid == NEW_BED_UUID
+
+
+# ─── A 500 from a uuid-less encounter write ─────────────────────────────────
+
+
+def _by(enc: dict[str, Any], provider: str = PROVIDER) -> dict[str, Any]:
+    return {**enc, "encounterProviders": [{"provider": {"uuid": provider}}]}
+
+
+@respx.mock
+async def test_transfer_500_with_two_matching_encounters_is_ambiguous_terminal() -> None:
+    # Bahmni's "More than one encounter matches the criteria" is a bare HTML 500: the
+    # client tells it apart by re-reading the visit (two same-type encounters by the
+    # same provider) and stops retrying.
+    fake = FakeBahmni()
+    fake.ipd_visit_with(
+        _by(_enc("e-t1", TRANSFER_TYPE)),
+        _by(_enc("e-t2", TRANSFER_TYPE)),
+    )
+    fake.bed_of_patient = OLD_BED_ID
+    fake.install()
+    respx.post(ENCOUNTER).mock(return_value=httpx.Response(500, text="<html>500</html>"))
+    with pytest.raises(EncounterMatchAmbiguous) as exc:
+        await _client().transfer(TRANSFER)
+    assert exc.value.code == "encounter_match_ambiguous" and exc.value.landed is False
+    assert not isinstance(exc.value, TransientError)
+
+
+@respx.mock
+async def test_transfer_500_without_two_matching_encounters_stays_transient() -> None:
+    fake = FakeBahmni()
+    fake.ipd_visit_with(
+        _by(_enc("e-t1", TRANSFER_TYPE)),
+        _by(_enc("e-t2", TRANSFER_TYPE), provider=OTHER_PATIENT),  # another provider
+        {**_by(_enc("e-t3", TRANSFER_TYPE)), "voided": True},
+        _by(_enc("e-a1", ADMISSION_TYPE)),
+    )
+    fake.bed_of_patient = OLD_BED_ID
+    fake.install()
+    respx.post(ENCOUNTER).mock(return_value=httpx.Response(500, text="<html>500</html>"))
+    with pytest.raises(TransientError):
+        await _client().transfer(TRANSFER)
+
+
+@respx.mock
+async def test_transfer_503_is_not_diagnosed() -> None:
+    fake = FakeBahmni()
+    fake.ipd_visit_with(_by(_enc("e-t1", TRANSFER_TYPE)), _by(_enc("e-t2", TRANSFER_TYPE)))
+    fake.bed_of_patient = OLD_BED_ID
+    fake.install()
+    respx.post(ENCOUNTER).mock(return_value=httpx.Response(503))
+    with pytest.raises(TransientError):
+        await _client().transfer(TRANSFER)

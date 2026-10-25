@@ -104,6 +104,10 @@ class RecordEncounterInput:
 
     ``encounter_type_uuid`` overrides the configured consultation encounter type
     (e.g. ``discharge_summary_encounter_type_uuid`` for a discharge summary).
+
+    ``encounter_uuid`` is the uuid the encounter is created under; ``None`` uses
+    ``note_id``. It is always sent: Bahmni honours it, so each note is its own
+    encounter and is never merged into another one.
     """
 
     note_id: UUID
@@ -115,6 +119,7 @@ class RecordEncounterInput:
     diagnoses: list[RecordDiagnosis]
     drug_orders: list[RecordDrugOrder]
     encounter_type_uuid: str | None = None
+    encounter_uuid: UUID | None = None
 
 
 @dataclass(frozen=True)

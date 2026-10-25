@@ -270,6 +270,40 @@ mypy sm_common
 - pytz >= 2024.1
 - fastapi >= 0.115 (optional, only for `sm_common.fastapi_guard`)
 
+### Changed in v0.26.0
+
+Encounter writes on `BahmniRecordClient`, from behaviour seen on a live Bahmni standard stack with
+synthetic data. Bahmni honours a caller-supplied `encounterUuid` on `bahmnicore/bahmniencounter`: a new
+uuid creates its own encounter, and a known uuid updates that encounter. A write *without* one is merged
+into the matching encounter of the same type, provider and visit, and once two such encounters exist
+every uuid-less write fails with a bare HTTP 500 ("More than one encounter matches the criteria").
+
+- **`write_encounter` always sends an `encounterUuid`.** New optional field
+  `RecordEncounterInput.encounter_uuid: UUID | None`; `None` uses `note_id`. Each note is now its own
+  encounter (previously Bahmni could merge it into the session's encounter). The marker lookup still runs
+  first, because re-sending a diagnosis into an existing encounter is also a Bahmni 500. A response naming
+  another `encounterUuid` than the one sent raises `VendorRejected(landed=True)`.
+- **`write_disposition` always sends an `encounterUuid`** too: new keyword `encounter_uuid: UUID | None`,
+  default `event_id`. The disposition is its own encounter and is no longer merged into the consultation.
+- **New terminal errors** (both `VendorRejected`, never `TransientError`, exported from
+  `sm_common.integrations`), with a stable `code`:
+  - `EncounterOutsideVisit` (`code="encounter_outside_visit"`): the encounter time is before the visit's
+    start or after its stop. Bahmni answers this with an HTML 500; exactly the visit start is accepted and
+    a 1 to 2 s clock skew is enough to trigger it. `write_encounter` and `write_disposition` now check the
+    visit's range (read in the same call as the marker lookup) and raise this before any write; a 500 on a
+    visit closed meanwhile is diagnosed the same way.
+  - `EncounterMatchAmbiguous` (`code="encounter_match_ambiguous"`): a uuid-less `bahmniencounter` write
+    (the ADMISSION of `admit` into an open visit, and `transfer`) got a 500 while the visit holds two or
+    more unvoided encounters of that type by the same provider. Any other 500 stays `TransientError`.
+  - `HmsAdapterError.code` is the new class attribute (`None` on the general types), and
+    `TransientError.status_code` carries the HTTP status (`None` for a transport failure).
+- **`get_visit` drug names are read per drug order.** The generic encounter order rep no longer names
+  `drugNonCoded`: Bahmni's lab orders are plain `Order`s, and a DrugOrder-only field in a generic order
+  rep fails the whole read once a visit holds a lab order. The orders are listed as `uuid,orderType`, and
+  each drug order's name is read through `GET order/<uuid>` (one extra call per drug order).
+- The live harness's stale-visit task run gets its own read timeout (`HARNESS_ADT_STALE_TASK_TIMEOUT_S`,
+  default 600 s).
+
 ### Added in v0.25.0
 
 `BahmniRecordClient` gains an inpatient (ADT) surface, verified against a live Bahmni standard stack

@@ -114,6 +114,10 @@ UUID_TOKEN = re.compile(
     r"|\b(?=[A-Za-z]*\d)[0-9A-Za-z]{32,38}\b"
 )
 STALE_POLL_S = 30
+# Running the stale-visit task is one synchronous call that returns only after every idle
+# visit at a Visit Location is closed; on a box with many open visits that outlasts the
+# client's 30 s default. HARNESS_ADT_STALE_TASK_TIMEOUT_S overrides it.
+STALE_TASK_TIMEOUT_S = float(os.environ.get("HARNESS_ADT_STALE_TASK_TIMEOUT_S") or 600)
 
 Result = tuple[str, str]
 AdtCheck = Callable[["AdtCtx"], Awaitable[Result]]
@@ -259,11 +263,14 @@ class AdtCtx:
         params: dict[str, str] | None = None,
         body: Any = None,
         admin: bool = False,
+        timeout_s: float | None = None,
     ) -> Raw:
         """One authenticated call that never raises on a status (5xx bodies kept).
 
-        ``admin=True`` uses the admin login when one is configured.
+        ``admin=True`` uses the admin login when one is configured. ``timeout_s``
+        replaces the client's timeout for this call only.
         """
+        extra: dict[str, Any] = {} if timeout_s is None else {"timeout": timeout_s}
         http = self.admin_http if admin and self.admin_http is not None else self.http
         cookie = http._cookie or await http._login(None)
         for attempt in (1, 2):
@@ -274,6 +281,7 @@ class AdtCtx:
                 json=body,
                 auth=http._auth,
                 headers={"Cookie": f"JSESSIONID={cookie}"},
+                **extra,
             )
             if resp.status_code != 401 or attempt == 2:
                 break
@@ -2030,6 +2038,7 @@ async def admitted_visit_survives_stale_close(x: AdtCtx) -> Result:
                 "taskaction",
                 body={"action": "RUNTASK", "tasks": [task["name"]]},
                 admin=True,
+                timeout_s=STALE_TASK_TIMEOUT_S,
             )
             ran_status = ran.status
             for _ in range(STALE_POLL_S):

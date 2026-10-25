@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import httpx
@@ -10,7 +10,14 @@ from sm_common.integrations.adapters.bahmni_config import BahmniConfig
 from sm_common.integrations.adapters.bahmni_http import BahmniHttp
 from sm_common.integrations.adapters.bahmni_record import BahmniRecordClient
 from sm_common.integrations.adapters.bahmni_record import _ENCOUNTER_REP, _MARKER_REP
-from sm_common.integrations.exceptions import ConfigError, NotFound, VendorRejected
+from sm_common.integrations.exceptions import (
+    ConfigError,
+    EncounterMatchAmbiguous,
+    EncounterOutsideVisit,
+    NotFound,
+    TransientError,
+    VendorRejected,
+)
 from sm_common.integrations.record_types import (
     RecordDiagnosis,
     RecordDrugOrder,
@@ -26,6 +33,8 @@ WRITE = f"{REST}/bahmnicore/bahmniencounter"
 NOTE = UUID("0b1c2d3e-0000-4000-8000-00000000beef")
 AT = datetime(2026, 10, 1, 4, 30, tzinfo=timezone.utc)
 AT_MS = 1790829000000
+_ONE_S = timedelta(seconds=1)
+DRUG_TYPE = "131168f4-15f5-102d-96e4-000c29c2a5d7"  # OpenMRS core Drug Order type
 FLEX = "org.openmrs.module.bahmniemrapi.drugorder.dosinginstructions.FlexibleDosingInstructions"
 
 
@@ -95,6 +104,11 @@ def _encounters(rows: list, visit: dict | None = None) -> respx.Route:  # type: 
         return httpx.Response(200, json=visit or _visit())
 
     return respx.get(f"{VISIT}/v-1").mock(side_effect=answer)
+
+
+def _echo(req: httpx.Request) -> httpx.Response:
+    """bahmniencounter answers with the encounterUuid it was sent."""
+    return httpx.Response(200, json={"encounterUuid": json.loads(req.content)["encounterUuid"]})
 
 
 def _no_existing() -> respx.Route:
@@ -197,17 +211,37 @@ ENC_ROW = {
             ],
         },
     ],
-    "orders": [{"drugNonCoded": "Amoxicillin 500mg", "orderType": {"display": "Drug Order"}}],
+    # A generic order rep may name only Order fields: a lab order (a plain Order) has
+    # no drug/drugNonCoded and Bahmni refuses the whole read. Drug names come per order.
+    "orders": [
+        {"uuid": "o-drug", "orderType": {"uuid": DRUG_TYPE, "display": "Drug Order"}},
+        {"uuid": "o-lab", "orderType": {"uuid": "ot-lab", "display": "Lab Order"}},
+    ],
 }
+ORDER = f"{REST}/order"
+
+
+def _drug_orders(names: dict[str, str | None]) -> respx.Route:
+    def answer(req: httpx.Request) -> httpx.Response:
+        uuid = req.url.path.rsplit("/", 1)[1]
+        if uuid not in names:
+            return httpx.Response(404)
+        return httpx.Response(200, json={"uuid": uuid, "drugNonCoded": names[uuid]})
+
+    return respx.get(url__startswith=f"{ORDER}/").mock(side_effect=answer)
 
 
 @respx.mock
 async def test_get_visit_maps_encounters():
     _login()
     enc = _encounters([ENC_ROW])
+    orders = _drug_orders({"o-drug": "Amoxicillin 500mg"})
     detail = await _client().get_visit("v-1")
     reps = [c.request.url.params["v"] for c in enc.calls]
     assert f"custom:(uuid,encounters:({_ENCOUNTER_REP[8:-1]}))" in reps
+    # Only the drug order is read through the order resource, with drugNonCoded.
+    assert [c.request.url.path.rsplit("/", 1)[1] for c in orders.calls] == ["o-drug"]
+    assert orders.calls[0].request.url.params["v"] == "custom:(uuid,drugNonCoded)"
     assert not respx.get(ENC_LIST).called  # encounter?visit= without patient 500s
     assert detail is not None and detail.visit.uuid == "v-1"
     e = detail.encounters[0]
@@ -221,6 +255,7 @@ async def test_get_visit_maps_encounters():
 async def test_get_visit_returns_diagnosis_comments():
     _login()
     _encounters([ENC_ROW])
+    _drug_orders({"o-drug": "Amoxicillin 500mg"})
     detail = await _client().get_visit("v-1")
     assert detail is not None
     assert detail.encounters[0].diagnoses == [("Pneumonia", "ICD-11 CA40.Z")]
@@ -240,13 +275,15 @@ async def test_get_visit_unknown_returns_none():
 async def test_write_encounter_payload():
     _login()
     lookup = _no_existing()
-    post = respx.post(WRITE).mock(return_value=httpx.Response(200, json={"encounterUuid": "e-9"}))
+    post = respx.post(WRITE).mock(side_effect=_echo)
     res = await _client().write_encounter(_input())
-    assert (res.encounter_uuid, res.created) == ("e-9", True)
+    assert (res.encounter_uuid, res.created) == (str(NOTE), True)
     assert lookup.calls[0].request.url.params["v"] == (
-        f"custom:(uuid,encounters:({_MARKER_REP[8:-1]}))"
+        f"custom:(uuid,startDatetime,stopDatetime,encounters:({_MARKER_REP[8:-1]}))"
     )
     assert json.loads(post.calls[0].request.content) == {
+        # Bahmni honours a caller-supplied encounterUuid; the note id is the default.
+        "encounterUuid": str(NOTE),
         "patientUuid": "p-1",
         "visitUuid": "v-1",
         "locationUuid": "loc-1",
@@ -292,7 +329,7 @@ async def test_write_encounter_payload():
 async def test_write_encounter_diagnosis_comment_carries_code():
     _login()
     _no_existing()
-    post = respx.post(WRITE).mock(return_value=httpx.Response(200, json={"encounterUuid": "e-9"}))
+    post = respx.post(WRITE).mock(side_effect=_echo)
     diagnoses = [
         RecordDiagnosis(code="CA40.Z", title="Pneumonia", primary=True),
         RecordDiagnosis(code=None, title="Fatigue", primary=False),
@@ -326,7 +363,7 @@ async def test_write_encounter_other_note_marker_does_not_match():
     _login()
     row = {"uuid": "e-old", "obs": [{"concept": {"uuid": "c-marker"}, "value": "someone-else"}]}
     _encounters([row])
-    post = respx.post(WRITE).mock(return_value=httpx.Response(200, json={"encounterUuid": "e-9"}))
+    post = respx.post(WRITE).mock(side_effect=_echo)
     res = await _client().write_encounter(_input())
     assert res.created is True and post.call_count == 1
 
@@ -334,7 +371,7 @@ async def test_write_encounter_other_note_marker_does_not_match():
 @respx.mock
 async def test_write_encounter_marker_lookup_fails_closed():
     _login()
-    post = respx.post(WRITE).mock(return_value=httpx.Response(200, json={"encounterUuid": "e-9"}))
+    post = respx.post(WRITE).mock(side_effect=_echo)
     respx.get(f"{VISIT}/v-1").mock(return_value=httpx.Response(404))
     with pytest.raises(NotFound):
         await _client().write_encounter(_input())
@@ -355,7 +392,7 @@ def test_custom_reps_never_continue_after_a_double_close():
 async def test_write_encounter_missing_concept_raises_before_post():
     _login()
     lookup = _no_existing()
-    post = respx.post(WRITE).mock(return_value=httpx.Response(200, json={"encounterUuid": "e-9"}))
+    post = respx.post(WRITE).mock(side_effect=_echo)
     with pytest.raises(ConfigError, match="concept_map missing vitals_spo2"):
         await _client().write_encounter(_input(obs=[RecordObs("vitals_spo2", 97.0)]))
     assert post.call_count == 0 and lookup.call_count == 0
@@ -364,7 +401,7 @@ async def test_write_encounter_missing_concept_raises_before_post():
 @respx.mock
 async def test_write_encounter_requires_marker_concept_and_types():
     _login()
-    post = respx.post(WRITE).mock(return_value=httpx.Response(200, json={"encounterUuid": "e-9"}))
+    post = respx.post(WRITE).mock(side_effect=_echo)
     with pytest.raises(ConfigError):
         await _client(note_marker_concept_uuid="").write_encounter(_input())
     with pytest.raises(ConfigError):
@@ -378,7 +415,7 @@ async def test_write_encounter_requires_marker_concept_and_types():
 async def test_write_encounter_uses_given_encounter_type():
     _login()
     _no_existing()
-    post = respx.post(WRITE).mock(return_value=httpx.Response(200, json={"encounterUuid": "e-9"}))
+    post = respx.post(WRITE).mock(side_effect=_echo)
     await _client().write_encounter(_input(encounter_type_uuid="et-summary"))
     assert json.loads(post.calls[0].request.content)["encounterTypeUuid"] == "et-summary"
     # A given type needs no consultation type configured.
@@ -396,7 +433,7 @@ async def test_write_encounter_empty_given_type_config_error_before_http():
     # An unset discharge_summary_encounter_type_uuid must not file a consultation.
     _login()
     lookup = _no_existing()
-    post = respx.post(WRITE).mock(return_value=httpx.Response(200, json={"encounterUuid": "e-9"}))
+    post = respx.post(WRITE).mock(side_effect=_echo)
     with pytest.raises(ConfigError, match="encounter_type_uuid"):
         await _client().write_encounter(_input(encounter_type_uuid=""))
     assert post.call_count == 0 and lookup.call_count == 0
@@ -415,7 +452,7 @@ async def test_write_encounter_refuses_adt_encounter_type(key: str):
     # ADT types go through admit/transfer/discharge (bed, visit status), never bahmniencounter.
     _login()
     lookup = _no_existing()
-    post = respx.post(WRITE).mock(return_value=httpx.Response(200, json={"encounterUuid": "e-9"}))
+    post = respx.post(WRITE).mock(side_effect=_echo)
     with pytest.raises(ConfigError, match=key):
         await _client(**{key: "et-adt"}).write_encounter(_input(encounter_type_uuid="et-adt"))
     assert post.call_count == 0 and lookup.call_count == 0
@@ -425,7 +462,7 @@ async def test_write_encounter_refuses_adt_encounter_type(key: str):
 async def test_drug_orders_without_quantity_units_raise_before_any_call():
     _login()
     lookup = _no_existing()
-    post = respx.post(WRITE).mock(return_value=httpx.Response(200, json={"encounterUuid": "e-9"}))
+    post = respx.post(WRITE).mock(side_effect=_echo)
     with pytest.raises(ConfigError, match="drug_quantity_units"):
         await _client(drug_quantity_units="").write_encounter(_input())
     assert post.call_count == 0 and lookup.call_count == 0
@@ -435,7 +472,7 @@ async def test_drug_orders_without_quantity_units_raise_before_any_call():
 async def test_no_drug_orders_needs_no_quantity_units():
     _login()
     _no_existing()
-    post = respx.post(WRITE).mock(return_value=httpx.Response(200, json={"encounterUuid": "e-9"}))
+    post = respx.post(WRITE).mock(side_effect=_echo)
     res = await _client(drug_quantity_units="").write_encounter(_input(drug_orders=[]))
     assert res.created and post.call_count == 1
 
@@ -450,3 +487,143 @@ async def test_start_visit_at_visit_location_when_configured():
     post = respx.post(VISIT).mock(return_value=httpx.Response(201, json=_visit("v-2")))
     await _client(visit_location_uuid="vloc-1").start_visit("p-1")
     assert json.loads(post.calls[0].request.content)["location"] == "vloc-1"
+
+
+def test_generic_order_rep_names_no_drug_order_field():
+    orders = _ENCOUNTER_REP.split("orders:(", 1)[1].split(")", 1)[0].split(",")
+    for field in ("drug", "drugNonCoded", "dose", "dosingInstructions", "quantity"):
+        assert field not in orders
+
+
+@respx.mock
+async def test_get_visit_drug_order_by_display_and_missing_order_skipped():
+    _login()
+    row = {
+        **ENC_ROW,
+        "orders": [
+            {"uuid": "o-1", "orderType": {"uuid": "ot-x", "display": "Drug Order"}},
+            {"uuid": "o-gone", "orderType": {"uuid": DRUG_TYPE}},
+            {"uuid": "o-coded", "orderType": {"uuid": DRUG_TYPE}},
+            {"uuid": "../session", "orderType": {"uuid": DRUG_TYPE}},
+        ],
+    }
+    _encounters([row])
+    orders = _drug_orders({"o-1": "Paracetamol", "o-coded": None})
+    detail = await _client().get_visit("v-1")
+    assert detail is not None and detail.encounters[0].drugs == ["Paracetamol"]
+    assert sorted(c.request.url.path.rsplit("/", 1)[1] for c in orders.calls) == [
+        "o-1",
+        "o-coded",
+        "o-gone",
+    ]
+
+
+# ─── caller-supplied encounter uuid ──────────────────────────────────────────
+
+OPEN_VISIT = {
+    "uuid": "v-1",
+    "startDatetime": "2026-10-01T10:00:00.000+0530",  # == AT
+    "stopDatetime": None,
+}
+
+
+def _in_visit(visit: dict, rows: list | None = None) -> respx.Route:  # type: ignore[type-arg]
+    return respx.get(f"{VISIT}/v-1").mock(
+        return_value=httpx.Response(200, json={**visit, "encounters": rows or []})
+    )
+
+
+@respx.mock
+async def test_write_encounter_sends_caller_encounter_uuid():
+    _login()
+    _in_visit(OPEN_VISIT)
+    post = respx.post(WRITE).mock(side_effect=_echo)
+    given = UUID("4f6a1c2e-8b3d-4e5f-9a0b-1c2d3e4f5a6b")
+    res = await _client().write_encounter(_input(encounter_uuid=given))
+    assert json.loads(post.calls[0].request.content)["encounterUuid"] == str(given)
+    assert (res.encounter_uuid, res.created) == (str(given), True)
+
+
+@respx.mock
+async def test_write_encounter_default_uuid_is_note_id_on_every_attempt():
+    _login()
+    _in_visit(OPEN_VISIT)
+    post = respx.post(WRITE).mock(side_effect=_echo)
+    await _client().write_encounter(_input())
+    await _client().write_encounter(_input())
+    sent = [json.loads(c.request.content)["encounterUuid"] for c in post.calls]
+    assert sent == [str(NOTE), str(NOTE)]
+
+
+@respx.mock
+async def test_write_encounter_response_uuid_other_than_sent_is_landed_rejection():
+    _login()
+    _in_visit(OPEN_VISIT)
+    respx.post(WRITE).mock(return_value=httpx.Response(200, json={"encounterUuid": "e-other"}))
+    with pytest.raises(VendorRejected, match="encounterUuid") as exc:
+        await _client().write_encounter(_input())
+    assert exc.value.landed is True
+
+
+@respx.mock
+async def test_write_encounter_at_visit_start_is_sent():
+    _login()
+    _in_visit(OPEN_VISIT)
+    post = respx.post(WRITE).mock(side_effect=_echo)
+    await _client().write_encounter(_input(encounter_at=AT))
+    assert post.call_count == 1
+
+
+@respx.mock
+async def test_write_encounter_before_visit_start_is_terminal_before_post():
+    _login()
+    _in_visit(OPEN_VISIT)
+    post = respx.post(WRITE).mock(side_effect=_echo)
+    with pytest.raises(EncounterOutsideVisit) as exc:
+        await _client().write_encounter(_input(encounter_at=AT.replace(second=0) - _ONE_S))
+    assert post.call_count == 0
+    assert exc.value.code == "encounter_outside_visit" and exc.value.landed is False
+    assert not isinstance(exc.value, TransientError)
+
+
+@respx.mock
+async def test_write_encounter_after_closed_visit_stop_is_terminal_inside_is_sent():
+    _login()
+    closed = {**OPEN_VISIT, "stopDatetime": "2026-10-01T11:00:00.000+0530"}
+    _in_visit(closed)
+    post = respx.post(WRITE).mock(side_effect=_echo)
+    with pytest.raises(EncounterOutsideVisit):
+        await _client().write_encounter(_input(encounter_at=AT + 3600 * _ONE_S + _ONE_S))
+    assert post.call_count == 0
+    await _client().write_encounter(_input(encounter_at=AT + 3600 * _ONE_S))
+    assert post.call_count == 1
+
+
+@respx.mock
+async def test_write_encounter_500_on_visit_closed_meanwhile_is_terminal():
+    _login()
+    states = [
+        {**OPEN_VISIT, "encounters": []},
+        {**OPEN_VISIT, "stopDatetime": "2026-10-01T10:00:00.000+0530", "encounters": []},
+    ]
+    respx.get(f"{VISIT}/v-1").mock(
+        side_effect=[httpx.Response(200, json=s) for s in states]
+    )
+    respx.post(WRITE).mock(return_value=httpx.Response(500, text="<html>500</html>"))
+    with pytest.raises(EncounterOutsideVisit):
+        await _client().write_encounter(_input(encounter_at=AT + _ONE_S))
+
+
+@respx.mock
+async def test_write_encounter_500_in_range_stays_transient():
+    _login()
+    _in_visit(OPEN_VISIT)
+    respx.post(WRITE).mock(return_value=httpx.Response(500, text="<html>500</html>"))
+    with pytest.raises(TransientError):
+        await _client().write_encounter(_input())
+
+
+def test_new_terminal_errors_have_distinct_codes():
+    assert EncounterOutsideVisit.code != EncounterMatchAmbiguous.code
+    for cls in (EncounterOutsideVisit, EncounterMatchAmbiguous):
+        assert issubclass(cls, VendorRejected) and not issubclass(cls, TransientError)

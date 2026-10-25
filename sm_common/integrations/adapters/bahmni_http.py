@@ -134,7 +134,9 @@ class BahmniHttp:
             if resp.status_code in (401, 403):
                 raise AuthError("bahmni: login rejected")
             if resp.status_code >= 500:
-                raise TransientError(f"bahmni: login HTTP {resp.status_code}")
+                raise TransientError(
+                    f"bahmni: login HTTP {resp.status_code}", status_code=resp.status_code
+                )
             if resp.status_code != 200:
                 raise AuthError(f"bahmni: login HTTP {resp.status_code}")
             try:
@@ -179,7 +181,7 @@ class BahmniHttp:
         if status == 403:
             raise AuthError("bahmni: HTTP 403 forbidden")
         if status >= 500 or status == 429:
-            raise TransientError(f"bahmni: HTTP {status}")
+            raise TransientError(f"bahmni: HTTP {status}", status_code=status)
         if status in expect or status == 404:
             return resp
         if status == 400:

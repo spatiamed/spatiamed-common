@@ -124,6 +124,7 @@ Summary" type, the emr GPs and the disposition mappings.
 | `BAHMNI_VISIT_LOCATION_NAME` | seed, optional: the Visit Location by name. The default is the nearest "Visit Location"-tagged ancestor of the login location |
 | `HARNESS_ADT_GLOBAL_STATE=1` | verify: also run the box-wide probes (needs the admin login and `HARNESS_SAMPLES_DIR`) |
 | `HARNESS_ADT_STALE_CLOSE=1` | verify: also run the irreversible stale-visit close |
+| `HARNESS_ADT_STALE_TASK_TIMEOUT_S` | verify: read timeout of the one call that runs the stale-visit task (default 600). The call returns only after every idle visit at a Visit Location is closed, which outlasts the usual 30 s on a box with many open visits |
 | `HARNESS_DEADLINE_S` | verify: no new check starts after this many seconds (default 1200). It is checked between checks, so one slow check can overrun it. Cleanup still runs |
 | `HARNESS_ONLY`, `HARNESS_CONTINUE_AFTER_GATE` | as above. `module_versions` and `adt_config_resolved` are gates |
 
@@ -180,6 +181,7 @@ apart. A `kill -9` or a dead tunnel leaves records behind. Find them by the prin
 
 ### Runtime
 
-About 300 to 340 HTTP calls, plus up to 30 s waiting for the stale-visit task. Through a
+About 300 to 340 HTTP calls, plus the stale-visit task run (up to `HARNESS_ADT_STALE_TASK_TIMEOUT_S`)
+and up to 30 s waiting for it to close the control visit. Through a
 port-forward that is roughly 3 to 8 minutes. The `SUMMARY` line prints the real call
 count and elapsed seconds.

@@ -255,3 +255,26 @@ async def test_plain_connect_error_stays_transient():
     http = BahmniHttp(BASE, "user", "pw", transport=httpx.MockTransport(handler))
     with pytest.raises(TransientError):
         await http.request("GET", PATH)
+
+
+@respx.mock
+async def test_http_5xx_transient_errors_carry_the_status() -> None:
+    from sm_common.integrations.adapters.bahmni_http import BahmniHttp
+    from sm_common.integrations.exceptions import TransientError
+
+    base = "https://status.example.test"
+    session = respx.get(f"{base}/openmrs/ws/rest/v1/session")
+    session.mock(return_value=httpx.Response(502))
+    http = BahmniHttp(base, "u", "p")
+    with pytest.raises(TransientError) as login:
+        await http.request("GET", "/openmrs/ws/rest/v1/visit")
+    assert login.value.status_code == 502
+    session.mock(
+        return_value=httpx.Response(
+            200, json={"authenticated": True}, headers={"set-cookie": "JSESSIONID=abc"}
+        )
+    )
+    respx.get(f"{base}/openmrs/ws/rest/v1/visit").mock(return_value=httpx.Response(500))
+    with pytest.raises(TransientError) as call:
+        await http.request("GET", "/openmrs/ws/rest/v1/visit")
+    assert call.value.status_code == 500
