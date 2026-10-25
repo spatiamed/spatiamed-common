@@ -269,10 +269,12 @@ class BahmniAdapter(HmsAdapter):
         family: str,
         gender: Any,
         birth: Any,
-        estimated: bool,
+        estimated: bool | None,
         phone: Any,
     ) -> CanonicalPatient:
+        """``estimated=None``: the source cannot say, so precision is unknown (None)."""
         dob = _birth_date(birth)
+        precision = None if estimated is None else ("year" if estimated else "exact")
         return CanonicalPatient(
             mrn=mrn,
             abha_id=None,
@@ -282,7 +284,7 @@ class BahmniAdapter(HmsAdapter):
             gender=_gender(gender),
             resource_id=uuid,
             birth_date=dob,
-            birth_date_precision=("year" if estimated else "exact") if dob else None,
+            birth_date_precision=precision if dob else None,
         )
 
     def _from_search_hit(self, hit: Mapping[str, Any]) -> CanonicalPatient | None:
@@ -303,7 +305,9 @@ class BahmniAdapter(HmsAdapter):
             family=str(hit.get("familyName") or ""),
             gender=hit.get("gender"),
             birth=hit.get("birthDate"),
-            estimated=_flag(hit.get("birthdateEstimated")),
+            # Search hits carry no birthdateEstimated: precision is unknown, never
+            # "exact". get_patient (patientprofile) is the authoritative source.
+            estimated=None,
             phone=phone,
         )
 

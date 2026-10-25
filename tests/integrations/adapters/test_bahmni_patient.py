@@ -65,7 +65,8 @@ async def test_search_by_phone_returns_all_household_hits():
     assert first.name_token == "Asha Verma"
     assert first.gender == "F"
     assert first.birth_date == date(1990, 5, 15)  # IST-midnight epoch is still the 15th
-    assert first.birth_date_precision == "exact"
+    # Search hits carry no birthdateEstimated: precision is unknown, never "exact".
+    assert first.birth_date_precision is None
 
 
 @respx.mock
@@ -280,3 +281,13 @@ async def test_400_on_search_is_vendor_rejected():
     respx.get(SEARCH).mock(return_value=httpx.Response(400, json={"error": {"message": "bad q"}}))
     with pytest.raises(VendorRejected, match="bad q"):
         await _adapter().find_patient(mrn="X")
+
+
+@respx.mock
+async def test_search_hit_precision_unknown_even_if_hit_claims_a_flag():
+    _login()
+    body = _fx("search_patient_two_hits.json")
+    body["pageOfResults"][0]["birthdateEstimated"] = False
+    respx.get(SEARCH).mock(return_value=httpx.Response(200, json=body))
+    hits = await _adapter().search_patients(mrn="GAN")
+    assert hits[0].birth_date is not None and hits[0].birth_date_precision is None

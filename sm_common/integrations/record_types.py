@@ -42,7 +42,8 @@ class RecordPatient:
     family: str
     gender: Gender | None
     birth_date: date | None
-    birth_date_estimated: bool
+    # None = unknown (Bahmni search hits do not say); the profile read carries it.
+    birth_date_estimated: bool | None
     age_years: int | None
     phone: str | None
     address: RecordAddress

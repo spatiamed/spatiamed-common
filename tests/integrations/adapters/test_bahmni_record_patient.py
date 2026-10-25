@@ -431,3 +431,12 @@ async def test_marker_search_full_page_fails_closed():
     with pytest.raises(ConflictError, match="partial page"):
         await _client(**MARKER_CFG).create_patient(_input())
     assert not post.called
+
+
+@respx.mock
+async def test_search_hit_birth_date_estimated_is_unknown():
+    _login()
+    page = {"totalCount": 1, "pageOfResults": [{**_hit("u1"), "birthdateEstimated": False}]}
+    respx.get(SEARCH).mock(return_value=httpx.Response(200, json=page))
+    hits, _ = await _client().search(phone="9876543210")
+    assert hits[0].birth_date is not None and hits[0].birth_date_estimated is None

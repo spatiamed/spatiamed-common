@@ -7,7 +7,8 @@ Prints one line per check, ``CHECK <name> PASS|FAIL <detail>``; exit 0 only if a
 Env (required): BAHMNI_BASE_URL, BAHMNI_USER, BAHMNI_PASS, BAHMNI_CONFIG_JSON (written by
 seed_data.py). Optional: BAHMNI_CA_PEM (PEM path), BAHMNI_INSECURE_TLS=1 (throwaway test
 box only), HARNESS_SAMPLES_DIR (raw responses are written there as JSON),
-HARNESS_CONTINUE_AFTER_GATE=1 (keep going after the marker_searchable gate fails).
+HARNESS_CONTINUE_AFTER_GATE=1 (keep going after the marker_searchable gate fails),
+HARNESS_ONLY=<check>[,<check>] (run just those checks).
 Writes synthetic ``LT-ADAPTER-`` records only.
 """
 
@@ -148,12 +149,37 @@ async def hit_fields(x: Ctx) -> tuple[bool, str]:
     hit = next((h for h in page if h.get("uuid") == x.h["patient_uuid"]), None)
     if hit is None:
         return False, f"seeded patient not in page (keys={sorted(raw)})"
-    want = ("givenName", "familyName", "birthDate", "customAttribute", "birthdateEstimated")
+    want = ("givenName", "familyName", "birthDate", "customAttribute")
     missing = [k for k in want if k not in hit]
     bd = hit.get("birthDate")
     epoch = isinstance(bd, int) and not isinstance(bd, bool)
     types = {k: type(hit.get(k)).__name__ for k in want}
-    return not missing and epoch, f"missing={missing} types={types} envelope={sorted(raw)}"
+    # Search hits do not say whether the DOB is estimated: both clients must report
+    # UNKNOWN there; the profile read is authoritative (the seed DOB is exact).
+    found = await x.adapter.search_patients(phone=x.h["patient_phone"])
+    a_hit = next((p for p in found if p.resource_id == x.h["patient_uuid"]), None)
+    r_hits, _ = await x.record.search(phone=x.h["patient_phone"])
+    r_hit = next((p for p in r_hits if p.uuid == x.h["patient_uuid"]), None)
+    a_prof = await x.adapter.get_patient(x.h["patient_uuid"])
+    r_prof = await x.record.get_patient(x.h["patient_uuid"])
+    unknown_on_search = (
+        a_hit is not None
+        and a_hit.birth_date is not None
+        and a_hit.birth_date_precision is None
+        and r_hit is not None
+        and r_hit.birth_date_estimated is None
+    )
+    profile_real = (
+        a_prof is not None
+        and a_prof.birth_date_precision == "exact"
+        and r_prof is not None
+        and r_prof.birth_date_estimated is False
+    )
+    ok = not missing and epoch and unknown_on_search and profile_real
+    return ok, (
+        f"missing={missing} types={types} raw_has_birthdateEstimated={'birthdateEstimated' in hit} "
+        f"search_precision_unknown={unknown_on_search} profile_precision_real={profile_real}"
+    )
 
 
 async def _household(x: Ctx, n: int) -> None:
@@ -684,9 +710,11 @@ async def main() -> int:
     cfg = json.loads(pathlib.Path(os.environ["BAHMNI_CONFIG_JSON"]).read_text())
     adapter, record = build(cfg)
     x = Ctx(cfg, adapter, record)
+    only = {n for n in os.environ.get("HARNESS_ONLY", "").split(",") if n}
+    checks = [(n, f) for n, f in CHECKS if not only or n in only]
     failed = 0
     try:
-        for name, fn in CHECKS:
+        for name, fn in checks:
             ok, detail = await run_check(x, fn)
             print(f"CHECK {name} {'PASS' if ok else 'FAIL'} {detail}", flush=True)
             failed += not ok
@@ -696,7 +724,7 @@ async def main() -> int:
                     return 1
     finally:
         await adapter._http.aclose()
-    print(f"SUMMARY {len(CHECKS) - failed}/{len(CHECKS)} passed")
+    print(f"SUMMARY {len(checks) - failed}/{len(checks)} passed")
     return 0 if failed == 0 else 1
 
 

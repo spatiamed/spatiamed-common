@@ -149,7 +149,8 @@ class BahmniRecordClient:
             family=str(hit.get("familyName") or ""),
             gender=gender(hit.get("gender")),
             birth_date=dob,
-            birth_date_estimated=flag(hit.get("birthdateEstimated")),
+            # Search hits carry no birthdateEstimated: unknown (None); get_patient knows.
+            birth_date_estimated=None,
             age_years=age if isinstance(age, int) else (age_on(dob, _today()) if dob else None),
             phone=value if is_phone and isinstance(value, str) else None,
             address=RecordAddress(city_village=str(hit.get("addressFieldValue") or "")),

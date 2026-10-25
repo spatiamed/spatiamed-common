@@ -25,6 +25,7 @@ There are no defaults; each script exits 2 when a required variable is missing.
 | `BAHMNI_INSECURE_TLS=1` | all, optional | skip TLS verification (a throwaway self-signed test box only) |
 | `BAHMNI_LOCATION_NAME` | seed, optional | appointment location name (default `OPD-1`) |
 | `HARNESS_SAMPLES_DIR` | verify, optional | write raw Bahmni responses there (gitignored `samples/`) |
+| `HARNESS_ONLY` | verify, optional | comma-separated check names to run alone |
 | `HARNESS_CONTINUE_AFTER_GATE=1` | verify, optional | keep running after the `marker_searchable` setup gate fails |
 
 ## Reaching a box with no inbound rules
