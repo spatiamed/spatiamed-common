@@ -102,3 +102,33 @@ def test_needs_global_refuses_once_cancelled(tmp_path, monkeypatch):
     assert adt_checks._needs_global(x) is None
     x.cancelled = True
     assert "interrupted" in (adt_checks._needs_global(x) or "")
+
+
+async def test_raw_forwards_a_per_call_timeout(tmp_path, monkeypatch):
+    # Running the stale-visit task blocks until every idle visit on the box is closed:
+    # that one call gets its own, longer read timeout.
+    seen: list[dict[str, Any]] = []
+
+    async def handle(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/session"):
+            return httpx.Response(
+                200, json={"authenticated": True}, headers={"set-cookie": "JSESSIONID=x"}
+            )
+        seen.append(req.extensions["timeout"])
+        return httpx.Response(200, json={})
+
+    monkeypatch.setenv("HARNESS_SAMPLES_DIR", str(tmp_path))
+    http = BahmniHttp("https://b.test", "u", "p", transport=httpx.MockTransport(handle))
+    config = BahmniConfig(location_uuid="L", identifier_type_uuid="t", identifier_source_uuid="s")
+    x = adt_checks.AdtCtx({"harness": {"provider_uuid": "prov"}}, http, config, http)
+    await x.raw("POST", "taskaction", body={}, timeout_s=adt_checks.STALE_TASK_TIMEOUT_S)
+    await x.raw("GET", "visit")
+    assert seen[0]["read"] == adt_checks.STALE_TASK_TIMEOUT_S >= 300
+    assert seen[1]["read"] == 30.0
+
+
+def test_stale_close_runs_the_task_with_the_long_timeout():
+    import inspect
+
+    src = inspect.getsource(adt_checks.admitted_visit_survives_stale_close)
+    assert "timeout_s=STALE_TASK_TIMEOUT_S" in src

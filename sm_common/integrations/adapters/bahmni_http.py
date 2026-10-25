@@ -179,7 +179,7 @@ class BahmniHttp:
         if status == 403:
             raise AuthError("bahmni: HTTP 403 forbidden")
         if status >= 500 or status == 429:
-            raise TransientError(f"bahmni: HTTP {status}")
+            raise TransientError(f"bahmni: HTTP {status}", status_code=status)
         if status in expect or status == 404:
             return resp
         if status == 400:

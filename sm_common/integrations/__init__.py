@@ -25,6 +25,8 @@ from sm_common.integrations.exceptions import (
     WriteNotSupported,
     VendorRejected,
     SearchNotSupported,
+    EncounterOutsideVisit,
+    EncounterMatchAmbiguous,
 )
 
 __all__ = [
@@ -52,4 +54,6 @@ __all__ = [
     "WriteNotSupported",
     "VendorRejected",
     "SearchNotSupported",
+    "EncounterOutsideVisit",
+    "EncounterMatchAmbiguous",
 ]
