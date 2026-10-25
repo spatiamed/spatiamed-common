@@ -375,6 +375,53 @@ async def test_write_encounter_requires_marker_concept_and_types():
 
 
 @respx.mock
+async def test_write_encounter_uses_given_encounter_type():
+    _login()
+    _no_existing()
+    post = respx.post(WRITE).mock(return_value=httpx.Response(200, json={"encounterUuid": "e-9"}))
+    await _client().write_encounter(_input(encounter_type_uuid="et-summary"))
+    assert json.loads(post.calls[0].request.content)["encounterTypeUuid"] == "et-summary"
+    # A given type needs no consultation type configured.
+    await _client(consultation_encounter_type_uuid="").write_encounter(
+        _input(encounter_type_uuid="et-summary")
+    )
+    assert json.loads(post.calls[1].request.content)["encounterTypeUuid"] == "et-summary"
+    # None (the default) keeps the consultation type.
+    await _client().write_encounter(_input(encounter_type_uuid=None))
+    assert json.loads(post.calls[2].request.content)["encounterTypeUuid"] == "et-consult"
+
+
+@respx.mock
+async def test_write_encounter_empty_given_type_config_error_before_http():
+    # An unset discharge_summary_encounter_type_uuid must not file a consultation.
+    _login()
+    lookup = _no_existing()
+    post = respx.post(WRITE).mock(return_value=httpx.Response(200, json={"encounterUuid": "e-9"}))
+    with pytest.raises(ConfigError, match="encounter_type_uuid"):
+        await _client().write_encounter(_input(encounter_type_uuid=""))
+    assert post.call_count == 0 and lookup.call_count == 0
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "admission_encounter_type_uuid",
+        "transfer_encounter_type_uuid",
+        "discharge_encounter_type_uuid",
+    ],
+)
+@respx.mock
+async def test_write_encounter_refuses_adt_encounter_type(key: str):
+    # ADT types go through admit/transfer/discharge (bed, visit status), never bahmniencounter.
+    _login()
+    lookup = _no_existing()
+    post = respx.post(WRITE).mock(return_value=httpx.Response(200, json={"encounterUuid": "e-9"}))
+    with pytest.raises(ConfigError, match=key):
+        await _client(**{key: "et-adt"}).write_encounter(_input(encounter_type_uuid="et-adt"))
+    assert post.call_count == 0 and lookup.call_count == 0
+
+
+@respx.mock
 async def test_drug_orders_without_quantity_units_raise_before_any_call():
     _login()
     lookup = _no_existing()
@@ -391,3 +438,15 @@ async def test_no_drug_orders_needs_no_quantity_units():
     post = respx.post(WRITE).mock(return_value=httpx.Response(200, json={"encounterUuid": "e-9"}))
     res = await _client(drug_quantity_units="").write_encounter(_input(drug_orders=[]))
     assert res.created and post.call_count == 1
+
+
+@respx.mock
+async def test_start_visit_at_visit_location_when_configured():
+    # Bahmni keeps visits at the Visit Location (its own visits are created there), and
+    # its stock ADT worklist SQL lists a visit only when visit.location_id IS the visit
+    # location: a visit at the login location never shows on "to admit".
+    _login()
+    respx.get(VISIT).mock(return_value=httpx.Response(200, json={"results": []}))
+    post = respx.post(VISIT).mock(return_value=httpx.Response(201, json=_visit("v-2")))
+    await _client(visit_location_uuid="vloc-1").start_visit("p-1")
+    assert json.loads(post.calls[0].request.content)["location"] == "vloc-1"

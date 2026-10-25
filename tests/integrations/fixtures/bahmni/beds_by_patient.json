@@ -1,0 +1,24 @@
+{
+  "results": [
+    {
+      "bedId": 11,
+      "bedNumber": "GW-11",
+      "bedType": null,
+      "physicalLocation": {
+        "uuid": "08ed3779-ac52-4fa4-8e93-686892cf4527",
+        "display": "General Ward",
+        "name": "General Ward",
+        "description": null,
+        "retired": false,
+        "links": []
+      },
+      "patients": [
+        {
+          "uuid": "849e3827-09bb-4123-a07b-3fd63801d0d5",
+          "display": "TEST100001 - Test Patient",
+          "links": []
+        }
+      ]
+    }
+  ]
+}

@@ -10,6 +10,13 @@ box only), HARNESS_SAMPLES_DIR (raw responses are written there as JSON),
 HARNESS_CONTINUE_AFTER_GATE=1 (keep going after the marker_searchable gate fails),
 HARNESS_ONLY=<check>[,<check>] (run just those checks).
 Writes synthetic ``LT-ADAPTER-`` records only.
+
+``--adt`` runs the ADT group instead (``adt_checks.py``: wards, beds, admit, transfer,
+discharge; synthetic ``LT-P2-`` records, cleaned up at the end). It needs the ADT keys
+``seed_data.py --adt`` writes. BAHMNI_ADMIN_USER/BAHMNI_ADMIN_PASS: the admin login used
+for cleanup and the box-wide probes. HARNESS_ADT_GLOBAL_STATE=1 also runs the three probes
+that change box-wide state (restored in ``finally``; HARNESS_ADT_STALE_CLOSE=1 as well for
+the irreversible stale-visit close). HARNESS_DEADLINE_S bounds the run (default 1200).
 """
 
 from __future__ import annotations
@@ -28,9 +35,11 @@ from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from sm_common.integrations.adapters.bahmni import BahmniAdapter  # noqa: E402
 from sm_common.integrations.adapters.bahmni_config import BahmniConfig  # noqa: E402
+from sm_common.integrations.adapters.bahmni_http import BahmniHttp  # noqa: E402
 from sm_common.integrations.adapters.bahmni_record import BahmniRecordClient  # noqa: E402
 from sm_common.integrations.build_adapter import (  # noqa: E402
     AdapterBuildConfig,
@@ -117,7 +126,7 @@ async def marker_searchable(x: Ctx) -> tuple[bool, str]:
         patientAttributes=x.config.marker_attribute_name,
     )
     x.sample("marker_search", raw)
-    hits = await x.record._find_by_marker(f"sm:{marker}")
+    hits = await x.record.find_by_marker(marker)
     ok = created and len(hits) == 1 and hits[0].uuid == rec.uuid
     detail = f"created={created} hits={len(hits)} raw_total={raw.get('totalCount')}"
     return ok, detail if ok else f"{GATE_MSG} ({detail})"
@@ -676,6 +685,22 @@ async def run_check(x: Ctx, fn: Check) -> tuple[bool, str]:
     return False, "unreachable"
 
 
+def tls_kwargs() -> dict[str, Any]:
+    if os.environ.get("BAHMNI_CA_PEM"):
+        return {"ca_bundle_pem": pathlib.Path(os.environ["BAHMNI_CA_PEM"]).read_text()}
+    if os.environ.get("BAHMNI_INSECURE_TLS") == "1":
+        return {"verify_tls": False, "allow_insecure_tls": True}
+    return {}
+
+
+def admin_http() -> BahmniHttp | None:
+    """The OpenMRS admin login for ADT cleanup and box-wide probes; read once, never printed."""
+    user, password = os.environ.get("BAHMNI_ADMIN_USER"), os.environ.get("BAHMNI_ADMIN_PASS")
+    if not user or not password:
+        return None
+    return BahmniHttp(os.environ["BAHMNI_BASE_URL"], user, password, **tls_kwargs())
+
+
 def build(cfg: dict[str, Any]) -> tuple[BahmniAdapter, BahmniRecordClient]:
     creds: dict[str, Any] = {
         "username": os.environ["BAHMNI_USER"],
@@ -710,6 +735,16 @@ async def main() -> int:
         return 2
     cfg = json.loads(pathlib.Path(os.environ["BAHMNI_CONFIG_JSON"]).read_text())
     adapter, record = build(cfg)
+    if "--adt" in sys.argv[1:]:
+        import adt_checks
+
+        admin = admin_http()
+        try:
+            return await adt_checks.run(cfg, adapter._http, adapter._config, admin)
+        finally:
+            await adapter._http.aclose()
+            if admin is not None:
+                await admin.aclose()
     x = Ctx(cfg, adapter, record)
     only = {n for n in os.environ.get("HARNESS_ONLY", "").split(",") if n}
     checks = [(n, f) for n, f in CHECKS if not only or n in only]

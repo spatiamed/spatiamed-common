@@ -11,6 +11,13 @@ Env (required): BAHMNI_BASE_URL, BAHMNI_USER, BAHMNI_PASS, BAHMNI_CONFIG_JSON (o
 Optional: BAHMNI_CA_PEM (PEM path), BAHMNI_INSECURE_TLS=1 (throwaway test box only),
 BAHMNI_LOCATION_NAME (default "OPD-1"), BAHMNI_DRUG_QUANTITY_UNITS (default "Unit").
 Exit: 0 written, 1 a required Bahmni object could not be resolved, 2 bad env.
+
+``--adt`` also resolves the ADT keys (``verify_adapter_live.py --adt``) by name, READ
+ONLY: the IPD visit type, the ADMISSION / TRANSFER / DISCHARGE encounter types, a
+"Discharge Summary" type, the "Disposition Note" and "Adt Notes" concepts, and the
+location tagged "Visit Location" above the login location (or BAHMNI_VISIT_LOCATION_NAME).
+The tenant's ADT provisioning creates them; when a required one is missing this exits 1.
+It seeds no ward: the ADT harness creates (and cleans up) its own per-run ward.
 """
 
 from __future__ import annotations
@@ -42,6 +49,16 @@ DOC_TYPE = "lab_report"
 # quantityUnits concept name for drug orders; must be in the install's dosing-units set.
 DRUG_QUANTITY_UNITS = os.environ.get("BAHMNI_DRUG_QUANTITY_UNITS", "Unit")
 DOC_CONCEPT_CANDIDATES = ("Patient Document", "Document", "Lab Report", "Radiology")
+# ADT names Bahmni's visit-attribute logic and stock worklist SQL key on.
+ADT_ENCOUNTER_TYPES = {
+    "admission_encounter_type_uuid": "ADMISSION",
+    "transfer_encounter_type_uuid": "TRANSFER",
+    "discharge_encounter_type_uuid": "DISCHARGE",
+}
+DISCHARGE_SUMMARY_TYPE = "Discharge Summary"
+DISPOSITION_CODES = {"admit": "Admit Patient", "discharge": "Discharge Patient"}
+ADT_NOTE_CONCEPTS = {"disposition_note": "Disposition Note", "adt_notes": "Adt Notes"}
+VISIT_LOCATION_TAG = "visit location"
 
 
 class UnresolvedError(RuntimeError):
@@ -312,6 +329,56 @@ def build_config(c: httpx.Client) -> dict[str, Any]:
     }
 
 
+def visit_location(c: httpx.Client, start_uuid: str) -> str:
+    """The nearest location tagged "Visit Location", from ``start_uuid`` up its parents."""
+    override = os.environ.get("BAHMNI_VISIT_LOCATION_NAME")
+    if override:
+        return need(_named(c, "location", override), f"location {override!r}")
+    uuid: str | None = start_uuid
+    for _ in range(10):
+        if not uuid:
+            break
+        loc = _ok(
+            c.get(
+                f"{R}/location/{uuid}",
+                params={"v": "custom:(uuid,parentLocation:(uuid),tags:(display))"},
+            )
+        )
+        tags = {
+            str(t.get("display") or "").lower()
+            for t in loc.get("tags") or []
+            if isinstance(t, dict)
+        }
+        if VISIT_LOCATION_TAG in tags:
+            return str(loc["uuid"])
+        parent = loc.get("parentLocation")
+        uuid = parent.get("uuid") if isinstance(parent, dict) else None
+    raise UnresolvedError("no 'Visit Location'-tagged location above the login location")
+
+
+def adt_keys(c: httpx.Client, location_uuid: str) -> dict[str, Any]:
+    """ADT field_mapping keys, resolved by name (nothing is created)."""
+    hint = " (run the tenant's ADT provisioning first)"
+    keys: dict[str, Any] = {
+        "visit_location_uuid": visit_location(c, location_uuid),
+        "ipd_visit_type_uuid": need(_named(c, "visittype", "IPD"), "visit type IPD" + hint),
+        "discharge_summary_encounter_type_uuid": _named(c, "encountertype", DISCHARGE_SUMMARY_TYPE)
+        or "",
+        "admit_new_ipd_visit": True,
+        "disposition_codes": dict(DISPOSITION_CODES),
+    }
+    for key, name in ADT_ENCOUNTER_TYPES.items():
+        keys[key] = need(_named(c, "encountertype", name), f"encounter type {name}" + hint)
+    if not keys["discharge_summary_encounter_type_uuid"]:
+        print(
+            f"seed_data: no {DISCHARGE_SUMMARY_TYPE!r} encounter type; key left empty",
+            file=sys.stderr,
+        )
+    notes = {k: _named(c, "concept", n) for k, n in ADT_NOTE_CONCEPTS.items()}
+    keys["_adt_note_concepts"] = {k: v for k, v in notes.items() if v}
+    return keys
+
+
 def main() -> int:
     base, user, password, out = env_or_exit(
         "BAHMNI_BASE_URL", "BAHMNI_USER", "BAHMNI_PASS", "BAHMNI_CONFIG_JSON"
@@ -319,6 +386,11 @@ def main() -> int:
     try:
         with make_client(base, user, password) as c:
             cfg = build_config(c)
+            if "--adt" in sys.argv[1:]:
+                fm = cfg["field_mapping"]
+                adt = adt_keys(c, fm["location_uuid"])
+                fm["concept_map"].update(adt.pop("_adt_note_concepts"))
+                fm.update(adt)
     except UnresolvedError as exc:
         print(f"seed_data: {exc}", file=sys.stderr)
         return 1

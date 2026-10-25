@@ -1,0 +1,34 @@
+{
+  "results": [
+    {
+      "ward": {
+        "uuid": "08ed3779-ac52-4fa4-8e93-686892cf4527",
+        "display": "General Ward",
+        "links": [
+          {
+            "rel": "self",
+            "uri": "https://bahmni.example.test/openmrs/ws/rest/v1/location/08ed3779-ac52-4fa4-8e93-686892cf4527",
+            "resourceAlias": "location"
+          }
+        ]
+      },
+      "totalBeds": 2,
+      "occupiedBeds": 1
+    },
+    {
+      "ward": {
+        "uuid": "812a14eb-818f-4f89-8e24-087ed39e2fd7",
+        "display": "Private Ward",
+        "links": [
+          {
+            "rel": "self",
+            "uri": "https://bahmni.example.test/openmrs/ws/rest/v1/location/812a14eb-818f-4f89-8e24-087ed39e2fd7",
+            "resourceAlias": "location"
+          }
+        ]
+      },
+      "totalBeds": 0,
+      "occupiedBeds": 0
+    }
+  ]
+}

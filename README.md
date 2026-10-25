@@ -270,6 +270,40 @@ mypy sm_common
 - pytz >= 2024.1
 - fastapi >= 0.115 (optional, only for `sm_common.fastapi_guard`)
 
+### Added in v0.25.0
+
+`BahmniRecordClient` gains an inpatient (ADT) surface, verified against a live Bahmni standard stack
+(bedmanagement 6.0.0, emrapi 1.36.0, ipd 1.1.1) with synthetic data:
+- **Wards and beds.** `list_wards`, `get_ward`, `current_bed`, plus master-data creation: `create_ward`,
+  `ensure_bed_type`, `add_bed`. Beds are keyed by their integer id (`RecordBed.bed_id`), because Bahmni
+  rewrites a bed's uuid when a patient leaves it. Bed numbers are at most 10 characters.
+- **Worklists and dispositions.** `adt_worklist("to_admit" | "admitted" | "to_discharge")` and
+  `write_disposition`.
+- **Admit, transfer, discharge.** `admit`, `transfer`, `discharge` (optionally ending the visit) and
+  `end_visit`. Each takes a caller `event_id` and is retry-safe: the encounter is found again by a marker obs,
+  and the bed is re-read before any write. Refusals are `ConflictError` with a reason such as
+  `bed_occupied`, `already_in_bed`, `visit_changed` or `visit_closed`.
+- **`find_by_marker(marker: UUID)`** is a public lookup for the registration marker that `create_patient`
+  writes. It fails closed the same way `create_patient` does.
+- New record types: `RecordWard`, `RecordBed`, `RecordBedAssignment`, `RecordAdtRow`, `RecordAdtInput`,
+  `RecordAdmitResult`.
+- New `BahmniConfig` keys (all optional unless the ADT methods are used): `visit_location_uuid`,
+  `ipd_visit_type_uuid`, `admission_encounter_type_uuid`, `transfer_encounter_type_uuid`,
+  `discharge_encounter_type_uuid`, `discharge_summary_encounter_type_uuid`, `admit_new_ipd_visit`
+  (default `true`) and `disposition_codes` (`{"admit": ..., "discharge": ...}` concept names).
+
+Behaviour changes consumers should know about:
+- `start_visit` places a new visit at `visit_location_uuid` when it is set (else `location_uuid`), so that
+  Bahmni's ADT worklists list it. Encounters keep the login location.
+- `RecordEncounterInput.encounter_type_uuid` (optional) overrides the consultation encounter type, for
+  example for discharge summaries. An empty value, or one of the configured ADT encounter types, raises
+  `ConfigError` before any HTTP call.
+- `BahmniConfig.from_mapping` raises `ConfigError` when a mapping field is not a mapping or
+  `admit_new_ipd_visit` is not a boolean.
+
+The live harness gains an `--adt` group (`harness/bahmni/adt_checks.py`); each `CHECK` line names the
+behaviour topic it verifies.
+
 ### Changed in v0.24.0
 
 The Bahmni adapter was rebuilt against a live Bahmni standard stack (see "Bahmni adapter" above). Changes

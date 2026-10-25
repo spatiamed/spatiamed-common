@@ -8,12 +8,15 @@ import re
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from typing import Any
+from uuid import UUID
 
 from sm_common.identity.dob import age_on
+from sm_common.integrations.adapters.bahmni_adt import BahmniAdtMixin
 from sm_common.integrations.adapters.bahmni_config import BahmniConfig
 from sm_common.integrations.adapters.bahmni_http import BahmniHttp, from_epoch_ms, to_epoch_ms
 from sm_common.integrations.adapters.bahmni_parse import birth_date as parse_birth_date
 from sm_common.integrations.adapters.bahmni_parse import flag, gender
+from sm_common.integrations.adapters.bahmni_parse import when as _when
 from sm_common.integrations.exceptions import (
     ConfigError,
     ConflictError,
@@ -68,26 +71,6 @@ _FLEXIBLE_DOSING = (
 )
 _DIAGNOSIS_GROUP = "visit diagnoses"
 _DIAGNOSIS_TITLES = ("non-coded diagnosis", "coded diagnosis")
-_OFFSET_NO_COLON = re.compile(r"([+-]\d{2})(\d{2})$")
-
-
-def _when(raw: Any) -> datetime | None:
-    """OpenMRS REST datetime (ISO with a ``+0530``-style offset, or epoch ms) -> aware UTC."""
-    if isinstance(raw, bool) or raw is None:
-        return None
-    if isinstance(raw, (int, float)) or (isinstance(raw, str) and raw.strip().isdigit()):
-        try:
-            return from_epoch_ms(raw)
-        except ValueError:
-            return None
-    if not isinstance(raw, str):
-        return None
-    text = _OFFSET_NO_COLON.sub(r"\1:\2", raw.strip().replace("Z", "+00:00"))
-    try:
-        dt = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def _display(v: Any) -> str:
@@ -121,7 +104,7 @@ def _address_body(a: RecordAddress) -> dict[str, str]:
     }
 
 
-class BahmniRecordClient:
+class BahmniRecordClient(BahmniAdtMixin):
     def __init__(self, http: BahmniHttp, config: BahmniConfig) -> None:
         self._http = http
         self._config = config
@@ -254,7 +237,31 @@ class BahmniRecordClient:
             )
         return bool(c.marker_attribute_name)
 
+    async def find_by_marker(self, marker: UUID) -> list[RecordPatient]:
+        """Patients carrying exactly this registration marker (normally 0 or 1).
+
+        ``marker`` is the caller's id, as passed to ``create_patient``
+        (``RecordPatientInput.marker``); the stored value is built here, the same way
+        ``create_patient`` builds it. The lookup is the exact one ``create_patient``
+        runs before it writes, and it fails closed the same way:
+
+        - marker attribute not configured (or only half) -> ``ConfigError``, no HTTP;
+        - search route missing -> ``WriteNotSupported``;
+        - a partial page, or a hit whose marker cannot be read -> ``ConflictError``.
+
+        Bahmni's search is a LIKE match; only exact marker values are returned. More
+        than one hit means duplicates a human must reconcile; the caller decides.
+        """
+        if not self._marker_configured():
+            raise ConfigError("bahmni: marker_attribute_name/_type_uuid are not configured")
+        return await self._find_by_marker(f"{_MARKER_PREFIX}{marker}")
+
     async def _find_by_marker(self, value: str) -> list[RecordPatient]:
+        """``find_by_marker`` on the full stored value (``"sm:<uuid>"``).
+
+        Kept for callers pinned to sm_common < 0.25 (existing registration checks);
+        new code calls ``find_by_marker`` with the bare UUID.
+        """
         name = self._config.marker_attribute_name
         # Fail closed: a missing route or a partial page must not read as "no earlier
         # create", or a retry would POST a duplicate.
@@ -477,7 +484,13 @@ class BahmniRecordClient:
     async def start_visit(
         self, patient_uuid: str, visit_type_uuid: str | None = None
     ) -> tuple[RecordVisit, bool]:
-        """(visit, created). An already-active visit is reused, never doubled."""
+        """(visit, created). An already-active visit is reused, never doubled.
+
+        A new visit is placed at ``visit_location_uuid`` when configured (else the login
+        ``location_uuid``), as Bahmni places its own visits: Bahmni matches visits by
+        their Visit Location, and its stock ADT worklist queries list a visit only when
+        its location IS the visit location. Encounters keep the login location.
+        """
         active = await self.active_visit(patient_uuid)
         if active is not None:
             return active, False
@@ -490,7 +503,7 @@ class BahmniRecordClient:
             json={
                 "patient": patient_uuid,
                 "visitType": type_uuid,
-                "location": self._config.location_uuid,
+                "location": self._config.visit_location_uuid or self._config.location_uuid,
             },
         )
         if resp.status_code == 404:
@@ -626,11 +639,31 @@ class BahmniRecordClient:
         return None
 
     async def write_encounter(self, e: RecordEncounterInput) -> RecordEncounterResult:
-        """File one clinical note as an encounter; idempotent on ``e.note_id``."""
+        """File one clinical note as an encounter; idempotent on ``e.note_id``.
+
+        The encounter type is ``e.encounter_type_uuid`` when given, else the configured
+        consultation type. A given but empty type, or one of the configured ADMISSION,
+        TRANSFER or DISCHARGE types (those go through the ADT methods), is a
+        ``ConfigError`` before any HTTP call. The marker lookup spans the whole visit,
+        whatever the type.
+        """
         c = self._config
         if not c.note_marker_concept_uuid:
             raise ConfigError("bahmni: note_marker_concept_uuid is required to write encounters")
-        if not c.consultation_encounter_type_uuid:
+        if e.encounter_type_uuid is not None and not e.encounter_type_uuid:
+            raise ConfigError(
+                "bahmni: encounter_type_uuid is empty (is discharge_summary_encounter_type_uuid set?)"
+            )
+        for key in (
+            "admission_encounter_type_uuid",
+            "transfer_encounter_type_uuid",
+            "discharge_encounter_type_uuid",
+        ):
+            if e.encounter_type_uuid and e.encounter_type_uuid == getattr(c, key):
+                # Bahmni would set admission/visit status with no bed or visit change.
+                raise ConfigError(f"bahmni: encounter_type_uuid is the ADT type {key}")
+        encounter_type = e.encounter_type_uuid or c.consultation_encounter_type_uuid
+        if not encounter_type:
             raise ConfigError("bahmni: consultation_encounter_type_uuid is required")
         if e.drug_orders and not c.drug_other_concept_uuid:
             raise ConfigError("bahmni: drug_other_concept_uuid is required for drug orders")
@@ -652,7 +685,7 @@ class BahmniRecordClient:
             "patientUuid": e.patient_uuid,
             "visitUuid": e.visit_uuid,
             "locationUuid": c.location_uuid,
-            "encounterTypeUuid": c.consultation_encounter_type_uuid,
+            "encounterTypeUuid": encounter_type,
             "encounterDateTime": to_epoch_ms(e.encounter_at),
             "providers": [{"uuid": e.provider_uuid}],
             "observations": observations,
