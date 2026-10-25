@@ -193,6 +193,67 @@ value mismatch: the canary passes at boot but real webhooks 401 at runtime.
 
 The package ships `py.typed`, so consumers get inline types (no `ignore_missing_imports` needed).
 
+## Bahmni adapter
+
+`vendor="bahmni"` gives two clients over one HTTP core (`BahmniHttp`):
+
+- `build_adapter(cfg)` returns `BahmniAdapter`, the `HmsAdapter` contract (patient search and create,
+  appointment write-back and cancel, booking poll, doctor roster, health check).
+- `build_bahmni_record_client(cfg)` returns `BahmniRecordClient`, the system-of-record operations
+  (patient create/update, visits, encounters with diagnoses and drug orders, appointment services,
+  allergies, document filing).
+
+**Transport.** Bahmni REST (`/openmrs/ws/rest/v1/...`) plus the appointments AtomFeed
+(`/openmrs/ws/atomfeed/appointments/recent`, walking `prev-archive` back to the cursor). FHIR2 is used
+only for allergies; Bahmni's FHIR2 module has no Appointment resource. Timestamps go over the wire as
+epoch milliseconds.
+
+**Auth: `basic` only.** OpenMRS supports HTTP Basic with a `JSESSIONID` session cookie, nothing else.
+`credentials` takes `username`, `password` and `auth_scheme` (`"basic"`, the default; `"session"` is an
+alias). `"api_key"` raises `ValueError` at construction. The session is reused, and a 401 triggers one
+re-login and one retry. A second 401 raises `AuthError`, and a 403 is never retried. TLS verification is
+on: pass `ca_bundle_pem` (a PEM string) for a private CA. `verify_tls=False` is honoured only together with
+`allow_insecure_tls=True`, and is meant for throwaway test boxes only.
+
+**`BahmniConfig`** is built from the integration's `field_mapping` (`BahmniConfig.from_mapping`; unknown
+keys are ignored, and the library reads no env vars). Every value is install-specific, so nothing has a
+built-in uuid. A key marked "required for X" raises `ConfigError` when X is attempted without it, before
+any HTTP call.
+
+| Key | Required | What it is for |
+|---|---|---|
+| `location_uuid` | **always** (construction) | Location for appointments, visits and encounters |
+| `identifier_type_uuid` | **always** (construction) | Patient identifier type of the UHID |
+| `identifier_source_uuid` | **always** (construction) | idgen source that mints the UHID on patient create |
+| `identifier_prefix` | no | idgen prefix, sent as `identifierPrefix` when set |
+| `phone_attribute_name` | no (default `phoneNumber`) | Person attribute NAME that `bahmni/search/patient` searches and returns for phone |
+| `phone_attribute_type_uuid` | for create/update with a phone | Person attribute type that stores the phone |
+| `marker_attribute_name` + `marker_attribute_type_uuid` | no, but set both or neither | Person attribute holding our patient id, so a retried create finds the earlier patient instead of duplicating. The attribute type must be searchable in Bahmni patient search |
+| `default_service_uuid` | for appointment write-back, unless `service_by_practitioner` covers the provider | Appointment service used when no per-provider mapping exists |
+| `service_by_practitioner` | no | provider uuid to appointment service uuid |
+| `system_provider_identifiers` | no (default `UNKNOWN`, `LABMANAGER`, `LABSYSTEM`, `superman`) | Provider identifiers left out of the doctor roster |
+| `opd_visit_type_uuid` | for `start_visit` | Visit type of OPD visits |
+| `consultation_encounter_type_uuid` | for `write_encounter` | Encounter type of consultation notes |
+| `note_marker_concept_uuid` | for `write_encounter` | Text concept carrying our note id, so a retried write finds the earlier encounter |
+| `concept_map` | for each observation key sent | Our observation keys (`chief_complaint`, `history`, `examination`, `advice`, `follow_up`, `vitals_pulse`, `vitals_sbp`, `vitals_dbp`, `vitals_temp`, `vitals_spo2`, `vitals_weight`, `vitals_height`) to concept uuids |
+| `drug_other_concept_uuid` | **for drug orders** | Concept for non-coded drug orders (free-text drug name) |
+| `drug_quantity_units` | **for drug orders** (no default) | Dosing-unit concept NAME sent as `quantityUnits` (for example `Unit` or `Tablet`). Bahmni rejects drug orders without a valid one |
+| `document_visit_type_uuid` + `document_encounter_type_uuid` | for document filing | Visit and encounter types that patient documents are filed under |
+| `document_type_concepts` | for each document type filed | Our document type to Bahmni concept uuid |
+| `default_provider_uuid` | no | Not read by the library. It is carried for callers, which pick a provider for document filing when the staff member has no practitioner mapping |
+
+**Behaviour to know:**
+
+- Appointment `comments` start with `sm:<booking_id>`. This is the idempotency marker. A marker lookup
+  ignores `Cancelled` and `Missed` appointments, so a retry after either one creates a new appointment.
+  `hms_booking_id` is always the appointment uuid.
+- `appointments/search` returns at most 50 rows and has no paging. The adapter splits the window until each
+  response is under the cap, and flags truncation only when a 1-minute window is still full.
+- Patient search returns every hit (a household phone can match several patients). Search hits carry no
+  birthdate-estimated flag, so `BahmniAdapter` search hits report `birth_date_precision="year"`, and
+  `BahmniRecordClient` search hits report `birth_date_estimated=None`. `get_patient` (patientprofile) is
+  authoritative.
+
 ## Testing
 
 ```bash
@@ -209,6 +270,16 @@ mypy sm_common
 - pytz >= 2024.1
 - feedparser >= 6.0
 - fastapi >= 0.115 (optional, only for `sm_common.fastapi_guard`)
+
+### Changed in v0.24.0
+
+The Bahmni adapter was rebuilt against a live Bahmni standard stack (see "Bahmni adapter" above). Consumers
+should note three changes:
+- `auth_scheme` now defaults to `"basic"` (it was `"api_key"`), and `"api_key"` now raises.
+- Search hits report `birth_date_precision="year"` instead of an exact date.
+- Drug orders need `drug_quantity_units`.
+
+`BahmniRecordClient` and `build_bahmni_record_client` are new.
 
 ### Removed in v0.6.0
 
