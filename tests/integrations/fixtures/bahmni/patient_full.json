@@ -1,0 +1,45 @@
+{
+  "patient": {
+    "uuid": "11111111-aaaa-4aaa-8aaa-000000000001",
+    "identifiers": [
+      {
+        "identifier": "GAN200001",
+        "preferred": true,
+        "identifierType": {
+          "uuid": "idtype-1"
+        }
+      }
+    ],
+    "person": {
+      "uuid": "11111111-aaaa-4aaa-8aaa-000000000001",
+      "display": "Asha Verma",
+      "gender": "F",
+      "birthdate": "1990-05-15T00:00:00.000+0530",
+      "birthdateEstimated": false,
+      "names": [
+        {
+          "givenName": "Asha",
+          "middleName": null,
+          "familyName": "Verma"
+        }
+      ],
+      "attributes": [
+        {
+          "attributeType": {
+            "uuid": "attr-phone",
+            "display": "phoneNumber"
+          },
+          "value": "9876543210"
+        },
+        {
+          "attributeType": {
+            "uuid": "attr-other",
+            "display": "occupation"
+          },
+          "value": "teacher"
+        }
+      ]
+    }
+  },
+  "relationships": []
+}

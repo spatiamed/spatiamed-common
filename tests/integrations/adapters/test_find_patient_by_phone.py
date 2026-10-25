@@ -127,15 +127,27 @@ async def test_an_unparseable_phone_is_not_sent_to_the_hms() -> None:
 async def test_bahmni_accepts_a_real_phone() -> None:
     from sm_common.integrations.adapters.bahmni import BahmniAdapter
 
-    respx.route(host="bahmni.example").mock(return_value=httpx.Response(200, json={}))
+    from sm_common.integrations.adapters.bahmni_config import BahmniConfig
+    from sm_common.integrations.adapters.bahmni_http import BahmniHttp
+
+    respx.get("https://bahmni.example/openmrs/ws/rest/v1/session").mock(
+        return_value=httpx.Response(
+            200, json={"authenticated": True}, headers={"set-cookie": "JSESSIONID=a"}
+        )
+    )
+    search = respx.get("https://bahmni.example/openmrs/ws/rest/v1/bahmni/search/patient").mock(
+        return_value=httpx.Response(200, json={"pageOfResults": []})
+    )
     adapter = BahmniAdapter(
-        base_url="https://bahmni.example",
-        auth_scheme="api_key",
+        http=BahmniHttp("https://bahmni.example", "u", "p"),
+        config=BahmniConfig("L", "T", "S"),
         hash_salt="s",
         transport_key="k",
-        api_key="a",
     )
-    await adapter.find_patient(phone="9876543210")
+    assert await adapter.find_patient(phone="9876543210") is None
+    # Plaintext number sent to the HMS, in every shape it may be stored as.
+    sent = {c.request.url.params["customAttribute"] for c in search.calls}
+    assert {"+919876543210", "9876543210"} <= sent
 
 
 @respx.mock

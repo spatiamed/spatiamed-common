@@ -9,11 +9,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from sm_common.integrations.adapters.bahmni import BahmniAdapter
+from sm_common.integrations.adapters.bahmni_config import BahmniConfig
+from sm_common.integrations.adapters.bahmni_http import BahmniHttp
+from sm_common.integrations.adapters.bahmni_record import BahmniRecordClient
 from sm_common.integrations.adapters.fhir_r4 import FhirR4Adapter
 from sm_common.integrations.adapters.generic_rest import GenericRestAdapter
 from sm_common.integrations.adapters.mocdoc import MocDocAdapter
 from sm_common.integrations.adapters.openemr import OpenEmrAdapter
 from sm_common.integrations.auth import TokenCache
+from sm_common.integrations.exceptions import ConfigError
 from sm_common.integrations.hms_adapter import HmsAdapter
 
 
@@ -37,6 +41,38 @@ def _with_cache(auth_cfg: dict, cache: TokenCache | None, slot: str) -> dict:  #
     return {**auth_cfg, "_token_cache": cache, "_token_slot": slot}
 
 
+def _check_bahmni_auth_scheme(scheme: str) -> None:
+    if scheme == "api_key":
+        raise ValueError("bahmni: api_key auth is not supported by OpenMRS; use basic")
+    if scheme not in ("basic", "session"):
+        raise ValueError(f"bahmni: unknown auth_scheme {scheme!r}; use basic")
+
+
+def _bahmni_parts(cfg: AdapterBuildConfig) -> tuple[BahmniHttp, BahmniConfig]:
+    creds: dict = cfg.credentials or {}  # type: ignore[type-arg]
+    # OpenMRS only does basic/session auth; "basic" and "session" are aliases.
+    _check_bahmni_auth_scheme((creds.get("auth_scheme") or "basic").lower())
+    if not creds.get("username") or not creds.get("password"):
+        raise ConfigError("bahmni: credentials need username and password")
+    http = BahmniHttp(
+        cfg.base_url or creds.get("base_url", ""),
+        creds["username"],
+        creds["password"],
+        ca_bundle_pem=creds.get("ca_bundle_pem"),
+        verify_tls=creds.get("verify_tls", True),
+        allow_insecure_tls=creds.get("allow_insecure_tls", False),
+    )
+    return http, BahmniConfig.from_mapping(cfg.field_mapping)
+
+
+def build_bahmni_record_client(cfg: AdapterBuildConfig) -> BahmniRecordClient:
+    """Build the Bahmni patient record client (search / create / update)."""
+    if cfg.vendor.lower() != "bahmni":
+        raise ValueError(f"build_bahmni_record_client needs vendor 'bahmni', got {cfg.vendor!r}")
+    http, config = _bahmni_parts(cfg)
+    return BahmniRecordClient(http, config)
+
+
 def build_adapter(cfg: AdapterBuildConfig) -> HmsAdapter:
     """Return an initialised HmsAdapter for the given config.
 
@@ -50,14 +86,9 @@ def build_adapter(cfg: AdapterBuildConfig) -> HmsAdapter:
     vendor = cfg.vendor.lower()
 
     if vendor == "bahmni":
+        http, config = _bahmni_parts(cfg)
         return BahmniAdapter(
-            base_url=base_url or creds.get("base_url", ""),
-            auth_scheme=creds.get("auth_scheme", "api_key"),
-            api_key=creds.get("api_key", ""),
-            username=creds.get("username", ""),
-            password=creds.get("password", ""),
-            hash_salt=hash_salt,
-            transport_key=transport_key,
+            http=http, config=config, hash_salt=hash_salt, transport_key=transport_key
         )
 
     if vendor == "mocdoc":

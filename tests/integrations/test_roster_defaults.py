@@ -10,6 +10,8 @@ import pytest
 import respx
 
 from sm_common.integrations.adapters.bahmni import BahmniAdapter
+from sm_common.integrations.adapters.bahmni_config import BahmniConfig
+from sm_common.integrations.adapters.bahmni_http import BahmniHttp
 from sm_common.integrations.adapters.generic_rest import GenericRestAdapter
 from sm_common.integrations.adapters.mocdoc import MocDocAdapter
 from tests.integrations.test_generic_rest_adapter import MEDIXCEL_MAPPING
@@ -26,31 +28,31 @@ def _assert_defaulted(doc) -> None:
 @pytest.mark.asyncio
 @respx.mock
 async def test_bahmni_roster_builds_with_defaults():
+    respx.get("https://bahmni.example.com/openmrs/ws/rest/v1/session").mock(
+        return_value=httpx.Response(
+            200, json={"authenticated": True}, headers={"set-cookie": "JSESSIONID=abc"}
+        )
+    )
     respx.get("https://bahmni.example.com/openmrs/ws/rest/v1/provider").mock(
         return_value=httpx.Response(
             200,
             json={
-                "results": [
-                    {
-                        "uuid": "prov-1",
-                        "attributes": [
-                            {"attributeType": {"display": "speciality"}, "value": "Cardiology"}
-                        ],
-                    }
-                ]
+                "results": [{"uuid": "prov-1", "identifier": "D1", "person": {"display": "Dr A"}}]
             },
         )
     )
     a = BahmniAdapter(
-        base_url="https://bahmni.example.com",
-        auth_scheme="api_key",
-        api_key="k",
+        http=BahmniHttp("https://bahmni.example.com", "u", "p"),
+        config=BahmniConfig("L", "T", "S"),
         hash_salt="s",
         transport_key="test-transport-key-32-char-padding!",
     )
     [doc] = await a.fetch_doctor_roster(AS_OF)
     assert doc.external_doctor_id == "prov-1"
-    _assert_defaulted(doc)
+    # Bahmni fills the roster identity (unlike the pre-v0.13 defaults other vendors keep).
+    assert doc.display_name == "Dr A"
+    assert doc.identifiers == [("", "D1")]
+    assert doc.active is True
 
 
 @pytest.mark.asyncio

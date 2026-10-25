@@ -153,6 +153,9 @@ class AppointmentWrite:
     start: datetime
     end: datetime
     reason: str | None
+    # HMS service/department resource id chosen at booking time. Additive;
+    # adapters that have no such concept ignore it.
+    service_ref: str | None = None
 
     def __post_init__(self) -> None:
         if self.start.tzinfo is None or self.end.tzinfo is None:

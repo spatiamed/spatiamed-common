@@ -1,0 +1,61 @@
+{
+  "results": [
+    {
+      "uuid": "p-doc-1",
+      "identifier": "DOC001",
+      "retired": false,
+      "person": {
+        "uuid": "pe-1",
+        "display": "Dr Meera Iyer"
+      },
+      "attributes": []
+    },
+    {
+      "uuid": "p-doc-2",
+      "identifier": "DOC002",
+      "retired": false,
+      "person": {
+        "uuid": "pe-2",
+        "display": "Dr Arun Das"
+      },
+      "attributes": []
+    },
+    {
+      "uuid": "p-retired",
+      "identifier": "DOC003",
+      "retired": true,
+      "person": {
+        "uuid": "pe-3",
+        "display": "Dr Retired Person"
+      },
+      "attributes": []
+    },
+    {
+      "uuid": "p-noperson",
+      "identifier": "DOC004",
+      "retired": false,
+      "person": null,
+      "attributes": []
+    },
+    {
+      "uuid": "p-unknown",
+      "identifier": "UNKNOWN",
+      "retired": false,
+      "person": {
+        "uuid": "pe-5",
+        "display": "Unknown Provider"
+      },
+      "attributes": []
+    },
+    {
+      "uuid": "p-lab",
+      "identifier": "LABMANAGER",
+      "retired": false,
+      "person": {
+        "uuid": "pe-6",
+        "display": "Lab Manager"
+      },
+      "attributes": []
+    }
+  ]
+}

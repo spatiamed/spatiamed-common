@@ -1,0 +1,19 @@
+{
+  "uuid": "aaaaaaaa-0000-4000-8000-000000000001",
+  "appointmentNumber": "0000",
+  "patient": {
+    "uuid": "11111111-aaaa-4aaa-8aaa-000000000001",
+    "identifier": "GAN200001",
+    "name": "Test Patient",
+    "gender": "F",
+    "age": 45
+  },
+  "service": {"uuid": "33333333-cccc-4ccc-8ccc-000000000003", "name": "General OPD"},
+  "providers": [{"uuid": "22222222-bbbb-4bbb-8bbb-000000000002", "name": "Dr Test", "response": "ACCEPTED"}],
+  "startDateTime": 1792904400000,
+  "endDateTime": 1792905300000,
+  "dateCreated": 1792900000000,
+  "dateChanged": 1792901000000,
+  "status": "Scheduled",
+  "comments": "sm:bbbbbbbb-0000-4000-8000-000000000009 fever"
+}
