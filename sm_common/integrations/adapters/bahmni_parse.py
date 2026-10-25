@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+import re
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 
 from sm_common.integrations.adapters.bahmni_http import from_epoch_ms
@@ -35,3 +36,25 @@ def birth_date(raw: Any) -> date | None:
 
 def flag(v: Any) -> bool:
     return v is True or (isinstance(v, str) and v.lower() == "true")
+
+
+_OFFSET_NO_COLON = re.compile(r"([+-]\d{2})(\d{2})$")
+
+
+def when(raw: Any) -> datetime | None:
+    """OpenMRS REST datetime (ISO with a ``+0530``-style offset, or epoch ms) -> aware UTC."""
+    if isinstance(raw, bool) or raw is None:
+        return None
+    if isinstance(raw, (int, float)) or (isinstance(raw, str) and raw.strip().isdigit()):
+        try:
+            return from_epoch_ms(raw)
+        except ValueError:
+            return None
+    if not isinstance(raw, str):
+        return None
+    text = _OFFSET_NO_COLON.sub(r"\1:\2", raw.strip().replace("Z", "+00:00"))
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)

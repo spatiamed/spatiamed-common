@@ -14,7 +14,12 @@ from typing import Any
 from sm_common.integrations.exceptions import ConfigError
 
 _REQUIRED = ("location_uuid", "identifier_type_uuid", "identifier_source_uuid")
-_MAPPING_FIELDS = ("service_by_practitioner", "concept_map", "document_type_concepts")
+_MAPPING_FIELDS = (
+    "service_by_practitioner",
+    "concept_map",
+    "document_type_concepts",
+    "disposition_codes",
+)
 
 
 @dataclass(frozen=True)
@@ -51,6 +56,22 @@ class BahmniConfig:
     drug_quantity_units: str = ""
     # our doc_type -> Bahmni concept uuid
     document_type_concepts: Mapping[str, str] = field(default_factory=dict)
+    # ─── ADT (admission / transfer / discharge) ──────────────────────────────
+    # Parent Visit Location of every ADT/consultation location (worklist SQL filter).
+    # When set, start_visit places EVERY new visit here (Bahmni's worklists need that):
+    # it must be the "Visit Location"-tagged ancestor of location_uuid, or every visit
+    # is misplaced.
+    visit_location_uuid: str = ""
+    ipd_visit_type_uuid: str = ""
+    admission_encounter_type_uuid: str = ""
+    transfer_encounter_type_uuid: str = ""
+    discharge_encounter_type_uuid: str = ""
+    discharge_summary_encounter_type_uuid: str = ""
+    # True: admitting from a non-IPD open visit ends it and opens an IPD visit
+    # (endVisitAndCreateEncounter); False: admit into the open visit.
+    admit_new_ipd_visit: bool = True
+    # "admit" | "discharge" -> disposition concept NAME (install-specific, no default).
+    disposition_codes: Mapping[str, str] = field(default_factory=dict)
     system_provider_identifiers: frozenset[str] = frozenset(
         {"UNKNOWN", "LABMANAGER", "LABSYSTEM", "superman"}
     )
@@ -66,7 +87,11 @@ class BahmniConfig:
         kwargs: dict[str, Any] = {k: v for k, v in src.items() if k in known}
         for k in _MAPPING_FIELDS:
             if k in kwargs:
+                if kwargs[k] and not isinstance(kwargs[k], Mapping):
+                    raise ConfigError(f"bahmni config: {k} must be a mapping")
                 kwargs[k] = dict(kwargs[k] or {})
+        if not isinstance(kwargs.get("admit_new_ipd_visit", True), bool):
+            raise ConfigError("bahmni config: admit_new_ipd_visit must be a boolean")
         if "system_provider_identifiers" in kwargs:
             kwargs["system_provider_identifiers"] = frozenset(kwargs["system_provider_identifiers"])
         return cls(**kwargs)

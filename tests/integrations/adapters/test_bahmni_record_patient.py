@@ -480,3 +480,111 @@ async def test_identity_search_404_is_not_found_not_no_hits():
     respx.get(SEARCH).mock(return_value=httpx.Response(404))
     with pytest.raises(NotFound):
         await _client().search(phone="9876543210")
+
+
+# ─── find_by_marker (public registration-marker lookup) ─────────────────────────
+
+
+def _marker_page(*hits: dict) -> httpx.Response:  # type: ignore[type-arg]
+    return httpx.Response(200, json={"pageOfResults": list(hits), "totalCount": len(hits)})
+
+
+@respx.mock
+async def test_find_by_marker_exact_match():
+    _login()
+    route = respx.get(SEARCH).mock(return_value=_marker_page(_hit("u-old", MARKER_VALUE)))
+    hits = await _client(**MARKER_CFG).find_by_marker(MARKER)
+    assert [h.uuid for h in hits] == ["u-old"]
+    params = route.calls[0].request.url.params
+    # The caller passes the bare UUID; the client builds the stored marker value itself.
+    assert params["customAttribute"] == MARKER_VALUE
+    assert params["patientAttributes"] == "smMarker"
+    assert params["patientSearchResultsConfig"] == "smMarker"
+
+
+@respx.mock
+async def test_find_by_marker_excludes_like_only_near_match():
+    # bahmni/search is a LIKE match: a marker that merely contains ours is not ours.
+    _login()
+    respx.get(SEARCH).mock(
+        return_value=_marker_page(_hit("near", MARKER_VALUE + "-other"), _hit("mine", MARKER_VALUE))
+    )
+    hits = await _client(**MARKER_CFG).find_by_marker(MARKER)
+    assert [h.uuid for h in hits] == ["mine"]
+
+
+@respx.mock
+async def test_find_by_marker_none_found_is_empty():
+    _login()
+    respx.get(SEARCH).mock(return_value=_marker_page())
+    assert await _client(**MARKER_CFG).find_by_marker(MARKER) == []
+
+
+@respx.mock
+async def test_find_by_marker_route_404_write_not_supported():
+    _login()
+    respx.get(SEARCH).mock(return_value=httpx.Response(404))
+    with pytest.raises(WriteNotSupported):
+        await _client(**MARKER_CFG).find_by_marker(MARKER)
+
+
+@respx.mock
+async def test_find_by_marker_truncated_page_conflict():
+    _login()
+    respx.get(SEARCH).mock(
+        return_value=httpx.Response(
+            200, json={"totalCount": 40, "pageOfResults": [_hit("a", MARKER_VALUE)]}
+        )
+    )
+    with pytest.raises(ConflictError, match="partial page"):
+        await _client(**MARKER_CFG).find_by_marker(MARKER)
+
+
+@respx.mock
+async def test_find_by_marker_unreadable_marker_conflict():
+    _login()
+    respx.get(SEARCH).mock(return_value=_marker_page({**_hit("x"), "customAttribute": "not json"}))
+    with pytest.raises(ConflictError, match="no readable marker"):
+        await _client(**MARKER_CFG).find_by_marker(MARKER)
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {},  # no marker attribute at all
+        {"marker_attribute_name": "smMarker"},  # name without the type uuid
+        {"marker_attribute_type_uuid": "attr-marker"},  # type uuid without the name
+    ],
+)
+@respx.mock
+async def test_find_by_marker_unconfigured_config_error(over):
+    # Never "no earlier record": an unconfigured marker is a config fault, before any HTTP.
+    route = respx.get(SEARCH).mock(return_value=_marker_page())
+    with pytest.raises(ConfigError, match="marker"):
+        await _client(**over).find_by_marker(MARKER)
+    assert not route.called
+
+
+@respx.mock
+async def test_create_patient_unchanged():
+    # create_patient's pre-search and find_by_marker send the very same request, and
+    # create_patient still returns the existing record without a POST.
+    _login()
+    route = respx.get(SEARCH).mock(return_value=_marker_page(_hit("u-old", MARKER_VALUE)))
+    post = respx.post(CREATE).mock(return_value=httpx.Response(200, json=CREATED))
+    client = _client(**MARKER_CFG)
+    patient, created = await client.create_patient(_input())
+    hits = await client.find_by_marker(MARKER)
+    assert (patient.uuid, created) == ("u-old", False) and [h.uuid for h in hits] == ["u-old"]
+    assert not post.called
+    first, second = (c.request.url for c in route.calls)
+    assert first == second
+
+
+@respx.mock
+async def test_private_find_by_marker_alias_still_takes_the_marker_value():
+    # Callers pinned to an earlier sm_common call the private form with the full value.
+    _login()
+    respx.get(SEARCH).mock(return_value=_marker_page(_hit("u-old", MARKER_VALUE)))
+    hits = await _client(**MARKER_CFG)._find_by_marker(MARKER_VALUE)
+    assert [h.uuid for h in hits] == ["u-old"]

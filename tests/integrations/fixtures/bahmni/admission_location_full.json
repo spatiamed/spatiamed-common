@@ -1,0 +1,74 @@
+{
+  "ward": {
+    "uuid": "08ed3779-ac52-4fa4-8e93-686892cf4527",
+    "display": "General Ward",
+    "links": [
+      {
+        "rel": "self",
+        "uri": "https://bahmni.example.test/openmrs/ws/rest/v1/location/08ed3779-ac52-4fa4-8e93-686892cf4527",
+        "resourceAlias": "location"
+      }
+    ]
+  },
+  "totalBeds": 2,
+  "occupiedBeds": 1,
+  "bedLayouts": [
+    {
+      "rowNumber": 1,
+      "columnNumber": 1,
+      "bedNumber": "GW-11",
+      "bedId": 11,
+      "bedUuid": "560544a8-97e7-4b10-b84a-f72dbac4561e",
+      "status": "OCCUPIED",
+      "location": "General Ward",
+      "bedType": {
+        "uuid": "4c652e86-8800-4012-b0f5-970883ec9100",
+        "name": "general",
+        "displayName": "General Bed",
+        "description": "Synthetic bed type"
+      },
+      "patients": [
+        {
+          "uuid": "849e3827-09bb-4123-a07b-3fd63801d0d5",
+          "person": {
+            "gender": "M",
+            "age": 40,
+            "preferredName": {"givenName": "Test", "familyName": "Patient"},
+            "preferredAddress": null
+          },
+          "identifiers": [{"identifier": "TEST100001"}]
+        }
+      ],
+      "bedTagMaps": []
+    },
+    {
+      "rowNumber": 1,
+      "columnNumber": 2,
+      "bedNumber": "GW-12",
+      "bedId": 12,
+      "bedUuid": "46dc5ad0-8385-4426-8e3b-350a4b0c9ad8",
+      "status": "AVAILABLE",
+      "location": "General Ward",
+      "bedType": {
+        "uuid": "4c652e86-8800-4012-b0f5-970883ec9100",
+        "name": "general",
+        "displayName": "General Bed",
+        "description": "Synthetic bed type"
+      },
+      "patients": [],
+      "bedTagMaps": []
+    },
+    {
+      "rowNumber": 2,
+      "columnNumber": 1,
+      "bedNumber": null,
+      "bedId": null,
+      "bedUuid": null,
+      "status": null,
+      "location": "General Ward",
+      "bedType": null,
+      "patients": [],
+      "bedTagMaps": null
+    }
+  ]
+}
