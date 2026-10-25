@@ -181,3 +181,9 @@ def test_bahmni_tls_options_reach_http():
     with pytest.raises(ValueError, match="allow_insecure_tls"):
         build_adapter(_bahmni_cfg({**BAHMNI_CREDS, "verify_tls": False}))
     assert build_adapter(_bahmni_cfg(BAHMNI_CREDS))._http.verify is True
+
+
+@pytest.mark.parametrize("scheme", [None, "", "Basic", "SESSION"])
+def test_bahmni_scheme_blank_or_any_case_is_basic(scheme):
+    a = build_adapter(_bahmni_cfg({"auth_scheme": scheme, **BAHMNI_CREDS}))
+    assert a.vendor_name == "bahmni"

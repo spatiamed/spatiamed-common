@@ -36,6 +36,7 @@ from sm_common.integrations.canonical_types import (
 )
 from sm_common.integrations.exceptions import (
     AuthError,
+    ConfigError,
     ConflictError,
     NotFound,
     TransientError,
@@ -330,7 +331,8 @@ class BahmniAdapter(HmsAdapter):
                 params={**params, "startIndex": str(seen)},
             )
             if resp.status_code == 404:
-                break
+                # Never "no hits": [] reads as "no such patient" and unlocks Create.
+                raise NotFound("bahmni: patient search route not found (HTTP 404)")
             body = resp.json()
             page = body.get("pageOfResults") if isinstance(body, dict) else None
             if not page:
@@ -364,7 +366,8 @@ class BahmniAdapter(HmsAdapter):
                 raise ValueError("family and birth_date are searched together")
             if phone or mrn or abha_id:
                 raise ValueError("one patient search per call")
-            hits = await self._search(q=family.strip())
+            family = (family or "").strip()
+            hits = await self._search(q=family)
             return _dedupe([p for p in hits if p.birth_date == birth_date])
         if mrn:
             return _dedupe(await self._search(identifier=mrn))
@@ -517,6 +520,8 @@ class BahmniAdapter(HmsAdapter):
         bookings = []
         for b in rows:
             changed = b.get("dateChanged") or b.get("dateCreated")
+            if changed is None:
+                continue
             try:
                 bookings.append(
                     ExternalBooking(
@@ -549,20 +554,27 @@ class BahmniAdapter(HmsAdapter):
             raise TransientError(
                 "bahmni: appointment search hit its row cap; the marker lookup is unreliable"
             )
-        for row in rows:
-            comments = row.get("comments")
-            if (
-                isinstance(comments, str)
-                and (comments == marker or comments.startswith(marker + " "))
-                and row.get("status") not in _TERMINAL_STATUSES
-                and row.get("uuid")
-            ):
-                return WriteBackResult(
-                    status="SUCCESS",
-                    hms_booking_id=str(row["uuid"]),
-                    hms_start=from_epoch_ms(row["startDateTime"]),
-                    created=False,
-                )
+        live = [
+            row
+            for row in rows
+            if isinstance(comments := row.get("comments"), str)
+            and (comments == marker or comments.startswith(marker + " "))
+            and row.get("status") not in _TERMINAL_STATUSES
+            and row.get("uuid")
+        ]
+        if len(live) > 1:
+            raise ConflictError(
+                f"bahmni: {len(live)} live appointments carry marker {marker}; "
+                "a human must reconcile",
+                landed=True,
+            )
+        if live:
+            return WriteBackResult(
+                status="SUCCESS",
+                hms_booking_id=str(live[0]["uuid"]),
+                hms_start=from_epoch_ms(live[0]["startDateTime"]),
+                created=False,
+            )
         body = {
             "patientUuid": write.patient_ref,
             "serviceUuid": service_uuid,
@@ -657,6 +669,10 @@ class BahmniAdapter(HmsAdapter):
                 last_success_at=None,
                 latency_ms=int((time.monotonic() - start) * 1000),
                 message=f"auth error: {exc}",
+            )
+        except ConfigError as exc:
+            return AdapterHealth(
+                healthy=False, last_success_at=None, latency_ms=None, message=f"config error: {exc}"
             )
         return AdapterHealth(
             healthy=True,

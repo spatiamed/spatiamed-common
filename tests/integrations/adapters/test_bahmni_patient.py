@@ -9,7 +9,7 @@ import respx
 from sm_common.integrations.adapters.bahmni import BahmniAdapter
 from sm_common.integrations.adapters.bahmni_config import BahmniConfig
 from sm_common.integrations.adapters.bahmni_http import BahmniHttp
-from sm_common.integrations.exceptions import AuthError, VendorRejected
+from sm_common.integrations.exceptions import AuthError, NotFound, VendorRejected
 from sm_common.phone import hash_phone_for_lookup
 
 FIX = Path(__file__).parent.parent / "fixtures" / "bahmni"
@@ -312,3 +312,20 @@ async def test_search_stops_at_page_cap_when_pages_stay_full():
     hits = await _adapter().search_patients(mrn="GAN")
     assert route.call_count == _SEARCH_PAGE_CAP
     assert len(hits) == 50 * _SEARCH_PAGE_CAP
+
+
+@respx.mock
+async def test_identity_search_404_is_not_found_not_no_hits():
+    # [] would read as "no such patient" and unlock Create on a misrouted base URL.
+    _login()
+    respx.get(SEARCH).mock(return_value=httpx.Response(404))
+    with pytest.raises(NotFound):
+        await _adapter().search_patients(mrn="GAN200001")
+
+
+@respx.mock
+async def test_health_check_config_error_is_unhealthy_not_raised():
+    respx.get(f"{REST}/session").mock(side_effect=httpx.UnsupportedProtocol("no scheme"))
+    health = await _adapter().health_check()
+    assert health.healthy is False
+    assert "config" in health.message

@@ -15,6 +15,7 @@ from sm_common.integrations.build_adapter import AdapterBuildConfig, build_bahmn
 from sm_common.integrations.exceptions import (
     ConfigError,
     ConflictError,
+    NotFound,
     VendorRejected,
     WriteNotSupported,
 )
@@ -133,11 +134,10 @@ async def test_create_sends_idgen_identifier_and_phone_attr():
 
 @respx.mock
 async def test_create_allows_phone_already_held_by_another_patient():
+    # Idempotency is the marker search only; the household's phone is never consulted.
     _login()
     respx.get(SEARCH).mock(
-        return_value=httpx.Response(
-            200, json={"pageOfResults": [_hit("other", None)], "totalCount": 1}
-        )
+        return_value=httpx.Response(200, json={"pageOfResults": [], "totalCount": 0})
     )
     post = respx.post(CREATE).mock(return_value=httpx.Response(200, json=CREATED))
     _, created = await _client(**MARKER_CFG).create_patient(_input())
@@ -440,3 +440,29 @@ async def test_search_hit_birth_date_estimated_is_unknown():
     respx.get(SEARCH).mock(return_value=httpx.Response(200, json=page))
     hits, _ = await _client().search(phone="9876543210")
     assert hits[0].birth_date is not None and hits[0].birth_date_estimated is None
+
+
+@pytest.mark.parametrize(
+    "custom",
+    ["", "not json", json.dumps({}), json.dumps({"phoneNumber": "9876543210"}), json.dumps([1])],
+)
+@respx.mock
+async def test_marker_hit_without_readable_marker_fails_closed(custom):
+    # A LIKE hit whose marker we cannot read may be our earlier create: never POST again.
+    _login()
+    hit = {**_hit("x"), "customAttribute": custom}
+    respx.get(SEARCH).mock(
+        return_value=httpx.Response(200, json={"pageOfResults": [hit], "totalCount": 1})
+    )
+    post = respx.post(CREATE).mock(return_value=httpx.Response(200, json=CREATED))
+    with pytest.raises(ConflictError):
+        await _client(**MARKER_CFG).create_patient(_input())
+    assert not post.called
+
+
+@respx.mock
+async def test_identity_search_404_is_not_found_not_no_hits():
+    _login()
+    respx.get(SEARCH).mock(return_value=httpx.Response(404))
+    with pytest.raises(NotFound):
+        await _client().search(phone="9876543210")

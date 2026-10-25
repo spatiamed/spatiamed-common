@@ -268,18 +268,31 @@ mypy sm_common
 - cryptography >= 46.0
 - httpx >= 0.27
 - pytz >= 2024.1
-- feedparser >= 6.0
 - fastapi >= 0.115 (optional, only for `sm_common.fastapi_guard`)
 
 ### Changed in v0.24.0
 
-The Bahmni adapter was rebuilt against a live Bahmni standard stack (see "Bahmni adapter" above). Consumers
-should note three changes:
-- `auth_scheme` now defaults to `"basic"` (it was `"api_key"`), and `"api_key"` now raises.
+The Bahmni adapter was rebuilt against a live Bahmni standard stack (see "Bahmni adapter" above). Changes
+consumers must handle:
+- **Constructor.** It is now `BahmniAdapter(http: BahmniHttp, config: BahmniConfig, hash_salt, transport_key)`.
+  The old `(base_url, auth_scheme, hash_salt, transport_key, api_key, username, password)` form is gone.
+  Build through `build_adapter(AdapterBuildConfig(...))`.
+- **`ConfigError` at build.** `build_adapter` / `build_bahmni_record_client` raise `ConfigError` when
+  `field_mapping` lacks `location_uuid`, `identifier_type_uuid` or `identifier_source_uuid`, or when
+  `credentials` lack `username`/`password`. Previously the adapter was built and failed later.
+- **Auth.** `auth_scheme` now defaults to `"basic"` (it was `"api_key"`), and `"api_key"` raises `ValueError`.
+  The value is case-insensitive, and a blank value means `"basic"`.
+- **`push_visit_event`** raises `NotFound` when Bahmni has no such appointment (HTTP 404). An identity patient
+  search that gets a 404 also raises `NotFound`; it never returns "no hits".
 - Search hits report `birth_date_precision="year"` instead of an exact date.
 - Drug orders need `drug_quantity_units`.
+- The `feedparser` dependency is dropped. The AtomFeed is parsed with the standard library.
 
 `BahmniRecordClient` and `build_bahmni_record_client` are new.
+
+**hms-connector-agent must not bump to 0.24.0 until its defaults change.** It defaults to `HMS_VENDOR=bahmni`
+with `HMS_AUTH_SCHEME=api_key`, which now raises at build. It also needs `username`/`password` credentials and
+a `field_mapping` holding the required `BahmniConfig` keys.
 
 ### Removed in v0.6.0
 

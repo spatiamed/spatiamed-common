@@ -270,3 +270,15 @@ async def test_write_5xx_raises_transient():
     respx.post(POST).mock(return_value=httpx.Response(500, json={"error": "boom"}))
     with pytest.raises(TransientError):
         await _adapter().write_back_idempotent(_write())
+
+
+@respx.mock
+async def test_two_live_marker_rows_conflict_landed():
+    _login()
+    rows = [_row("Scheduled"), _row("CheckedIn", uuid="55555555-eeee-4eee-8eee-000000000005")]
+    respx.post(SEARCH).mock(return_value=httpx.Response(200, json=rows))
+    post = respx.post(POST).mock(return_value=_created())
+    with pytest.raises(ConflictError) as ei:
+        await _adapter().write_back_idempotent(_write())
+    assert ei.value.landed is True
+    assert not post.called

@@ -51,7 +51,7 @@ def _check_bahmni_auth_scheme(scheme: str) -> None:
 def _bahmni_parts(cfg: AdapterBuildConfig) -> tuple[BahmniHttp, BahmniConfig]:
     creds: dict = cfg.credentials or {}  # type: ignore[type-arg]
     # OpenMRS only does basic/session auth; "basic" and "session" are aliases.
-    _check_bahmni_auth_scheme(creds.get("auth_scheme", "basic"))
+    _check_bahmni_auth_scheme((creds.get("auth_scheme") or "basic").lower())
     if not creds.get("username") or not creds.get("password"):
         raise ConfigError("bahmni: credentials need username and password")
     http = BahmniHttp(

@@ -44,6 +44,21 @@ def from_epoch_ms(ms: int | float | str) -> datetime:
         raise ValueError(f"not an epoch-millisecond value: {ms!r}") from exc
 
 
+def _cert_verification_failed(exc: BaseException) -> bool:
+    """True when an ``ssl.SSLCertVerificationError`` sits in the cause/context chain."""
+    seen: set[int] = set()
+    todo: list[BaseException | None] = [exc]
+    while todo:
+        cur = todo.pop()
+        if cur is None or id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        if isinstance(cur, ssl.SSLCertVerificationError):
+            return True
+        todo += [cur.__cause__, cur.__context__]
+    return False
+
+
 def _error_message(resp: httpx.Response) -> str:
     try:
         body = resp.json()
@@ -101,6 +116,9 @@ class BahmniHttp:
         try:
             return await self._client.request(method, path, **kw)
         except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
+            if _cert_verification_failed(exc):
+                # A certificate the CA bundle does not trust never heals by retrying.
+                raise ConfigError("bahmni: TLS certificate verification failed") from exc
             raise TransientError(f"bahmni: transport error: {type(exc).__name__}") from exc
         except (httpx.UnsupportedProtocol, httpx.ProxyError) as exc:
             # A bad scheme or proxy setting never heals by retrying.
@@ -160,7 +178,7 @@ class BahmniHttp:
         status = resp.status_code
         if status == 403:
             raise AuthError("bahmni: HTTP 403 forbidden")
-        if status >= 500:
+        if status >= 500 or status == 429:
             raise TransientError(f"bahmni: HTTP {status}")
         if status in expect or status == 404:
             return resp

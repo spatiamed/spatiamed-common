@@ -220,3 +220,38 @@ async def test_remote_protocol_error_transient():
     respx.get(SESSION).mock(side_effect=httpx.RemoteProtocolError("reset"))
     with pytest.raises(TransientError):
         await _http().request("GET", PATH)
+
+
+@respx.mock
+async def test_429_is_transient():
+    respx.get(SESSION).mock(return_value=_login_ok())
+    respx.get(f"{BASE}{PATH}").mock(return_value=httpx.Response(429))
+    with pytest.raises(TransientError):
+        await _http().request("GET", PATH)
+
+
+def _cert_failure() -> httpx.ConnectError:
+    # httpx raises ConnectError from httpcore's, whose cause is the ssl error.
+    inner = httpx.ConnectError("inner")
+    inner.__cause__ = ssl.SSLCertVerificationError(1, "certificate verify failed")
+    outer = httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED]")
+    outer.__cause__ = inner
+    return outer
+
+
+async def test_tls_cert_verification_failure_is_config_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise _cert_failure()
+
+    http = BahmniHttp(BASE, "user", "pw", transport=httpx.MockTransport(handler))
+    with pytest.raises(ConfigError, match="TLS"):
+        await http.request("GET", PATH)
+
+
+async def test_plain_connect_error_stays_transient():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused")
+
+    http = BahmniHttp(BASE, "user", "pw", transport=httpx.MockTransport(handler))
+    with pytest.raises(TransientError):
+        await http.request("GET", PATH)

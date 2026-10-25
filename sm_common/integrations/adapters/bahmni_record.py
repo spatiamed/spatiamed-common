@@ -158,7 +158,7 @@ class BahmniRecordClient:
         )
 
     async def _search_raw(
-        self, params: dict[str, str], attribute: str, *, missing_ok: bool = True
+        self, params: dict[str, str], attribute: str, *, marker_lookup: bool = False
     ) -> tuple[list[RecordPatient], list[dict[str, Any]], bool]:
         resp = await self._http.request(
             "GET",
@@ -173,9 +173,12 @@ class BahmniRecordClient:
                 **params,
             },
         )
-        if resp.status_code == 404 and not missing_ok:
-            raise WriteNotSupported("bahmni: patient search route not found (HTTP 404)")
-        body = resp.json() if resp.status_code != 404 else {}
+        if resp.status_code == 404:
+            # Never "no hits": an empty answer would unlock a duplicate create.
+            if marker_lookup:
+                raise WriteNotSupported("bahmni: patient search route not found (HTTP 404)")
+            raise NotFound("bahmni: patient search route not found (HTTP 404)")
+        body = resp.json()
         page = [h for h in (body.get("pageOfResults") or []) if isinstance(h, dict)]
         total = body.get("totalCount")
         # totalCount is capped at the page size, so a full page may hide more hits.
@@ -256,7 +259,7 @@ class BahmniRecordClient:
         # Fail closed: a missing route or a partial page must not read as "no earlier
         # create", or a retry would POST a duplicate.
         _, page, truncated = await self._search_raw(
-            {"customAttribute": value}, name, missing_ok=False
+            {"customAttribute": value}, name, marker_lookup=True
         )
         if truncated:
             raise ConflictError(
@@ -264,6 +267,8 @@ class BahmniRecordClient:
                 "an earlier create exists"
             )
         # The search is a LIKE match: keep only records whose marker is exactly ours.
+        # A hit whose marker we cannot read may be our earlier create, so it fails
+        # closed rather than being skipped (skipping would POST a duplicate).
         exact = []
         for hit in page:
             attrs: Any = hit.get("customAttribute")
@@ -271,8 +276,13 @@ class BahmniRecordClient:
                 try:
                     attrs = json.loads(attrs)
                 except ValueError:
-                    continue
-            if isinstance(attrs, dict) and attrs.get(name) == value:
+                    attrs = None
+            if not isinstance(attrs, dict) or not isinstance(attrs.get(name), str):
+                raise ConflictError(
+                    "bahmni: marker search hit carries no readable marker; cannot tell "
+                    "whether an earlier create exists"
+                )
+            if attrs.get(name) == value:
                 rec = self._from_search_hit(hit, name)
                 if rec is not None:
                     exact.append(rec)
@@ -322,7 +332,7 @@ class BahmniRecordClient:
         }
         if p.address != RecordAddress():
             person["addresses"] = [_address_body(p.address)]
-        body = {
+        body: dict[str, Any] = {
             "patient": {
                 "person": person,
                 "identifiers": [

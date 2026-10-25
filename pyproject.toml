@@ -77,3 +77,16 @@ plugins = ["pydantic.mypy"]
 [[tool.mypy.overrides]]
 module = "sm_common.integrations.*"
 ignore_errors = true
+
+# Modules added or rebuilt with the Bahmni adapter (v0.24.0) are held to strict.
+[[tool.mypy.overrides]]
+module = [
+    "sm_common.integrations.adapters.bahmni",
+    "sm_common.integrations.adapters.bahmni_config",
+    "sm_common.integrations.adapters.bahmni_http",
+    "sm_common.integrations.adapters.bahmni_parse",
+    "sm_common.integrations.adapters.bahmni_record",
+    "sm_common.integrations.build_adapter",
+    "sm_common.integrations.record_types",
+]
+ignore_errors = false
