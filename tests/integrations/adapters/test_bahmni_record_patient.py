@@ -136,12 +136,26 @@ async def test_create_sends_idgen_identifier_and_phone_attr():
 async def test_create_allows_phone_already_held_by_another_patient():
     # Idempotency is the marker search only; the household's phone is never consulted.
     _login()
-    respx.get(SEARCH).mock(
-        return_value=httpx.Response(200, json={"pageOfResults": [], "totalCount": 0})
-    )
+
+    def search(request: httpx.Request) -> httpx.Response:
+        params = request.url.params
+        if params.get("patientAttributes") == "phoneNumber" or "9876543210" in params.get(
+            "customAttribute", ""
+        ):
+            other = {**_hit("other"), "customAttribute": json.dumps({"phoneNumber": "9876543210"})}
+            return httpx.Response(200, json={"pageOfResults": [other], "totalCount": 1})
+        return httpx.Response(200, json={"pageOfResults": [], "totalCount": 0})
+
+    route = respx.get(SEARCH).mock(side_effect=search)
     post = respx.post(CREATE).mock(return_value=httpx.Response(200, json=CREATED))
     _, created = await _client(**MARKER_CFG).create_patient(_input())
     assert created is True and post.call_count == 1
+    assert route.calls, "the marker search must run"
+    for call in route.calls:
+        params = call.request.url.params
+        assert params["patientAttributes"] == "smMarker"
+        assert params["customAttribute"] == MARKER_VALUE
+        assert "9876543210" not in str(call.request.url)
 
 
 @respx.mock
