@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -16,6 +16,7 @@ import respx
 from sm_common.integrations.adapters.bahmni_http import BahmniHttp, to_epoch_ms
 from sm_common.integrations.adapters.bahmni_ipd_care import BahmniIpdCareClient, NursingConfig
 from sm_common.integrations.exceptions import (
+    AuthError,
     ConfigError,
     NotFound,
     TransientError,
@@ -23,6 +24,9 @@ from sm_common.integrations.exceptions import (
 )
 from sm_common.integrations.ipd_care_types import (
     IntakeOutputWrite,
+    MarScheduleOutcome,
+    MarScheduleWrite,
+    MarSlot,
     NursingWriteOutcome,
     VitalsWrite,
     WardBed,
@@ -886,3 +890,383 @@ async def test_write_route_404_is_not_found() -> None:
     respx.post(ENCOUNTER).mock(return_value=httpx.Response(404))
     with pytest.raises(NotFound):
         await _client(_nursing_config()).write_vitals(**_who(), vitals=VitalsWrite(pulse=80))
+
+
+# ─── Medication chart: schedule read and create ─────────────────────────────
+
+MED = f"{REST}/ipd/schedule/type/medication"
+ORDER_A = "5d1c7a2e-3b4f-4e6a-9c8d-7f1e2a3b4c5d"
+PROVIDER = "e4f5a6b7-c8d9-4e0f-a1b2-c3d4e5f6a7b8"
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _epoch_s(dt: datetime) -> int:
+    return to_epoch_ms(dt) // 1000
+
+
+def _utc(y: int, mo: int, d: int, h: int, mi: int) -> datetime:
+    return datetime(y, mo, d, h, mi, tzinfo=timezone.utc)
+
+
+def _schedule_write(**over: Any) -> MarScheduleWrite:
+    base: dict[str, Any] = {
+        "patient_uuid": PATIENT_A,
+        "order_uuid": ORDER_A,
+        "provider_uuid": PROVIDER,
+        "visit_uuid": VISIT_A,
+        "first_day_slots": (_utc(2026, 3, 2, 8, 30), _utc(2026, 3, 2, 14, 30)),
+        "day_wise_slots": (
+            _utc(2026, 3, 3, 2, 30),
+            _utc(2026, 3, 3, 8, 30),
+            _utc(2026, 3, 3, 14, 30),
+        ),
+        "remaining_day_slots": (_utc(2026, 3, 5, 2, 30),),
+    }
+    base.update(over)
+    return MarScheduleWrite(**base)
+
+
+@respx.mock
+async def test_schedule_read_params_epoch_seconds_and_parse_statuses() -> None:
+    _login()
+    route = respx.get(MED).mock(
+        return_value=httpx.Response(200, json=_fixture("medication_schedule.json"))
+    )
+    start = datetime(2026, 3, 2, 0, 0, tzinfo=IST)
+    end = start + timedelta(days=1)
+    slots = await _client().medication_schedule(PATIENT_A, start, end, visit_uuid=VISIT_A)
+
+    params = dict(route.calls.last.request.url.params)
+    # The module reads these as epoch SECONDS (UTC instants), not milliseconds.
+    assert params == {
+        "patientUuid": PATIENT_A,
+        "startTime": str(_epoch_s(start)),
+        "endTime": str(_epoch_s(end)),
+        "visitUuid": VISIT_A,
+    }
+    assert params["startTime"] == "1772389800"  # 2026-03-01T18:30Z
+    assert [s.status for s in slots] == ["MISSED", "COMPLETED", "NOT_DONE", "STOPPED", "SCHEDULED"]
+    given = slots[1]
+    assert given == MarSlot(
+        slot_uuid="a1000000-0000-4000-8000-000000000001",
+        order_uuid=ORDER_A,
+        drug_name="Test Paracetamol 500 mg",
+        service_type="MedicationRequest",
+        start_at=_utc(2026, 3, 2, 2, 30),
+        status="COMPLETED",
+        administration_uuid="b1000000-0000-4000-8000-000000000001",
+        # administeredDateTime is a java Date (epoch ms), unlike the slot time.
+        administered_at=_utc(2026, 3, 2, 2, 41),
+        notes=None,
+    )
+    assert slots[4].notes == "after food"
+    assert slots[4].administration_uuid is None and slots[4].administered_at is None
+    assert all(s.start_at.tzinfo is timezone.utc for s in slots)
+
+
+@respx.mock
+async def test_schedule_read_without_visit_omits_param_and_empty_list() -> None:
+    _login()
+    route = respx.get(MED).mock(return_value=httpx.Response(200, json=[]))
+    start = _utc(2026, 3, 2, 0, 0)
+    assert await _client().medication_schedule(PATIENT_A, start, start + timedelta(hours=6)) == []
+    assert "visitUuid" not in dict(route.calls.last.request.url.params)
+
+
+@respx.mock
+async def test_schedule_read_flat_slot_list_is_rejected_not_empty() -> None:
+    """A window answer in the per-order (flat) shape must not read as "nothing due"."""
+    _login()
+    respx.get(MED).mock(
+        return_value=httpx.Response(200, json=_fixture("medication_schedule_by_order.json"))
+    )
+    start = _utc(2026, 3, 2, 0, 0)
+    with pytest.raises(VendorRejected):
+        await _client().medication_schedule(PATIENT_A, start, start + timedelta(days=1))
+
+
+@respx.mock
+async def test_schedule_read_unknown_status_is_rejected() -> None:
+    _login()
+    body = _fixture("medication_schedule.json")
+    body[0]["slots"][0]["status"] = "PAUSED"
+    respx.get(MED).mock(return_value=httpx.Response(200, json=body))
+    start = _utc(2026, 3, 2, 0, 0)
+    with pytest.raises(VendorRejected):
+        await _client().medication_schedule(PATIENT_A, start, start + timedelta(days=1))
+
+
+@respx.mock
+async def test_slot_times_round_trip_utc_epoch_seconds() -> None:
+    """A dose at 08:00 IST is sent and read back as the same instant (no 5h30m slip)."""
+    _login()
+    due = datetime(2026, 3, 2, 8, 0, tzinfo=IST)
+    slot = {
+        "uuid": "d1000000-0000-4000-8000-000000000001",
+        "serviceType": "MedicationRequest",
+        "status": "SCHEDULED",
+        "startTime": 1772418600,  # what the module answers for the instant it stored
+        "order": {"uuid": ORDER_A},
+        "medicationAdministration": None,
+        "notes": None,
+    }
+    respx.get(MED).mock(
+        side_effect=[
+            httpx.Response(200, json=[]),  # pre-read: not on the chart
+            httpx.Response(200, json=[slot]),  # read-back after the create
+            httpx.Response(200, json=[{"uuid": "s", "slots": [slot]}]),  # window read
+        ]
+    )
+    post = respx.post(MED).mock(
+        return_value=httpx.Response(200, json=_fixture("schedule_create_response.json"))
+    )
+    client = _client()
+    await client.create_medication_schedule(
+        _schedule_write(first_day_slots=(due,), day_wise_slots=(), remaining_day_slots=())
+    )
+    sent = json.loads(post.calls.last.request.content)
+    assert sent["firstDaySlotsStartTime"] == [1772418600]  # 2026-03-02T02:30Z, seconds
+    assert sent["slotStartTime"] == 1772418600
+    [back] = await client.medication_schedule(PATIENT_A, due, due + timedelta(hours=1))
+    assert back.start_at == due == _utc(2026, 3, 2, 2, 30)
+
+
+@respx.mock
+async def test_slot_time_read_back_equals_instant_sent() -> None:
+    _login()
+    due = datetime(2026, 3, 2, 8, 0, tzinfo=IST)
+    respx.get(MED).mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "uuid": "s1",
+                    "slots": [
+                        {
+                            "uuid": "e1",
+                            "serviceType": "MedicationRequest",
+                            "status": "SCHEDULED",
+                            "startTime": _epoch_s(due),
+                            "order": {"uuid": ORDER_A},
+                            "medicationAdministration": None,
+                            "notes": None,
+                        }
+                    ],
+                }
+            ],
+        )
+    )
+    [slot] = await _client().medication_schedule(PATIENT_A, due, due + timedelta(hours=1))
+    assert slot.start_at == due
+    assert slot.start_at.utcoffset() == timedelta(0)
+
+
+@pytest.mark.parametrize("where", ["start", "end", "first_day", "day_wise", "remaining"])
+@respx.mock
+async def test_naive_datetime_refused(where: str) -> None:
+    naive = datetime(2026, 3, 2, 8, 0)
+    aware = _utc(2026, 3, 2, 8, 0)
+    client = _client()
+    with pytest.raises(ValueError):
+        if where == "start":
+            await client.medication_schedule(PATIENT_A, naive, aware)
+        elif where == "end":
+            await client.medication_schedule(PATIENT_A, aware, naive)
+        elif where == "first_day":
+            await client.create_medication_schedule(_schedule_write(first_day_slots=(naive,)))
+        elif where == "day_wise":
+            await client.create_medication_schedule(_schedule_write(day_wise_slots=(naive,)))
+        else:
+            await client.create_medication_schedule(_schedule_write(remaining_day_slots=(naive,)))
+    assert len(respx.calls) == 0
+
+
+@respx.mock
+async def test_schedule_read_end_not_after_start_refused() -> None:
+    start = _utc(2026, 3, 2, 8, 0)
+    with pytest.raises(ValueError):
+        await _client().medication_schedule(PATIENT_A, start, start)
+    assert len(respx.calls) == 0
+
+
+@respx.mock
+async def test_create_schedule_body_shape() -> None:
+    _login()
+    pre = respx.get(MED).mock(
+        side_effect=[
+            httpx.Response(200, json=[]),
+            httpx.Response(200, json=_fixture("medication_schedule_by_order.json")),
+        ]
+    )
+    post = respx.post(MED).mock(
+        return_value=httpx.Response(200, json=_fixture("schedule_create_response.json"))
+    )
+    w = _schedule_write(comments="test chart")
+    out = await _client().create_medication_schedule(w)
+
+    assert dict(pre.calls[0].request.url.params) == {
+        "patientUuid": PATIENT_A,
+        "orderUuids": ORDER_A,
+        "serviceType": "MEDICATION_REQUEST",
+    }
+    sent = json.loads(post.calls.last.request.content)
+    assert sent == {
+        "patientUuid": PATIENT_A,
+        "orderUuid": ORDER_A,
+        "providerUuid": PROVIDER,
+        "comments": "test chart",
+        "slotStartTime": _epoch_s(_utc(2026, 3, 2, 8, 30)),
+        "firstDaySlotsStartTime": [_epoch_s(t) for t in w.first_day_slots],
+        "dayWiseSlotsStartTime": [_epoch_s(t) for t in w.day_wise_slots],
+        "remainingDaySlotsStartTime": [_epoch_s(t) for t in w.remaining_day_slots],
+        "medicationFrequency": "FIXED_SCHEDULE_FREQUENCY",
+        "serviceType": "MEDICATION_REQUEST",
+    }
+    # The create answer names no slots; they come from one read-back by order.
+    assert out == MarScheduleOutcome(
+        order_uuid=ORDER_A,
+        created=True,
+        slot_uuids=(
+            "c1000000-0000-4000-8000-000000000001",
+            "c1000000-0000-4000-8000-000000000002",
+        ),
+    )
+    assert pre.call_count == 2 and post.call_count == 1
+
+
+@respx.mock
+async def test_create_as_needed_schedule_uses_placeholder_and_no_slots() -> None:
+    _login()
+    pre = respx.get(MED).mock(
+        side_effect=[
+            httpx.Response(200, json=[]),
+            httpx.Response(
+                200,
+                json=[
+                    {
+                        "uuid": "f1000000-0000-4000-8000-000000000001",
+                        "serviceType": "AsNeededPlaceholder",
+                        "status": "SCHEDULED",
+                        "startTime": 1772418600,
+                        "order": {"uuid": ORDER_A},
+                        "medicationAdministration": None,
+                        "notes": None,
+                    }
+                ],
+            ),
+        ]
+    )
+    post = respx.post(MED).mock(
+        return_value=httpx.Response(200, json=_fixture("schedule_create_response.json"))
+    )
+    out = await _client().create_medication_schedule(
+        _schedule_write(
+            service_type="AsNeededMedicationRequest",
+            first_day_slots=(),
+            day_wise_slots=(),
+            remaining_day_slots=(),
+        )
+    )
+    # Only the placeholder service type makes the module chart an as-needed order,
+    # and the module does not refuse a second placeholder: the pre-read must ask for it.
+    assert dict(pre.calls[0].request.url.params)["serviceType"] == "AS_NEEDED_PLACEHOLDER"
+    sent = json.loads(post.calls.last.request.content)
+    assert sent["serviceType"] == "AS_NEEDED_PLACEHOLDER"
+    assert sent["slotStartTime"] is None
+    assert sent["firstDaySlotsStartTime"] == []
+    assert out.created is True
+    assert out.slot_uuids == ("f1000000-0000-4000-8000-000000000001",)
+
+
+@pytest.mark.parametrize("service_type", ["MedicationRequest", "AsNeededMedicationRequest"])
+@respx.mock
+async def test_create_schedule_existing_order_returns_not_created_without_post(
+    service_type: str,
+) -> None:
+    _login()
+    respx.get(MED).mock(
+        return_value=httpx.Response(200, json=_fixture("medication_schedule_by_order.json"))
+    )
+    post = respx.post(MED).mock(return_value=httpx.Response(200, json={}))
+    over: dict[str, Any] = {"service_type": service_type}
+    if service_type != "MedicationRequest":
+        over.update(first_day_slots=(), day_wise_slots=(), remaining_day_slots=())
+    out = await _client().create_medication_schedule(_schedule_write(**over))
+    assert out == MarScheduleOutcome(
+        order_uuid=ORDER_A,
+        created=False,
+        slot_uuids=(
+            "c1000000-0000-4000-8000-000000000001",
+            "c1000000-0000-4000-8000-000000000002",
+        ),
+    )
+    assert post.call_count == 0
+
+
+@respx.mock
+async def test_pre_read_slots_of_another_order_are_rejected() -> None:
+    _login()
+    body = _fixture("medication_schedule_by_order.json")
+    body[0]["order"] = {"uuid": "8e2f1a3b-4c5d-4f6e-a7b8-9c0d1e2f3a4b"}
+    respx.get(MED).mock(return_value=httpx.Response(200, json=body))
+    post = respx.post(MED).mock(return_value=httpx.Response(200, json={}))
+    with pytest.raises(VendorRejected):
+        await _client().create_medication_schedule(_schedule_write())
+    assert post.call_count == 0
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"first_day_slots": (), "day_wise_slots": (), "remaining_day_slots": ()},
+        {"service_type": "AsNeededMedicationRequest"},
+        {"service_type": "EmergencyMedicationRequest"},
+        {"order_uuid": "../visit"},
+        {"provider_uuid": ""},
+        {"comments": "x" * 1001},
+    ],
+)
+@respx.mock
+async def test_create_schedule_input_checked_before_io(over: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        await _client().create_medication_schedule(_schedule_write(**over))
+    assert len(respx.calls) == 0
+
+
+@respx.mock
+async def test_create_schedule_post_400_is_vendor_rejected() -> None:
+    _login()
+    respx.get(MED).mock(return_value=httpx.Response(200, json=[]))
+    respx.post(MED).mock(
+        return_value=httpx.Response(
+            400, json={"error": {"message": "Slots already created for this drug order"}}
+        )
+    )
+    with pytest.raises(VendorRejected):
+        await _client().create_medication_schedule(_schedule_write())
+
+
+@pytest.mark.parametrize("call", ["read", "pre_read", "post"])
+@respx.mock
+async def test_schedule_403_is_auth_error(call: str) -> None:
+    _login()
+    forbidden = httpx.Response(
+        403, json={"error": {"message": "User doesn't have the following privilege(s)"}}
+    )
+    respx.get(MED).mock(return_value=forbidden if call != "post" else httpx.Response(200, json=[]))
+    respx.post(MED).mock(return_value=forbidden)
+    start = _utc(2026, 3, 2, 0, 0)
+    with pytest.raises(AuthError):
+        if call == "read":
+            await _client().medication_schedule(PATIENT_A, start, start + timedelta(days=1))
+        else:
+            await _client().create_medication_schedule(_schedule_write())
+
+
+@respx.mock
+async def test_schedule_route_404_is_not_found() -> None:
+    _login()
+    respx.get(MED).mock(return_value=httpx.Response(404))
+    start = _utc(2026, 3, 2, 0, 0)
+    with pytest.raises(NotFound):
+        await _client().medication_schedule(PATIENT_A, start, start + timedelta(days=1))

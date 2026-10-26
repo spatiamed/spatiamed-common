@@ -14,6 +14,13 @@ from decimal import Decimal
 from typing import Literal
 
 BedStatus = Literal["AVAILABLE", "OCCUPIED"]
+SlotStatus = Literal["SCHEDULED", "NOT_DONE", "COMPLETED", "STOPPED", "MISSED"]
+SlotServiceType = Literal[
+    "MedicationRequest",
+    "EmergencyMedicationRequest",
+    "AsNeededMedicationRequest",
+    "AsNeededPlaceholder",
+]
 
 
 @dataclass(frozen=True)
@@ -82,3 +89,49 @@ class NursingWriteOutcome:
     obs_uuids: tuple[str, ...]
     # False when an earlier write with the same client_ref was found instead.
     created: bool
+
+
+@dataclass(frozen=True)
+class MarSlot:
+    """One medication-chart slot: a due dose of one drug order."""
+
+    slot_uuid: str
+    order_uuid: str
+    drug_name: str | None
+    service_type: SlotServiceType
+    start_at: datetime
+    status: SlotStatus
+    # The administration recorded on the slot, if any.
+    administration_uuid: str | None
+    administered_at: datetime | None
+    notes: str | None
+
+
+@dataclass(frozen=True)
+class MarScheduleWrite:
+    """Put one active drug order on the medication chart.
+
+    Every instant is timezone-aware. ``first_day_slots`` are the doses left on the
+    first day, ``day_wise_slots`` the doses of the first full day (the record repeats
+    them every 24 hours until the order's quantity is used up) and
+    ``remaining_day_slots`` the doses of the last day. An as-needed order is charted
+    with no slots.
+    """
+
+    patient_uuid: str
+    order_uuid: str
+    provider_uuid: str
+    visit_uuid: str
+    first_day_slots: tuple[datetime, ...]
+    day_wise_slots: tuple[datetime, ...]
+    remaining_day_slots: tuple[datetime, ...] = ()
+    service_type: Literal["MedicationRequest", "AsNeededMedicationRequest"] = "MedicationRequest"
+    comments: str | None = None
+
+
+@dataclass(frozen=True)
+class MarScheduleOutcome:
+    order_uuid: str
+    # False when the order was already on the chart (nothing sent).
+    created: bool
+    slot_uuids: tuple[str, ...]

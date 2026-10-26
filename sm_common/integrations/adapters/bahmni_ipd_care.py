@@ -35,6 +35,27 @@ Nursing observations
     ``"sm:" + str(client_ref)`` so the write is recognisable in the record. An
     intake/output date-time member is sent as epoch ms, like every instant here
     (``_obs_time``). Values are checked against data-entry limits before any I/O.
+
+Medication chart
+    openmrs-module-ipd keeps one schedule per visit with one slot per due dose.
+    Its wire instants are epoch SECONDS (UTC): the ``startTime``/``endTime`` read
+    params, the slot arrays sent to create a schedule and each slot's ``startTime``
+    in an answer. ``_slot_time`` / ``_slot_instant`` are the only places that know
+    this. A slot's administration carries ``administeredDateTime`` as a plain date
+    (epoch ms or an ISO string), parsed like every other record date.
+    ``GET ipd/schedule/type/medication?patientUuid&startTime&endTime[&visitUuid]``
+    answers schedules with their ``slots``; ``?patientUuid&orderUuids&serviceType``
+    answers a flat slot list for one order. ``POST ipd/schedule/type/medication``
+    charts an order; its answer names no slots, so they are read back by order.
+    The client reads the order's slots first and sends nothing when the order is on
+    the chart already: the module refuses a second scheduled chart only with a 400
+    and does not refuse a second as-needed placeholder at all. ``serviceType`` is
+    sent as the module's enum name (``MEDICATION_REQUEST``, ``AS_NEEDED_PLACEHOLDER``)
+    and answered as its concept name (``MedicationRequest``). An as-needed order is
+    charted as a placeholder with no slots (the module charts nothing for
+    ``AS_NEEDED_MEDICATION_REQUEST``). Reading needs the ``Get Medication Tasks`` and
+    ``Get Medication Administration`` privileges and charting ``Edit Medication
+    Tasks``; the module answers 403 without them (``AuthError``).
 """
 
 from __future__ import annotations
@@ -44,10 +65,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast, get_args
 from uuid import UUID
 
-from sm_common.integrations.adapters.bahmni_http import BahmniHttp, to_epoch_ms
+from sm_common.integrations.adapters.bahmni_http import BahmniHttp, from_epoch_ms, to_epoch_ms
 from sm_common.integrations.adapters.bahmni_parse import when
 from sm_common.integrations.exceptions import (
     ConfigError,
@@ -58,7 +79,12 @@ from sm_common.integrations.exceptions import (
 from sm_common.integrations.ipd_care_types import (
     BedStatus,
     IntakeOutputWrite,
+    MarScheduleOutcome,
+    MarScheduleWrite,
+    MarSlot,
     NursingWriteOutcome,
+    SlotServiceType,
+    SlotStatus,
     VitalsWrite,
     WardBed,
     WardLayout,
@@ -83,6 +109,15 @@ _CONCEPT_DATATYPE_REP = "custom:(uuid,datatype:(display))"
 # OpenMRS uuids are up to 38 chars of [A-Za-z0-9-]; anything else could reach another route.
 _UUID_SHAPE = re.compile(r"[A-Za-z0-9-]{1,38}")
 _MAX_WARD_PATIENTS_PAGE = 200
+_MEDICATION_SCHEDULE = f"{_REST}/ipd/schedule/type/medication"
+_MAX_SCHEDULE_COMMENT_CHARS = 1000
+# Caller service type -> the module's enum name, sent on the create and the order read.
+_SCHEDULE_SERVICE_TYPE = {
+    "MedicationRequest": "MEDICATION_REQUEST",
+    "AsNeededMedicationRequest": "AS_NEEDED_PLACEHOLDER",
+}
+_SLOT_STATUSES = frozenset(get_args(SlotStatus))
+_SLOT_SERVICE_TYPES = frozenset(get_args(SlotServiceType))
 
 VITALS_KEYS = frozenset(
     {
@@ -183,6 +218,63 @@ def _marker(client_ref: UUID) -> str:
 def _obs_time(dt: datetime) -> int:
     """A date-time obs value: epoch ms, the module's one wire encoding for instants."""
     return to_epoch_ms(dt)
+
+
+def _slot_time(dt: datetime) -> int:
+    """An instant on the medication chart wire: epoch seconds (naive -> ValueError)."""
+    if not isinstance(dt, datetime):
+        raise ValueError(f"bahmni: slot time must be a datetime: {dt!r}")
+    return to_epoch_ms(dt) // 1000
+
+
+def _slot_instant(raw: Any) -> datetime:
+    """A medication chart ``startTime`` (epoch seconds) -> aware UTC."""
+    if isinstance(raw, bool) or not isinstance(raw, int | float | str):
+        raise VendorRejected(f"bahmni: medication slot time was not epoch seconds: {raw!r}")
+    try:
+        seconds = int(raw.strip()) if isinstance(raw, str) else int(raw)
+        return from_epoch_ms(seconds * 1000)
+    except (ValueError, OverflowError) as exc:
+        raise VendorRejected(
+            f"bahmni: medication slot time was not epoch seconds: {raw!r}"
+        ) from exc
+
+
+def _mar_slot(raw: Any) -> MarSlot:
+    if not isinstance(raw, dict):
+        raise VendorRejected("bahmni: medication slot was not an object")
+    slot_uuid = _text(raw.get("uuid"))
+    order = raw.get("order")
+    order_uuid = _text(order.get("uuid")) if isinstance(order, dict) else ""
+    if not slot_uuid or not order_uuid:
+        raise VendorRejected("bahmni: medication slot missing its uuid or order uuid")
+    status = raw.get("status")
+    if status not in _SLOT_STATUSES:
+        raise VendorRejected(f"bahmni: medication slot {slot_uuid} has unknown status {status!r}")
+    service_type = raw.get("serviceType")
+    if service_type not in _SLOT_SERVICE_TYPES:
+        raise VendorRejected(
+            f"bahmni: medication slot {slot_uuid} has unknown service type {service_type!r}"
+        )
+    # Only the order uuid and drug display are read: the order arrives as a full rep.
+    drug = order.get("drug") if isinstance(order, dict) else None
+    admin = raw.get("medicationAdministration")
+    if admin is not None and not isinstance(admin, dict):
+        raise VendorRejected(
+            f"bahmni: medication slot {slot_uuid} administration was not an object"
+        )
+    return MarSlot(
+        slot_uuid=slot_uuid,
+        order_uuid=order_uuid,
+        drug_name=_optional_text(drug.get("display")) if isinstance(drug, dict) else None,
+        service_type=cast(SlotServiceType, service_type),
+        start_at=_slot_instant(raw.get("startTime")),
+        status=cast(SlotStatus, status),
+        administration_uuid=_optional_text(admin.get("uuid")) if admin else None,
+        # A java date (epoch ms or ISO), not a slot instant.
+        administered_at=when(admin.get("administeredDateTime")) if admin else None,
+        notes=_optional_text(raw.get("notes")),
+    )
 
 
 def _vital_value(name: str, value: Any, low: Decimal, high: Decimal) -> int | float:
@@ -643,3 +735,118 @@ class BahmniIpdCareClient:
         return NursingWriteOutcome(
             encounter_uuid=sent, obs_uuids=_top_obs_uuids(parsed.get("observations")), created=True
         )
+
+    # ─── Medication chart ────────────────────────────────────────────────────
+
+    async def medication_schedule(
+        self,
+        patient_uuid: str,
+        start: datetime,
+        end: datetime,
+        *,
+        visit_uuid: str | None = None,
+    ) -> list[MarSlot]:
+        """The patient's chart slots due in ``[start, end)``, ordered by due time.
+
+        Without ``visit_uuid`` the module reads the patient's active visit.
+        """
+        _check_uuid("patient_uuid", patient_uuid)
+        params = {"patientUuid": patient_uuid}
+        params["startTime"] = str(_slot_time(start))
+        params["endTime"] = str(_slot_time(end))
+        if not start < end:
+            raise ValueError("bahmni: medication schedule end must be after start")
+        if visit_uuid is not None:
+            _check_uuid("visit_uuid", visit_uuid)
+            params["visitUuid"] = visit_uuid
+        body = await self._schedule_get(params)
+        slots: list[MarSlot] = []
+        for schedule in body:
+            if not isinstance(schedule, dict) or "slots" not in schedule:
+                raise VendorRejected("bahmni: medication schedule entry carried no slots")
+            raw_slots = schedule["slots"] if schedule["slots"] is not None else []
+            if not isinstance(raw_slots, list):
+                raise VendorRejected("bahmni: medication schedule slots was not a list")
+            slots.extend(_mar_slot(r) for r in raw_slots)
+        return sorted(slots, key=lambda s: (s.start_at, s.slot_uuid))
+
+    async def create_medication_schedule(self, w: MarScheduleWrite) -> MarScheduleOutcome:
+        """Put an active drug order on the chart, once.
+
+        The order's slots are read first: when it is on the chart already nothing is
+        sent and its slots are returned (``created=False``). Otherwise one POST, then
+        one read of the order's slots for the outcome. A scheduled order needs at
+        least one slot; an as-needed order is charted with none.
+        """
+        if not isinstance(w, MarScheduleWrite):
+            raise ValueError("bahmni: w must be a MarScheduleWrite")
+        for name in ("patient_uuid", "order_uuid", "provider_uuid", "visit_uuid"):
+            _check_uuid(name, getattr(w, name))
+        wire_type = _SCHEDULE_SERVICE_TYPE.get(w.service_type)
+        if wire_type is None:
+            raise ValueError(f"bahmni: unsupported medication service type: {w.service_type!r}")
+        arrays = {
+            "firstDaySlotsStartTime": [_slot_time(t) for t in w.first_day_slots],
+            "dayWiseSlotsStartTime": [_slot_time(t) for t in w.day_wise_slots],
+            "remainingDaySlotsStartTime": [_slot_time(t) for t in w.remaining_day_slots],
+        }
+        every = [t for times in arrays.values() for t in times]
+        if w.service_type == "MedicationRequest" and not every:
+            raise ValueError("bahmni: a scheduled medication needs at least one slot time")
+        if w.service_type != "MedicationRequest" and every:
+            raise ValueError("bahmni: an as-needed medication is charted without slot times")
+        if w.comments is not None and (
+            not isinstance(w.comments, str) or len(w.comments) > _MAX_SCHEDULE_COMMENT_CHARS
+        ):
+            raise ValueError(
+                f"bahmni: schedule comments must be at most {_MAX_SCHEDULE_COMMENT_CHARS} chars"
+            )
+        existing = await self._order_slots(w.patient_uuid, w.order_uuid, wire_type)
+        if existing:
+            return MarScheduleOutcome(
+                order_uuid=w.order_uuid,
+                created=False,
+                slot_uuids=tuple(s.slot_uuid for s in existing),
+            )
+        body = {
+            "patientUuid": w.patient_uuid,
+            "orderUuid": w.order_uuid,
+            "providerUuid": w.provider_uuid,
+            "comments": w.comments,
+            "slotStartTime": min(every) if every else None,
+            **arrays,
+            # Slot times are given explicitly; the module repeats the day-wise ones daily.
+            "medicationFrequency": "FIXED_SCHEDULE_FREQUENCY",
+            "serviceType": wire_type,
+        }
+        resp = await self._http.request("POST", _MEDICATION_SCHEDULE, json=body)
+        if resp.status_code == 404:
+            raise NotFound("bahmni: medication schedule route not found (HTTP 404)")
+        created = await self._order_slots(w.patient_uuid, w.order_uuid, wire_type)
+        return MarScheduleOutcome(
+            order_uuid=w.order_uuid,
+            created=True,
+            slot_uuids=tuple(s.slot_uuid for s in created),
+        )
+
+    async def _order_slots(
+        self, patient_uuid: str, order_uuid: str, wire_type: str
+    ) -> list[MarSlot]:
+        body = await self._schedule_get(
+            {"patientUuid": patient_uuid, "orderUuids": order_uuid, "serviceType": wire_type}
+        )
+        slots = [_mar_slot(r) for r in body]
+        if any(s.order_uuid != order_uuid for s in slots):
+            raise VendorRejected(
+                f"bahmni: medication slot read for order {order_uuid} named another order"
+            )
+        return sorted(slots, key=lambda s: (s.start_at, s.slot_uuid))
+
+    async def _schedule_get(self, params: dict[str, str]) -> list[Any]:
+        resp = await self._http.request("GET", _MEDICATION_SCHEDULE, params=params)
+        if resp.status_code == 404:
+            raise NotFound("bahmni: medication schedule route not found (HTTP 404)")
+        body = resp.json() if resp.content else None
+        if not isinstance(body, list):
+            raise VendorRejected("bahmni: medication schedule response was not a list")
+        return body
