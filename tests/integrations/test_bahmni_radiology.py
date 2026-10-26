@@ -1,6 +1,7 @@
+import base64
 import json
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -16,15 +17,19 @@ from sm_common.integrations.adapters.bahmni_radiology import (
 )
 from sm_common.integrations.exceptions import (
     ConfigError,
+    DocumentFilingFailed,
     NotFound,
     TransientError,
     VendorRejected,
 )
 from sm_common.integrations.radiology_types import (
+    PacsStudy,
     PlacedRadiologyOrder,
+    RadiologyDocumentRef,
     RadiologyOrderRow,
     RadiologyOrderWrite,
     RadiologyProcedure,
+    RadiologyReportOutcome,
 )
 
 BASE = "https://bahmni.example.test"
@@ -936,3 +941,418 @@ async def test_discontinue_missing_order_is_not_found() -> None:
     respx.get(f"{REST}/order/{ORDER_XRAY}").mock(return_value=httpx.Response(404))
     with pytest.raises(NotFound):
         await _client().discontinue_radiology_order(**DISCONTINUE_KW)
+
+
+# --- reports ----------------------------------------------------------------
+
+OBS_URL = f"{REST}/obs"
+REPORT_OBS = "0d6f1c2e-91a3-4f7b-8e52-3c1a9b7d6e40"
+REPORT_AT = datetime(2026, 10, 20, 9, 30, tzinfo=timezone.utc)
+REPORT_KW: dict[str, Any] = {
+    "order_uuid": ORDER_XRAY,
+    "patient_uuid": PATIENT,
+    "visit_uuid": VISIT,
+    "provider_uuid": PROVIDER,
+    "location_uuid": LOCATION,
+    "report_at": REPORT_AT,
+    "findings": "No focal lesion.",
+    "impression": "Normal study.",
+}
+
+
+@respx.mock
+async def test_report_obs_carries_order_uuid() -> None:
+    _login()
+    post = respx.post(ENCOUNTER_URL).mock(
+        side_effect=_echo_encounter(_fixture("report_encounter_response.json"))
+    )
+    out = await _client().write_radiology_report(**REPORT_KW)
+    [body] = _post_bodies(post)
+    assert UUID_RE.fullmatch(body["encounterUuid"])
+    assert body["encounterTypeUuid"] == CONFIG["report_encounter_type_uuid"]
+    assert body["patientUuid"] == PATIENT
+    assert body["visitUuid"] == VISIT
+    assert body["locationUuid"] == LOCATION
+    assert body["providers"] == [{"uuid": PROVIDER}]
+    # The server stamps the encounter; the report time rides on the obs.
+    assert "encounterDateTime" not in body
+    assert body.get("orders", []) == []
+    [obs] = body["observations"]
+    assert obs["orderUuid"] == ORDER_XRAY
+    assert obs["concept"] == {"uuid": CONFIG["report_concept_uuid"]}
+    assert obs["observationDateTime"] == int(REPORT_AT.timestamp() * 1000)
+    assert out == RadiologyReportOutcome(encounter_uuid=body["encounterUuid"], obs_uuid=REPORT_OBS)
+
+
+@respx.mock
+async def test_report_text_has_fixed_headings() -> None:
+    _login()
+    post = respx.post(ENCOUNTER_URL).mock(
+        side_effect=_echo_encounter(_fixture("report_encounter_response.json"))
+    )
+    await _client().write_radiology_report(
+        **{**REPORT_KW, "findings": "  No focal lesion.\n", "impression": "\nNormal study.  "}
+    )
+    [body] = _post_bodies(post)
+    assert body["observations"][0]["value"] == (
+        "Findings:\nNo focal lesion.\n\nImpression:\nNormal study."
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("impression", ""),
+        ("impression", "   \n "),
+        ("impression", "x" * 20_001),
+        ("findings", ""),
+        ("findings", "x" * 20_001),
+        ("findings", None),
+    ],
+)
+async def test_report_empty_impression_is_value_error(field: str, value: Any) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        with pytest.raises(ValueError, match=field):
+            await _client().write_radiology_report(**{**REPORT_KW, field: value})
+        assert mock.calls.call_count == 0
+
+
+@pytest.mark.parametrize(
+    ("override", "exc"),
+    [
+        ({"order_uuid": ""}, ValueError),
+        ({"order_uuid": "../obs"}, ValueError),
+        ({"report_at": datetime(2026, 10, 20, 9, 30)}, ValueError),
+    ],
+)
+async def test_report_bad_input_refused_before_io(
+    override: dict[str, Any], exc: type[Exception]
+) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        with pytest.raises(exc):
+            await _client().write_radiology_report(**{**REPORT_KW, **override})
+        assert mock.calls.call_count == 0
+
+
+@pytest.mark.parametrize("key", ["report_concept_uuid", "report_encounter_type_uuid"])
+async def test_report_missing_config_is_config_error_before_io(key: str) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        with pytest.raises(ConfigError, match=key):
+            await _client({**CONFIG, key: ""}).write_radiology_report(**REPORT_KW)
+        assert mock.calls.call_count == 0
+
+
+@respx.mock
+async def test_report_response_without_the_order_obs_is_landed() -> None:
+    _login()
+    response = _fixture("report_encounter_response.json")
+    # Only a voided obs and an obs for another order come back.
+    response["observations"] = [
+        {**response["observations"][0], "voided": True},
+        {**response["observations"][0], "uuid": ORDER_DC, "orderUuid": ORDER_CT},
+    ]
+    respx.post(ENCOUNTER_URL).mock(side_effect=_echo_encounter(response))
+    with pytest.raises(VendorRejected) as info:
+        await _client().write_radiology_report(**REPORT_KW)
+    assert info.value.landed is True
+
+
+@respx.mock
+async def test_report_500_is_transient_not_retried() -> None:
+    _login()
+    post = respx.post(ENCOUNTER_URL).mock(return_value=httpx.Response(500))
+    with pytest.raises(TransientError):
+        await _client().write_radiology_report(**REPORT_KW)
+    assert post.call_count == 1
+
+
+@respx.mock
+async def test_void_report_sends_reason() -> None:
+    _login()
+    route = respx.delete(f"{OBS_URL}/{REPORT_OBS}").mock(return_value=httpx.Response(204))
+    await _client().void_radiology_report(REPORT_OBS, "Amended: laterality corrected")
+    assert route.call_count == 1
+    assert route.calls[0].request.url.params["reason"] == "Amended: laterality corrected"
+
+
+@respx.mock
+async def test_void_report_unknown_obs_is_not_found() -> None:
+    _login()
+    respx.delete(f"{OBS_URL}/{REPORT_OBS}").mock(return_value=httpx.Response(404))
+    with pytest.raises(NotFound):
+        await _client().void_radiology_report(REPORT_OBS, "Amended")
+
+
+@pytest.mark.parametrize(
+    ("obs_uuid", "reason"),
+    [(REPORT_OBS, ""), (REPORT_OBS, "  "), (REPORT_OBS, "x" * 256), ("a/b", "r")],
+)
+async def test_void_report_bad_input_before_io(obs_uuid: str, reason: str) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        with pytest.raises(ValueError):
+            await _client().void_radiology_report(obs_uuid, reason)
+        assert mock.calls.call_count == 0
+
+
+# --- image studies ----------------------------------------------------------
+
+PACS_URL = f"{REST}/pacs/studies"
+
+
+@respx.mock
+async def test_pacs_studies_parsed_with_accession_stripped() -> None:
+    _login()
+    route = respx.get(PACS_URL).mock(
+        return_value=httpx.Response(200, json=_fixture("pacs_studies.json"))
+    )
+    studies = await _client().list_pacs_studies("LT-P4-0001", date=date(2026, 10, 20))
+    params = route.calls[0].request.url.params
+    assert params["patientId"] == "LT-P4-0001"
+    assert params["date"] == "20261020"  # DICOM DA
+    assert studies == [
+        PacsStudy(
+            study_instance_uid="1.2.826.0.1.3680043.8.498.10000000000000000001",
+            accession="ORD-1234",
+            modality=None,
+            study_at=datetime(2026, 10, 20, tzinfo=timezone.utc),
+            description=None,
+        ),
+        PacsStudy(
+            study_instance_uid="1.2.826.0.1.3680043.8.498.10000000000000000002",
+            accession=None,
+            modality="CT",
+            study_at=datetime(2026, 10, 21, 4, 0, tzinfo=timezone.utc),
+            description="CT Head Plain",
+        ),
+    ]
+
+
+@respx.mock
+async def test_pacs_studies_without_date_sends_no_date_and_empty_list_is_empty() -> None:
+    _login()
+    route = respx.get(PACS_URL).mock(return_value=httpx.Response(200, json=[]))
+    assert await _client().list_pacs_studies("LT-P4-0001") == []
+    assert "date" not in route.calls[0].request.url.params
+
+
+@respx.mock
+async def test_pacs_501_is_config_error() -> None:
+    _login()
+    respx.get(PACS_URL).mock(
+        return_value=httpx.Response(
+            501, json={"error": {"message": "PACS Server configuration is not defined"}}
+        )
+    )
+    with pytest.raises(ConfigError, match="pacs_not_configured") as info:
+        await _client().list_pacs_studies("LT-P4-0001")
+    assert info.value.code == "pacs_not_configured"
+
+
+@pytest.mark.parametrize("status", [500, 502, 503])
+@respx.mock
+async def test_pacs_500_is_transient(status: int) -> None:
+    _login()
+    respx.get(PACS_URL).mock(return_value=httpx.Response(status))
+    with pytest.raises(TransientError) as info:
+        await _client().list_pacs_studies("LT-P4-0001")
+    assert not isinstance(info.value, ConfigError)
+
+
+@respx.mock
+async def test_pacs_404_is_not_found() -> None:
+    _login()
+    respx.get(PACS_URL).mock(return_value=httpx.Response(404))
+    with pytest.raises(NotFound):
+        await _client().list_pacs_studies("LT-P4-0001")
+
+
+@respx.mock
+async def test_pacs_non_list_response_is_vendor_rejected() -> None:
+    _login()
+    respx.get(PACS_URL).mock(return_value=httpx.Response(200, json={"results": []}))
+    with pytest.raises(VendorRejected):
+        await _client().list_pacs_studies("LT-P4-0001")
+
+
+@pytest.mark.parametrize("identifier", ["", "   ", "x" * 65, "LT\x00P4"])
+async def test_pacs_bad_identifier_before_io(identifier: str) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        with pytest.raises(ValueError):
+            await _client().list_pacs_studies(identifier)
+        assert mock.calls.call_count == 0
+
+
+# --- documents --------------------------------------------------------------
+
+UPLOAD_URL = f"{REST}/bahmnicore/visitDocument/uploadDocument"
+DOC_URL = f"{REST}/bahmnicore/visitDocument"
+VISIT_TYPE = "e5a3f1b2-8c4d-4e6f-a0b1-c2d3e4f50617"
+TEST_CONCEPT = XRAY_CHEST
+DOC_ENCOUNTER = "4b1c9e7a-2f3d-4a5b-8c6d-7e8f9a0b1c2d"
+PDF = b"%PDF-1.4\n% synthetic one-page film report\n%%EOF\n"
+TAKEN_AT = datetime(2026, 10, 19, 6, 0, tzinfo=timezone.utc)
+UPLOAD_KW: dict[str, Any] = {
+    "patient_uuid": PATIENT,
+    "visit_uuid": VISIT,
+    "visit_type_uuid": VISIT_TYPE,
+    "provider_uuid": PROVIDER,
+    "location_uuid": LOCATION,
+    "test_concept_uuid": TEST_CONCEPT,
+    "content": PDF,
+    "mime_type": "application/pdf",
+    "file_name": "LT-P4-film.pdf",
+    "taken_at": TAKEN_AT,
+    "comment": "Outside film, synthetic",
+}
+
+
+@respx.mock
+async def test_upload_two_step_bodies() -> None:
+    _login()
+    url = _fixture("upload_document_response.json")["url"]
+    up = respx.post(UPLOAD_URL).mock(
+        return_value=httpx.Response(200, json=_fixture("upload_document_response.json"))
+    )
+    filed = respx.post(DOC_URL).mock(
+        return_value=httpx.Response(200, json={"visitUuid": VISIT, "encounterUuid": DOC_ENCOUNTER})
+    )
+    ref = await _client().upload_radiology_document(**UPLOAD_KW)
+    [first] = _post_bodies(up)
+    assert first == {
+        "content": base64.b64encode(PDF).decode("ascii"),
+        "format": "pdf",
+        "fileType": "pdf",
+        "patientUuid": PATIENT,
+        "encounterTypeName": "RADIOLOGY",
+        "fileName": "LT-P4-film.pdf",
+    }
+    [second] = _post_bodies(filed)
+    at = int(TAKEN_AT.timestamp() * 1000)
+    assert second == {
+        "patientUuid": PATIENT,
+        "visitUuid": VISIT,
+        "visitTypeUuid": VISIT_TYPE,
+        "visitStartDate": at,
+        "visitEndDate": at,
+        "encounterTypeUuid": CONFIG["document_encounter_type_uuid"],
+        "encounterDateTime": at,
+        "providerUuid": PROVIDER,
+        "locationUuid": LOCATION,
+        "documents": [
+            {
+                "testUuid": TEST_CONCEPT,
+                "image": url,
+                "obsDateTime": at,
+                "comment": "Outside film, synthetic",
+            }
+        ],
+    }
+    assert ref == RadiologyDocumentRef(encounter_uuid=DOC_ENCOUNTER, file_url=url)
+
+
+@respx.mock
+async def test_upload_image_kinds_and_no_comment() -> None:
+    _login()
+    up = respx.post(UPLOAD_URL).mock(return_value=httpx.Response(200, json={"url": "a/b.png"}))
+    filed = respx.post(DOC_URL).mock(
+        return_value=httpx.Response(200, json={"visitUuid": VISIT, "encounterUuid": DOC_ENCOUNTER})
+    )
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    await _client().upload_radiology_document(
+        **{**UPLOAD_KW, "content": png, "mime_type": "image/png", "comment": None}
+    )
+    [first] = _post_bodies(up)
+    assert (first["format"], first["fileType"]) == ("png", "image")
+    [second] = _post_bodies(filed)
+    assert "comment" not in second["documents"][0]
+
+
+@respx.mock
+async def test_upload_file_name_is_sanitised() -> None:
+    _login()
+    up = respx.post(UPLOAD_URL).mock(return_value=httpx.Response(200, json={"url": "a/b.pdf"}))
+    respx.post(DOC_URL).mock(
+        return_value=httpx.Response(200, json={"visitUuid": VISIT, "encounterUuid": DOC_ENCOUNTER})
+    )
+    await _client().upload_radiology_document(
+        **{**UPLOAD_KW, "file_name": "../../etc/LT P4 film.pdf"}
+    )
+    name = _post_bodies(up)[0]["fileName"]
+    assert "/" not in name and ".." not in name and " " not in name
+    assert name.endswith("LT-P4-film.pdf")
+
+
+@pytest.mark.parametrize(
+    ("override", "match"),
+    [
+        ({"content": PDF + b"x" * 64, "max_bytes": 32}, "max_bytes"),
+        ({"mime_type": "image/gif"}, "mime"),
+        ({"mime_type": "application/dicom"}, "mime"),
+        ({"content": b""}, "empty"),
+        ({"content": b"GIF89a not a pdf"}, "content"),
+        ({"max_bytes": 0}, "max_bytes"),
+        ({"file_name": "   "}, "file_name"),
+        ({"file_name": ".."}, "file_name"),
+        ({"taken_at": datetime(2026, 10, 19, 6, 0)}, "taken_at"),
+        ({"comment": "x" * 1025}, "comment"),
+        ({"visit_uuid": "a b"}, "visit_uuid"),
+        ({"test_concept_uuid": ""}, "test_concept_uuid"),
+    ],
+)
+async def test_upload_rejects_oversize_and_bad_mime_before_io(
+    override: dict[str, Any], match: str
+) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        with pytest.raises(ValueError, match=match):
+            await _client().upload_radiology_document(**{**UPLOAD_KW, **override})
+        assert mock.calls.call_count == 0
+
+
+async def test_upload_default_cap_is_ten_mib() -> None:
+    big = b"%PDF" + b"\x00" * (10 * 1024 * 1024 - 3)
+    with respx.mock(assert_all_called=False) as mock:
+        with pytest.raises(ValueError, match="max_bytes"):
+            await _client().upload_radiology_document(**{**UPLOAD_KW, "content": big})
+        assert mock.calls.call_count == 0
+
+
+async def test_upload_missing_document_encounter_type_is_config_error_before_io() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        with pytest.raises(ConfigError, match="document_encounter_type_uuid"):
+            await _client({**CONFIG, "document_encounter_type_uuid": ""}).upload_radiology_document(
+                **UPLOAD_KW
+            )
+        assert mock.calls.call_count == 0
+
+
+@respx.mock
+async def test_upload_filing_failure_carries_uploaded_url() -> None:
+    _login()
+    respx.post(UPLOAD_URL).mock(return_value=httpx.Response(200, json={"url": "a/b.pdf"}))
+    filed = respx.post(DOC_URL).mock(return_value=httpx.Response(500))
+    with pytest.raises(DocumentFilingFailed) as info:
+        await _client().upload_radiology_document(**UPLOAD_KW)
+    assert info.value.uploaded_url == "a/b.pdf"
+    assert info.value.landed is True
+    assert filed.call_count == 1
+
+
+@respx.mock
+async def test_upload_filing_response_without_encounter_is_landed() -> None:
+    _login()
+    respx.post(UPLOAD_URL).mock(return_value=httpx.Response(200, json={"url": "a/b.pdf"}))
+    respx.post(DOC_URL).mock(return_value=httpx.Response(200, json={"visitUuid": VISIT}))
+    with pytest.raises(DocumentFilingFailed) as info:
+        await _client().upload_radiology_document(**UPLOAD_KW)
+    assert info.value.landed is True
+
+
+@respx.mock
+async def test_upload_step_one_without_url_files_nothing() -> None:
+    _login()
+    respx.post(UPLOAD_URL).mock(return_value=httpx.Response(200, json={}))
+    filed = respx.post(DOC_URL).mock(return_value=httpx.Response(200, json={}))
+    with pytest.raises(VendorRejected) as info:
+        await _client().upload_radiology_document(**UPLOAD_KW)
+    assert not isinstance(info.value, DocumentFilingFailed)
+    assert filed.call_count == 0
