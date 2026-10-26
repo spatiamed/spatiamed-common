@@ -1,0 +1,220 @@
+{
+  "encounterUuid": "9cddbb31-0c59-46aa-b336-c4d0e96860ae",
+  "visitUuid": "fc17aded-c4d6-4bd9-890b-a8e684a33ffe",
+  "patientUuid": "deeeac16-ad7f-49f6-96b3-cd6f06196e59",
+  "encounterTypeUuid": "0c061ae4-61b8-47a5-ab53-c21bc95dbb68",
+  "locationUuid": "4634dde0-2ee1-4e71-b59f-545c4954b00b",
+  "observations": [
+    {
+      "uuid": "02d91117-b5a5-4de9-9346-683f43f6b0e9",
+      "concept": {
+        "uuid": "6dd34379-e216-49e4-89e8-e9e356cd31d6",
+        "name": "Test Haemoglobin"
+      },
+      "orderUuid": "5086fb24-30d7-473c-8fb2-9ea6a784a7eb",
+      "voided": false,
+      "observationDateTime": "2026-10-20T14:45:00.000+0530",
+      "groupMembers": [
+        {
+          "uuid": "f21207c9-376f-4346-80fb-09790f95be3b",
+          "concept": {
+            "uuid": "6dd34379-e216-49e4-89e8-e9e356cd31d6",
+            "name": "Test Haemoglobin"
+          },
+          "orderUuid": "5086fb24-30d7-473c-8fb2-9ea6a784a7eb",
+          "voided": false,
+          "observationDateTime": "2026-10-20T14:45:00.000+0530",
+          "groupMembers": [
+            {
+              "uuid": "5b0e1d8e-4f43-4c55-9d0c-4a4f1e1a7c11",
+              "concept": {
+                "uuid": "6dd34379-e216-49e4-89e8-e9e356cd31d6",
+                "name": "Test Haemoglobin"
+              },
+              "orderUuid": "5086fb24-30d7-473c-8fb2-9ea6a784a7eb",
+              "voided": false,
+              "observationDateTime": "2026-10-20T14:45:00.000+0530",
+              "groupMembers": [],
+              "value": 11.2
+            }
+          ],
+          "value": null
+        }
+      ],
+      "value": null
+    },
+    {
+      "uuid": "efe36ef8-5ebd-4618-b7b5-db925a9fbb81",
+      "concept": {
+        "uuid": "8acc2fb0-176c-4d23-9c8d-3408ce2901f2",
+        "name": "Test Serum Creatinine"
+      },
+      "orderUuid": "c4f5c422-9719-434f-9d57-cf8209b6a534",
+      "voided": true,
+      "observationDateTime": "2026-10-20T14:45:00.000+0530",
+      "groupMembers": [
+        {
+          "uuid": "3f6a7e2b-2d0e-4b8e-9a71-0c7e5f1d2b44",
+          "concept": {
+            "uuid": "8acc2fb0-176c-4d23-9c8d-3408ce2901f2",
+            "name": "Test Serum Creatinine"
+          },
+          "orderUuid": "c4f5c422-9719-434f-9d57-cf8209b6a534",
+          "voided": true,
+          "observationDateTime": "2026-10-20T14:45:00.000+0530",
+          "groupMembers": [
+            {
+              "uuid": "7c1d9e0a-6b2f-4f3c-8e15-2a9d4b6c8e55",
+              "concept": {
+                "uuid": "8acc2fb0-176c-4d23-9c8d-3408ce2901f2",
+                "name": "Test Serum Creatinine"
+              },
+              "orderUuid": "c4f5c422-9719-434f-9d57-cf8209b6a534",
+              "voided": true,
+              "observationDateTime": "2026-10-20T14:45:00.000+0530",
+              "groupMembers": [],
+              "value": 1.1
+            }
+          ],
+          "value": null
+        }
+      ],
+      "value": null
+    },
+    {
+      "uuid": "89d4c671-7761-4a94-82c8-f4f5f46e2761",
+      "concept": {
+        "uuid": "8acc2fb0-176c-4d23-9c8d-3408ce2901f2",
+        "name": "Test Serum Creatinine"
+      },
+      "orderUuid": "c4f5c422-9719-434f-9d57-cf8209b6a534",
+      "voided": false,
+      "observationDateTime": "2026-10-20T14:45:00.000+0530",
+      "groupMembers": [
+        {
+          "uuid": "85e4bf02-9135-40a4-99c5-8180aec5fbe8",
+          "concept": {
+            "uuid": "8acc2fb0-176c-4d23-9c8d-3408ce2901f2",
+            "name": "Test Serum Creatinine"
+          },
+          "orderUuid": "c4f5c422-9719-434f-9d57-cf8209b6a534",
+          "voided": false,
+          "observationDateTime": "2026-10-20T14:45:00.000+0530",
+          "groupMembers": [
+            {
+              "uuid": "6e8c889f-d73f-4075-adb2-aba1d5537e33",
+              "concept": {
+                "uuid": "8acc2fb0-176c-4d23-9c8d-3408ce2901f2",
+                "name": "Test Serum Creatinine"
+              },
+              "orderUuid": "c4f5c422-9719-434f-9d57-cf8209b6a534",
+              "voided": false,
+              "observationDateTime": "2026-10-20T14:45:00.000+0530",
+              "groupMembers": [],
+              "value": 1.4
+            }
+          ],
+          "value": null
+        }
+      ],
+      "value": null
+    },
+    {
+      "uuid": "994efa28-5fce-4eab-8efe-22c73b733f9b",
+      "concept": {
+        "uuid": "79268774-5fe8-4802-bb27-352a2837b9bc",
+        "name": "Test Liver Panel"
+      },
+      "orderUuid": "ecc6d325-5533-4c72-8dca-a3a72f4452c8",
+      "voided": false,
+      "observationDateTime": "2026-10-20T14:45:00.000+0530",
+      "groupMembers": [
+        {
+          "uuid": "a3405dd7-31ff-40a9-928c-0524bcd8a60c",
+          "concept": {
+            "uuid": "d6193f4c-8ba0-48bb-a705-93f8289ffd4c",
+            "name": "Test"
+          },
+          "orderUuid": "ecc6d325-5533-4c72-8dca-a3a72f4452c8",
+          "voided": false,
+          "observationDateTime": "2026-10-20T14:45:00.000+0530",
+          "groupMembers": [
+            {
+              "uuid": "11c11633-0a93-48a6-83fb-68324aa55ea9",
+              "concept": {
+                "uuid": "d6193f4c-8ba0-48bb-a705-93f8289ffd4c",
+                "name": "Test"
+              },
+              "orderUuid": "ecc6d325-5533-4c72-8dca-a3a72f4452c8",
+              "voided": false,
+              "observationDateTime": "2026-10-20T14:45:00.000+0530",
+              "groupMembers": [
+                {
+                  "uuid": "effcc6e3-9083-4c83-ae1f-034a4a7a0ed2",
+                  "concept": {
+                    "uuid": "d6193f4c-8ba0-48bb-a705-93f8289ffd4c",
+                    "name": "Test"
+                  },
+                  "orderUuid": "ecc6d325-5533-4c72-8dca-a3a72f4452c8",
+                  "voided": false,
+                  "observationDateTime": "2026-10-20T14:45:00.000+0530",
+                  "groupMembers": [],
+                  "value": 52
+                }
+              ],
+              "value": null
+            }
+          ],
+          "value": null
+        },
+        {
+          "uuid": "255bd848-57d4-46cd-89ac-823bed5fbda7",
+          "concept": {
+            "uuid": "e92d1c4f-aa52-465e-8764-68f3fab3e056",
+            "name": "Test"
+          },
+          "orderUuid": "ecc6d325-5533-4c72-8dca-a3a72f4452c8",
+          "voided": false,
+          "observationDateTime": "2026-10-20T14:45:00.000+0530",
+          "groupMembers": [
+            {
+              "uuid": "0cf2fe17-8213-48d0-a218-98632210a0fd",
+              "concept": {
+                "uuid": "e92d1c4f-aa52-465e-8764-68f3fab3e056",
+                "name": "Test"
+              },
+              "orderUuid": "ecc6d325-5533-4c72-8dca-a3a72f4452c8",
+              "voided": false,
+              "observationDateTime": "2026-10-20T14:45:00.000+0530",
+              "groupMembers": [
+                {
+                  "uuid": "208d49c0-bba3-4a3a-9dce-1f53cc93f170",
+                  "concept": {
+                    "uuid": "e92d1c4f-aa52-465e-8764-68f3fab3e056",
+                    "name": "Test"
+                  },
+                  "orderUuid": "ecc6d325-5533-4c72-8dca-a3a72f4452c8",
+                  "voided": false,
+                  "observationDateTime": "2026-10-20T14:45:00.000+0530",
+                  "groupMembers": [],
+                  "value": "Haemolysed sample"
+                }
+              ],
+              "value": null
+            }
+          ],
+          "value": null
+        }
+      ],
+      "value": null
+    }
+  ],
+  "orders": [],
+  "drugOrders": [],
+  "providers": [
+    {
+      "uuid": "f2e6c810-53eb-4c90-ae9d-03f5356e0e28",
+      "name": "Test Provider"
+    }
+  ]
+}

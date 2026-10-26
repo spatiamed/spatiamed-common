@@ -24,6 +24,15 @@ Every obs, at every level, carries the lab order uuid (for a panel, the panel or
 Bahmni links each obs to its order from that field, and its reader finds a result by
 the top-level obs's order and then descends by concept.
 
+Write guard: every write first reads ``labOrderResults`` for its visit and refuses
+(``ConflictError`` with code ``record_result_newer``, nothing posted) when an order it
+targets already holds a result at or after the new result time. A newer result in
+the record is never overwritten; an amendment voids the old result group
+(``void_lab_result``) and then writes afresh.
+
+Void: ``DELETE obs/<uuid>?reason=`` voids (never purges) an obs; voiding a group obs
+voids its members with it.
+
 No environment reads and no default identifiers: every ``LabResultsConfig`` key
 defaults to ``""`` and comes from the caller's integration mapping.
 """
@@ -42,10 +51,16 @@ from urllib.parse import urlencode
 
 from sm_common.integrations.adapters.bahmni_http import BahmniHttp, to_epoch_ms
 from sm_common.integrations.adapters.bahmni_parse import when
-from sm_common.integrations.exceptions import ConfigError, NotFound, VendorRejected
+from sm_common.integrations.exceptions import (
+    ConfigError,
+    ConflictError,
+    NotFound,
+    VendorRejected,
+)
 from sm_common.integrations.lab_results_types import (
     LabResultRow,
     LabResultWrite,
+    LabResultWriteOutcome,
     LabTestDatatype,
     LabTestDefinition,
 )
@@ -55,6 +70,9 @@ log = logging.getLogger(__name__)
 _REST = "/openmrs/ws/rest/v1"
 _LAB_ORDER_RESULTS = f"{_REST}/bahmnicore/labOrderResults"
 _CONCEPT = f"{_REST}/concept"
+_ENCOUNTER = f"{_REST}/bahmnicore/bahmniencounter"
+_OBS = f"{_REST}/obs"
+_MAX_VOID_REASON = 255
 _TEST_DEFINITION_REP = "custom:(uuid,datatype:(name),units,answers:(uuid,display))"
 # OpenMRS uuids are 36 characters, but older installs carry other shapes; this keeps
 # anything that could escape a path segment or a query value out.
@@ -245,6 +263,74 @@ def _check_result(r: Any) -> None:
             raise ValueError(f"bahmni: {name} must be a finite Decimal")
     if r.notes is not None and not isinstance(r.notes, str):
         raise ValueError("bahmni: notes must be a string")
+
+
+def _coded(exc: ConflictError | NotFound, code: str) -> ConflictError | NotFound:
+    """Tag a refusal with a stable machine-readable code (the message is the code)."""
+    exc.code = code
+    return exc
+
+
+def _check_against_record(results: Sequence[LabResultWrite], rows: Sequence[LabResultRow]) -> None:
+    """Refuse a write the record already answers at or after its result time.
+
+    Rows are matched on the order uuid only: for a panel order, every member row
+    counts, because a second result group for one order is what the reader cannot
+    tell apart. A resulted row without a result time cannot be shown to be older, so
+    it refuses too. An order absent from the visit's rows is ``NotFound``.
+    """
+    by_order: dict[str, list[LabResultRow]] = {}
+    for row in rows:
+        by_order.setdefault(row.order_uuid, []).append(row)
+    for r in results:
+        if r.order_uuid not in by_order:
+            raise _coded(NotFound("lab_order_not_in_visit"), "lab_order_not_in_visit")
+    for r in results:
+        new_at = r.result_at
+        for row in by_order[r.order_uuid]:
+            if row.status != "resulted":
+                continue
+            if row.result_at is None or row.result_at >= new_at:
+                raise _coded(ConflictError("record_result_newer"), "record_result_newer")
+
+
+def _top_level_groups(
+    body: Any, wanted: Mapping[str, str]
+) -> tuple[str, dict[str, tuple[str, ...]]]:
+    """(encounter uuid, unvoided top-level group obs uuids per written order).
+
+    ``wanted`` maps each written order to its top-level concept (the panel concept
+    for a panel order, else the test concept). Session merging can put other orders'
+    groups, and voided groups, in the same encounter; those are skipped. Any failure
+    here happens after Bahmni accepted the write, so it is raised with ``landed``.
+    """
+    if not isinstance(body, Mapping):
+        raise VendorRejected("bahmni: encounter response is not an object", landed=True)
+    encounter = _text(body.get("encounterUuid"))
+    if encounter is None:
+        raise VendorRejected("bahmni: encounter response had no encounterUuid", landed=True)
+    raw_obs = body.get("observations")
+    found: dict[str, list[str]] = {order: [] for order in wanted}
+    if isinstance(raw_obs, list):
+        for obs in raw_obs:
+            if not isinstance(obs, Mapping) or obs.get("voided") is True:
+                continue
+            order = _text(obs.get("orderUuid"))
+            concept = obs.get("concept")
+            concept_uuid = _text(concept.get("uuid")) if isinstance(concept, Mapping) else None
+            uuid = _text(obs.get("uuid"))
+            if order is None or uuid is None or order not in wanted:
+                continue
+            if concept_uuid != wanted[order]:
+                continue
+            found[order].append(uuid)
+    missing = [order for order, uuids in found.items() if not uuids]
+    if missing:
+        raise VendorRejected(
+            f"bahmni: encounter response carried no result group for {len(missing)} order(s)",
+            landed=True,
+        )
+    return encounter, {order: tuple(uuids) for order, uuids in found.items()}
 
 
 def _number(value: Decimal) -> float:
@@ -466,3 +552,69 @@ class BahmniLabResultsClient:
                 raise VendorRejected("bahmni: concept response is not JSON") from exc
             out.append(_parse_definition(uuid, body))
         return out
+
+    async def write_lab_results(
+        self,
+        *,
+        patient_uuid: str,
+        visit_uuid: str,
+        provider_uuid: str,
+        location_uuid: str,
+        encounter_datetime: datetime,
+        results: Sequence[LabResultWrite],
+    ) -> LabResultWriteOutcome:
+        """Write lab results into the record, never over a newer one.
+
+        1. Build the body (every input and config check; ``ValueError`` /
+           ``ConfigError`` before any I/O).
+        2. Read the visit's ``labOrderResults``: an order not in it raises
+           ``NotFound`` (code ``lab_order_not_in_visit``); an order already resulted
+           at or after a new ``result_at`` raises ``ConflictError`` (code
+           ``record_result_newer``). Nothing is posted in either case.
+        3. POST the body to ``bahmniencounter`` once (no retries here: a 5xx is a
+           ``TransientError`` for the caller to cap; a 404 is ``NotFound``).
+
+        An older result in the record does not block the write. To replace it, void
+        its group first (``void_lab_result``), then write. The outcome's
+        ``encounter_uuid`` is not unique per write (Bahmni merges writes of one type,
+        visit and provider within its session window into one encounter).
+        """
+        body = _result_encounter_body(
+            self._config,
+            patient_uuid=patient_uuid,
+            visit_uuid=visit_uuid,
+            provider_uuid=provider_uuid,
+            location_uuid=location_uuid,
+            encounter_datetime=encounter_datetime,
+            results=results,
+        )
+        rows = await self.read_lab_results(patient_uuid, visit_uuids=[visit_uuid])
+        _check_against_record(results, rows)
+        wanted = {r.order_uuid: r.panel_concept_uuid or r.test_concept_uuid for r in results}
+        resp = await self._http.request("POST", _ENCOUNTER, json=body)
+        if resp.status_code == 404:
+            raise NotFound("bahmni: bahmniencounter route not found (HTTP 404)")
+        try:
+            parsed = resp.json()
+        except ValueError as exc:
+            raise VendorRejected("bahmni: encounter response is not JSON", landed=True) from exc
+        encounter, groups = _top_level_groups(parsed, wanted)
+        return LabResultWriteOutcome(encounter_uuid=encounter, obs_uuids_by_order=groups)
+
+    async def void_lab_result(self, obs_uuid: str, reason: str) -> None:
+        """Void one result obs (usually a top-level result group) with a reason.
+
+        OpenMRS voids, never purges, and voiding a group voids its members. The
+        reason must be 1-255 characters and not blank. An unknown obs (HTTP 404)
+        raises ``NotFound``.
+        """
+        _check_uuid("obs_uuid", obs_uuid)
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > _MAX_VOID_REASON:
+            raise ValueError(
+                f"bahmni: void reason must be 1-{_MAX_VOID_REASON} characters and not blank"
+            )
+        resp = await self._http.request(
+            "DELETE", f"{_OBS}/{obs_uuid}", params={"reason": reason}, expect=(200, 204)
+        )
+        if resp.status_code == 404:
+            raise NotFound(f"bahmni: no obs {obs_uuid}")

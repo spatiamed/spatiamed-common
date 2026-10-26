@@ -1,5 +1,6 @@
 import json
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from sm_common.integrations.adapters.bahmni_lab_results import (
 )
 from sm_common.integrations.exceptions import (
     ConfigError,
+    ConflictError,
     NotFound,
     TransientError,
     VendorRejected,
@@ -714,3 +716,294 @@ def test_conflicting_order_grouping_is_value_error() -> None:
     # One order used both as a single test and as a panel.
     with pytest.raises(ValueError):
         _body([_hb(), _hb(test_concept_uuid=TEST_SGOT, panel_concept_uuid=PANEL)])
+
+
+# --- write (newer-result guard) and void -------------------------------------
+
+ENCOUNTER = f"{REST}/bahmnicore/bahmniencounter"
+OBS = f"{REST}/obs"
+TEST_CREAT = "8acc2fb0-176c-4d23-9c8d-3408ce2901f2"
+POSTED_ENCOUNTER = "9cddbb31-0c59-46aa-b336-c4d0e96860ae"
+GROUP_CREAT = "89d4c671-7761-4a94-82c8-f4f5f46e2761"
+GROUP_CREAT_VOIDED = "efe36ef8-5ebd-4618-b7b5-db925a9fbb81"
+GROUP_PANEL = "994efa28-5fce-4eab-8efe-22c73b733f9b"
+GROUP_HB_EARLIER = "02d91117-b5a5-4de9-9346-683f43f6b0e9"
+# The mixed fixture's HB result time (10:15 +05:30).
+HB_RECORDED_AT = datetime(2026, 10, 20, 4, 45, tzinfo=timezone.utc)
+
+
+def _write_client(cfg: LabResultsConfig = FULL_CFG) -> BahmniLabResultsClient:
+    return BahmniLabResultsClient(BahmniHttp(BASE, "u", "p"), cfg)
+
+
+def _creat(**over: object) -> LabResultWrite:
+    base: dict[str, object] = {
+        "order_uuid": ORDER_CREAT,
+        "test_concept_uuid": TEST_CREAT,
+        "panel_concept_uuid": None,
+        "value_kind": "numeric",
+        "value": Decimal("1.4"),
+        "min_normal": Decimal("0.6"),
+        "max_normal": Decimal("1.2"),
+        "abnormal": True,
+        "result_at": RESULT_AT,
+    }
+    base.update(over)
+    return LabResultWrite(**base)  # type: ignore[arg-type]
+
+
+async def _write(
+    results: list[LabResultWrite], *, client: BahmniLabResultsClient | None = None
+) -> object:
+    return await (client or _write_client()).write_lab_results(
+        patient_uuid=PATIENT,
+        visit_uuid=VISIT_A,
+        provider_uuid=PROVIDER,
+        location_uuid="",
+        encounter_datetime=ENCOUNTER_AT,
+        results=results,
+    )
+
+
+def _mock_pre_read(name: str = "lab_order_results_mixed.json") -> respx.Route:
+    return respx.get(LAB_RESULTS).mock(return_value=httpx.Response(200, json=_fixture(name)))
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "result",
+    [
+        # Same time as the recorded HB result.
+        "same",
+        # Older than the recorded HB result.
+        "older",
+        # A panel member older than the panel's recorded results.
+        "panel",
+        # Referred out with a result time later than ours.
+        "referred",
+    ],
+)
+async def test_write_refuses_when_record_has_same_or_newer_result(result: str) -> None:
+    _login()
+    pre = _mock_pre_read()
+    post = respx.post(ENCOUNTER).mock(
+        return_value=httpx.Response(200, json=_fixture("encounter_post_response.json"))
+    )
+    write = {
+        "same": _hb(result_at=HB_RECORDED_AT),
+        "older": _hb(result_at=HB_RECORDED_AT - timedelta(minutes=1)),
+        "panel": replace(_panel_results()[0], result_at=HB_RECORDED_AT),
+        "referred": _hb(
+            order_uuid=ORDER_TSH, result_at=datetime(2026, 10, 20, 5, 0, tzinfo=timezone.utc)
+        ),
+    }[result]
+    with pytest.raises(ConflictError) as info:
+        await _write([_creat(), write])
+    assert str(info.value) == "record_result_newer"
+    assert info.value.code == "record_result_newer"
+    assert pre.call_count == 1
+    # The pre-read is scoped to the write's visit.
+    assert pre.calls.last.request.url.params.get_list("visitUuids") == [VISIT_A]
+    assert post.call_count == 0
+
+
+@respx.mock
+async def test_write_refuses_resulted_row_without_result_time() -> None:
+    _login()
+    pre = _fixture("lab_order_results_after_write.json")
+    for row in pre["results"]:
+        if row["orderUuid"] == ORDER_CREAT:
+            row["resultDateTime"] = None
+    respx.get(LAB_RESULTS).mock(return_value=httpx.Response(200, json=pre))
+    post = respx.post(ENCOUNTER).mock(return_value=httpx.Response(200, json={}))
+    with pytest.raises(ConflictError, match="record_result_newer"):
+        await _write([_creat()])
+    assert post.call_count == 0
+
+
+@respx.mock
+async def test_write_allows_when_existing_result_is_older() -> None:
+    # The record's HB result (04:45Z) is older than ours (09:15Z): the write goes
+    # ahead. An amendment that must replace it is void_lab_result, then a write.
+    _login()
+    _mock_pre_read()
+    post = respx.post(ENCOUNTER).mock(
+        return_value=httpx.Response(200, json=_fixture("encounter_post_response.json"))
+    )
+    outcome = await _write([_hb()])
+    assert post.call_count == 1
+    assert outcome.obs_uuids_by_order == {ORDER_HB: (GROUP_HB_EARLIER,)}
+
+
+@respx.mock
+async def test_write_order_missing_from_visit_is_not_found() -> None:
+    _login()
+    _mock_pre_read()
+    post = respx.post(ENCOUNTER).mock(return_value=httpx.Response(200, json={}))
+    stray = "6a1f0b8e-3c55-4b0e-9f53-0d2e7c4a9b11"
+    with pytest.raises(NotFound) as info:
+        await _write([_creat(), _hb(order_uuid=stray)])
+    assert str(info.value) == "lab_order_not_in_visit"
+    assert info.value.code == "lab_order_not_in_visit"
+    assert post.call_count == 0
+
+
+@respx.mock
+async def test_write_posts_body_and_returns_group_obs_per_order() -> None:
+    _login()
+    _mock_pre_read()
+    post = respx.post(ENCOUNTER).mock(
+        return_value=httpx.Response(200, json=_fixture("encounter_post_response.json"))
+    )
+    results = [_creat(), *_panel_results()]
+    outcome = await _write(results)
+    assert post.call_count == 1
+    sent = json.loads(post.calls.last.request.content)
+    assert sent == json.loads(json.dumps(_body(results)))
+    assert outcome.encounter_uuid == POSTED_ENCOUNTER
+    # The voided creatinine group and the merged earlier HB group are not ours.
+    assert dict(outcome.obs_uuids_by_order) == {
+        ORDER_CREAT: (GROUP_CREAT,),
+        ORDER_PANEL: (GROUP_PANEL,),
+    }
+
+
+@respx.mock
+async def test_write_response_without_our_group_is_vendor_rejected_landed() -> None:
+    _login()
+    _mock_pre_read()
+    response = _fixture("encounter_post_response.json")
+    response["observations"] = [o for o in response["observations"] if o["uuid"] != GROUP_PANEL]
+    respx.post(ENCOUNTER).mock(return_value=httpx.Response(200, json=response))
+    with pytest.raises(VendorRejected) as info:
+        await _write([_creat(), *_panel_results()])
+    assert info.value.landed is True
+
+
+@respx.mock
+async def test_write_response_without_encounter_uuid_is_vendor_rejected_landed() -> None:
+    _login()
+    _mock_pre_read()
+    response = _fixture("encounter_post_response.json")
+    del response["encounterUuid"]
+    respx.post(ENCOUNTER).mock(return_value=httpx.Response(200, json=response))
+    with pytest.raises(VendorRejected) as info:
+        await _write([_creat()])
+    assert info.value.landed is True
+
+
+@respx.mock
+async def test_write_500_is_transient_and_not_retried() -> None:
+    _login()
+    _mock_pre_read()
+    post = respx.post(ENCOUNTER).mock(return_value=httpx.Response(500, text="<html></html>"))
+    with pytest.raises(TransientError):
+        await _write([_creat()])
+    assert post.call_count == 1
+
+
+@respx.mock
+async def test_write_route_404_is_not_found() -> None:
+    _login()
+    _mock_pre_read()
+    respx.post(ENCOUNTER).mock(return_value=httpx.Response(404))
+    with pytest.raises(NotFound):
+        await _write([_creat()])
+
+
+@respx.mock
+async def test_amend_voids_every_obs_of_old_group() -> None:
+    _login()
+    after_write = _fixture("lab_order_results_after_write.json")
+    voided = _fixture("lab_order_results_mixed.json")
+    reads = respx.get(LAB_RESULTS).mock(
+        side_effect=[
+            httpx.Response(200, json=after_write),
+            httpx.Response(200, json=voided),
+        ]
+    )
+    delete = respx.delete(f"{OBS}/{GROUP_CREAT}").mock(return_value=httpx.Response(204))
+    client = _write_client()
+
+    before = {
+        r.order_uuid: r for r in await client.read_lab_results(PATIENT, visit_uuids=[VISIT_A])
+    }
+    assert before[ORDER_CREAT].status == "resulted"
+
+    # One DELETE on the group obs: OpenMRS voids its members with it.
+    assert await client.void_lab_result(GROUP_CREAT, "Transcription error") is None
+    assert delete.call_count == 1
+    assert delete.calls.last.request.url.params.get_list("reason") == ["Transcription error"]
+
+    after = {r.order_uuid: r for r in await client.read_lab_results(PATIENT, visit_uuids=[VISIT_A])}
+    assert after[ORDER_CREAT].status == "pending"
+    assert after[ORDER_CREAT].result is None
+    assert reads.call_count == 2
+
+
+@respx.mock
+async def test_void_404_is_not_found() -> None:
+    _login()
+    respx.delete(f"{OBS}/{GROUP_CREAT}").mock(return_value=httpx.Response(404))
+    with pytest.raises(NotFound):
+        await _write_client().void_lab_result(GROUP_CREAT, "Wrong patient")
+
+
+@respx.mock
+async def test_void_200_is_accepted() -> None:
+    _login()
+    respx.delete(f"{OBS}/{GROUP_CREAT}").mock(return_value=httpx.Response(200, json={}))
+    await _write_client().void_lab_result(GROUP_CREAT, "Wrong patient")
+
+
+@pytest.mark.parametrize(
+    ("obs_uuid", "reason"),
+    [
+        ("../encounter", "Wrong patient"),
+        ("", "Wrong patient"),
+        (GROUP_CREAT, ""),
+        (GROUP_CREAT, "   "),
+        (GROUP_CREAT, "x" * 256),
+    ],
+)
+async def test_void_bad_input_is_value_error_before_io(obs_uuid: str, reason: str) -> None:
+    with respx.mock(assert_all_called=False) as router:
+        route = router.route()
+        with pytest.raises(ValueError):
+            await _write_client().void_lab_result(obs_uuid, reason)
+        assert route.call_count == 0
+
+
+async def test_void_reason_of_255_chars_is_accepted() -> None:
+    with respx.mock(assert_all_called=False) as router:
+        _login_on(router)
+        delete = router.delete(f"{OBS}/{GROUP_CREAT}").mock(return_value=httpx.Response(204))
+        await _write_client().void_lab_result(GROUP_CREAT, "x" * 255)
+        assert delete.call_count == 1
+
+
+def _login_on(router: respx.MockRouter) -> None:
+    router.get(f"{REST}/session").mock(
+        return_value=httpx.Response(
+            200, json={"authenticated": True}, headers={"set-cookie": "JSESSIONID=abc"}
+        )
+    )
+
+
+async def test_empty_results_is_value_error_before_io() -> None:
+    with respx.mock(assert_all_called=False) as router:
+        route = router.route()
+        with pytest.raises(ValueError):
+            await _write([])
+        with pytest.raises(ValueError):
+            await _write([_creat(result_at=datetime(2026, 10, 20, 9, 15))])
+        assert route.call_count == 0
+
+
+async def test_write_config_error_before_io() -> None:
+    cfg = LabResultsConfig(**{**FULL_CFG.__dict__, "result_location_uuid": ""})
+    with respx.mock(assert_all_called=False) as router:
+        route = router.route()
+        with pytest.raises(ConfigError, match="result_location_uuid"):
+            await _write([_creat()], client=_write_client(cfg))
+        assert route.call_count == 0
