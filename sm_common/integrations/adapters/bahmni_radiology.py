@@ -30,6 +30,7 @@ import re
 import uuid as uuidlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from sm_common.integrations.adapters.bahmni_http import BahmniHttp
@@ -70,7 +71,7 @@ MAX_ACCESSION_BYTES = 16
 _ORDER_READBACK_REP = "custom:(uuid,orderNumber,action,concept:(uuid),dateStopped)"
 _ORDER_DISCONTINUE_REP = (
     "custom:(uuid,orderNumber,action,dateStopped,orderType:(uuid),"
-    "careSetting:(careSettingType),concept:(uuid))"
+    "careSetting:(careSettingType),concept:(uuid),autoExpireDate)"
 )
 # Encounters are read through the visit (``encounter?visit=`` without ``patient`` is a
 # server error). The doubly nested group stays last: nothing may follow a "))".
@@ -83,6 +84,37 @@ _URGENCIES = ("ROUTINE", "STAT")
 _MAX_COMMENT = 1024  # orders.comment_to_fulfiller
 _MAX_REASON = 255  # orders.order_reason_non_coded
 _TOO_LONG_REASON = "accession too long"
+
+
+def _refusal(code: str, *, landed: bool = False) -> VendorRejected:
+    """A terminal refusal whose ``code`` (and message) is a stable machine-readable name."""
+    exc = VendorRejected(code, landed=landed)
+    exc.code = code
+    return exc
+
+
+class OrderNumberTooLong(VendorRejected):  # noqa: N818
+    """An order number the imaging bridge would refuse as an accession. Terminal, landed.
+
+    ``placed`` is every order the write created, in request order; ``too_long`` the
+    ones whose number is over ``MAX_ACCESSION_BYTES``; ``discontinued`` the uuids of
+    those actually discontinued (a failed discontinue is left out). Orders not in
+    ``too_long`` stay active.
+    """
+
+    code = "order_number_too_long"
+
+    def __init__(
+        self,
+        *,
+        placed: list[PlacedRadiologyOrder],
+        too_long: list[PlacedRadiologyOrder],
+        discontinued: list[str],
+    ) -> None:
+        super().__init__("order_number_too_long", landed=True)
+        self.placed = placed
+        self.too_long = too_long
+        self.discontinued = discontinued
 
 
 @dataclass(frozen=True)
@@ -317,8 +349,10 @@ class BahmniRadiologyClient:
         Every concept must be in the orderable set (else ``procedure_not_orderable``)
         and carry a "PACS Procedure Code" mapping unless ``allow_unmapped`` (else
         ``procedure_not_pacs_mapped``); both are refused before any write. Each placed
-        order is read back for its order number; one over 16 bytes is discontinued
-        (best effort) and ``order_number_too_long`` raised with ``landed=True``. Any
+        order is read back for its order number; one over 16 bytes (UTF-8, which for
+        the ASCII order numbers Bahmni issues is 16 characters) is discontinued (best
+        effort) and ``OrderNumberTooLong`` (code ``order_number_too_long``) raised with
+        ``landed=True``, carrying every placed order; the others stay active. Any
         error once the write is answered (a failed read-back included, even a
         ``TransientError``) carries ``landed=True``: the orders exist, and when the
         read-back failed the accession check has not run. Never retried: after a lost
@@ -367,13 +401,13 @@ class BahmniRadiologyClient:
         outside = [c for c in concepts if c not in known]
         if outside:
             log.warning("radiology: concepts not in the orderable set: %s", ", ".join(outside))
-            raise VendorRejected("procedure_not_orderable")
+            raise _refusal("procedure_not_orderable")
         unmapped = [c for c in concepts if not known[c].pacs_mapped]
         if unmapped and not allow_unmapped:
             log.warning(
                 "radiology: concepts without a PACS procedure code: %s", ", ".join(unmapped)
             )
-            raise VendorRejected("procedure_not_pacs_mapped")
+            raise _refusal("procedure_not_pacs_mapped")
 
         context = {
             "patient_uuid": patient_uuid,
@@ -408,6 +442,7 @@ class BahmniRadiologyClient:
 
         too_long = [p for p in placed if len(p.order_number.encode()) > MAX_ACCESSION_BYTES]
         if too_long:
+            discontinued: list[str] = []
             for p in too_long:
                 log.warning(
                     "radiology: order %s number is %d bytes (max %d); discontinuing it",
@@ -423,13 +458,14 @@ class BahmniRadiologyClient:
                         care_setting=care_setting,
                         reason=_TOO_LONG_REASON,
                     )
+                    discontinued.append(p.order_uuid)
                 except HmsAdapterError as exc:
                     log.warning(
                         "radiology: discontinuing order %s failed: %s",
                         p.order_uuid,
                         type(exc).__name__,
                     )
-            raise VendorRejected("order_number_too_long", landed=True)
+            raise OrderNumberTooLong(placed=placed, too_long=too_long, discontinued=discontinued)
         return placed
 
     async def find_radiology_orders(self, visit_uuid: str) -> list[RadiologyOrderRow]:
@@ -517,6 +553,8 @@ class BahmniRadiologyClient:
     ) -> None:
         """Discontinue one radiology order in a new encounter; a stopped order is a no-op.
 
+        An order past its ``autoExpireDate`` counts as stopped.
+
         The order is read first for its concept and care setting (a DISCONTINUE must
         repeat them); a non-radiology order raises ``not_a_radiology_order``.
         """
@@ -536,8 +574,12 @@ class BahmniRadiologyClient:
         if order is None:
             raise NotFound(f"bahmni: order {order_uuid} not found (HTTP 404)")
         if _ref(order.get("orderType")) != order_type:
-            raise VendorRejected("not_a_radiology_order")
+            raise _refusal("not_a_radiology_order")
         if order.get("dateStopped") is not None:
+            return
+        expires = when(order.get("autoExpireDate"))
+        if expires is not None and expires <= datetime.now(timezone.utc):
+            # Expired orders are no longer active; OpenMRS refuses to discontinue them.
             return
         if order.get("action") != "NEW":
             raise VendorRejected(

@@ -9,7 +9,11 @@ import pytest
 import respx
 
 from sm_common.integrations.adapters.bahmni_http import BahmniHttp
-from sm_common.integrations.adapters.bahmni_radiology import BahmniRadiologyClient, RadiologyConfig
+from sm_common.integrations.adapters.bahmni_radiology import (
+    BahmniRadiologyClient,
+    OrderNumberTooLong,
+    RadiologyConfig,
+)
 from sm_common.integrations.exceptions import (
     ConfigError,
     NotFound,
@@ -275,7 +279,7 @@ UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0
 READBACK_REP = "custom:(uuid,orderNumber,action,concept:(uuid),dateStopped)"
 DISCONTINUE_READ_REP = (
     "custom:(uuid,orderNumber,action,dateStopped,orderType:(uuid),"
-    "careSetting:(careSettingType),concept:(uuid))"
+    "careSetting:(careSettingType),concept:(uuid),autoExpireDate)"
 )
 VISIT_ORDERS_REP = (
     "custom:(encounters:(orders:(uuid,orderNumber,action,dateActivated,dateStopped,"
@@ -490,6 +494,7 @@ async def test_unmapped_procedure_refused_by_default() -> None:
             orders=[RadiologyOrderWrite(XRAY_CHEST), RadiologyOrderWrite(US_ABDOMEN)],
         )
     assert str(exc.value) == "procedure_not_pacs_mapped"
+    assert exc.value.code == "procedure_not_pacs_mapped"
     assert exc.value.landed is False
     assert [c.request.method for c in respx.calls] == ["GET", "GET"]
 
@@ -524,6 +529,7 @@ async def test_procedure_outside_orderable_set_refused(allow_unmapped: bool) -> 
             allow_unmapped=allow_unmapped,
         )
     assert str(exc.value) == "procedure_not_orderable"
+    assert exc.value.code == "procedure_not_orderable"
     assert [c.request.method for c in respx.calls] == ["GET", "GET"]
 
 
@@ -545,6 +551,7 @@ async def test_order_number_over_16_refused_and_discontinued() -> None:
             orders=[RadiologyOrderWrite(XRAY_CHEST)],
         )
     assert str(exc.value) == "order_number_too_long"
+    assert exc.value.code == "order_number_too_long"
     assert exc.value.landed is True
     place_body, dc_body = _post_bodies(post)
     assert dc_body["encounterUuid"] != place_body["encounterUuid"]
@@ -561,6 +568,33 @@ async def test_order_number_over_16_refused_and_discontinued() -> None:
             "orderReasonText": "accession too long",
         }
     ]
+
+
+@respx.mock
+async def test_only_overlong_orders_discontinued_and_all_placed_attached() -> None:
+    _login()
+    _set_route()
+    post = respx.post(ENCOUNTER_URL).mock(
+        side_effect=_echo_encounter(_fixture("encounter_with_orders_response.json"))
+    )
+    respx.get(f"{REST}/order/{ORDER_XRAY}").mock(
+        return_value=httpx.Response(
+            200, json=_readback(ORDER_XRAY, XRAY_CHEST, "ORD-12345678901234")
+        )
+    )
+    respx.get(f"{REST}/order/{ORDER_CT}").mock(
+        return_value=httpx.Response(200, json=_readback(ORDER_CT, CT_HEAD, "ORD-1235"))
+    )
+    with pytest.raises(OrderNumberTooLong) as exc:
+        await _client().place_radiology_orders(
+            **PLACE_KW, orders=[RadiologyOrderWrite(XRAY_CHEST), RadiologyOrderWrite(CT_HEAD)]
+        )
+    assert exc.value.landed is True
+    assert [p.order_uuid for p in exc.value.placed] == [ORDER_XRAY, ORDER_CT]
+    assert [p.order_uuid for p in exc.value.too_long] == [ORDER_XRAY]
+    assert exc.value.discontinued == [ORDER_XRAY]
+    _, dc_body = _post_bodies(post)
+    assert [o["previousOrderUuid"] for o in dc_body["orders"]] == [ORDER_XRAY]
 
 
 @respx.mock
@@ -597,9 +631,11 @@ async def test_order_number_too_long_still_raised_when_discontinue_fails() -> No
             200, json=_readback(ORDER_XRAY, XRAY_CHEST, "ORD-12345678901234")
         )
     )
-    with pytest.raises(VendorRejected, match="^order_number_too_long$"):
+    with pytest.raises(VendorRejected, match="^order_number_too_long$") as exc:
         await _client().place_radiology_orders(**PLACE_KW, orders=[RadiologyOrderWrite(XRAY_CHEST)])
     assert calls["n"] == 2
+    assert isinstance(exc.value, OrderNumberTooLong)
+    assert exc.value.discontinued == []
 
 
 @pytest.mark.parametrize("status", [500, 429])
@@ -725,6 +761,16 @@ async def test_find_orders_by_visit_filters_radiology_type() -> None:
 
 
 @respx.mock
+async def test_find_orders_sorted_oldest_first_across_encounters() -> None:
+    _login()
+    body = _fixture("visit_orders.json")
+    body["encounters"].reverse()
+    respx.get(f"{REST}/visit/{VISIT}").mock(return_value=httpx.Response(200, json=body))
+    rows = await _client().find_radiology_orders(VISIT)
+    assert [r.order_uuid for r in rows] == [ORDER_XRAY, ORDER_DC, ORDER_CT]
+
+
+@respx.mock
 async def test_find_orders_custom_rep_keeps_nested_group_last() -> None:
     _login()
     route = respx.get(f"{REST}/visit/{VISIT}").mock(
@@ -772,13 +818,18 @@ async def test_find_orders_bad_input_and_missing_config_before_io() -> None:
 
 
 def _order_read(
-    *, order_type: str = RADIOLOGY_ORDER_TYPE, stopped: str | None = None, action: str = "NEW"
+    *,
+    order_type: str = RADIOLOGY_ORDER_TYPE,
+    stopped: str | None = None,
+    action: str = "NEW",
+    expires: str | None = None,
 ) -> dict[str, Any]:
     return {
         "uuid": ORDER_XRAY,
         "orderNumber": "ORD-1234",
         "action": action,
         "dateStopped": stopped,
+        "autoExpireDate": expires,
         "orderType": {"uuid": order_type},
         "careSetting": {"careSettingType": "OUTPATIENT"},
         "concept": {"uuid": XRAY_CHEST},
@@ -828,8 +879,9 @@ async def test_discontinue_non_radiology_order_refused() -> None:
         return_value=httpx.Response(200, json=_order_read(order_type=LAB_ORDER_TYPE))
     )
     post = respx.post(ENCOUNTER_URL).mock(side_effect=_echo_encounter())
-    with pytest.raises(VendorRejected, match="not_a_radiology_order"):
+    with pytest.raises(VendorRejected, match="^not_a_radiology_order$") as exc:
         await _client().discontinue_radiology_order(**DISCONTINUE_KW)
+    assert exc.value.code == "not_a_radiology_order"
     assert post.call_count == 0
 
 
@@ -842,6 +894,28 @@ async def test_discontinue_already_stopped_is_noop() -> None:
     post = respx.post(ENCOUNTER_URL).mock(side_effect=_echo_encounter())
     await _client().discontinue_radiology_order(**DISCONTINUE_KW)
     assert post.call_count == 0
+
+
+@respx.mock
+async def test_discontinue_auto_expired_order_is_noop() -> None:
+    _login()
+    respx.get(f"{REST}/order/{ORDER_XRAY}").mock(
+        return_value=httpx.Response(200, json=_order_read(expires="2020-01-01T10:00:00.000+0530"))
+    )
+    post = respx.post(ENCOUNTER_URL).mock(side_effect=_echo_encounter())
+    await _client().discontinue_radiology_order(**DISCONTINUE_KW)
+    assert post.call_count == 0
+
+
+@respx.mock
+async def test_discontinue_order_expiring_later_is_discontinued() -> None:
+    _login()
+    respx.get(f"{REST}/order/{ORDER_XRAY}").mock(
+        return_value=httpx.Response(200, json=_order_read(expires="2999-01-01T10:00:00.000+0530"))
+    )
+    post = respx.post(ENCOUNTER_URL).mock(side_effect=_echo_encounter())
+    await _client().discontinue_radiology_order(**DISCONTINUE_KW)
+    assert post.call_count == 1
 
 
 @respx.mock
