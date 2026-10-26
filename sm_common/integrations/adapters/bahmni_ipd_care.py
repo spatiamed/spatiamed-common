@@ -23,11 +23,18 @@ Nursing observations
     plain obs by concept (not form-namespaced). Each write is its own encounter: it
     names ``encounterUuid = str(client_ref)``, because a write naming no encounter is
     merged into a matching one and fails once a visit holds two encounters of one type
-    and provider. The first obs carries the comment ``"sm:" + str(client_ref)``, which
-    ``find_write_by_ref`` looks for. A write does not look for an earlier one itself:
-    a caller retrying after an unknown outcome calls ``find_write_by_ref`` first, since
-    re-sending the same encounter uuid would add the obs again. Values are checked
-    against data-entry limits before any I/O.
+    and provider. So the hospital-record encounter uuid of a write is its
+    ``client_ref``, one encounter per write. Before posting, every write reads its own
+    encounter (``GET encounter/<client_ref>``): when it exists in the same visit the
+    earlier write is returned (``created=False``) and nothing is sent, so a retry after
+    an unknown outcome (a timeout, a gateway 5xx after the commit) never charts the obs
+    twice; an encounter of that uuid in another visit is refused before any write.
+    The encounter's existence is the proof, not its obs: re-sending the same encounter
+    uuid would add the obs again, even after someone voided the earlier ones.
+    ``find_write_by_ref`` is that same read. The first obs also carries the comment
+    ``"sm:" + str(client_ref)`` so the write is recognisable in the record. An
+    intake/output date-time member is sent as epoch ms, like every instant here
+    (``_obs_time``). Values are checked against data-entry limits before any I/O.
 """
 
 from __future__ import annotations
@@ -65,8 +72,9 @@ _CONCEPT = f"{_REST}/concept"
 _IPD_WARDS = f"{_REST}/ipd/wards"
 _VISIT = f"{_REST}/visit"
 _ENCOUNTER = f"{_REST}/bahmnicore/bahmniencounter"
+_ENCOUNTER_READ = f"{_REST}/encounter"
 _MARKER_PREFIX = "sm:"
-_MARKER_REP = "custom:(encounters:(uuid,obs:(uuid,comment)))"
+_EARLIER_WRITE_REP = "custom:(uuid,visit:(uuid),obs:(uuid,comment))"
 _IO_SET_REP = "custom:(setMembers:(uuid,display,datatype:(display)))"
 _MAX_NOTE_CHARS = 4000
 _MAX_IO_ROUTE_CHARS = 255
@@ -516,30 +524,33 @@ class BahmniIpdCareClient:
     async def find_write_by_ref(
         self, visit_uuid: str, client_ref: UUID
     ) -> NursingWriteOutcome | None:
-        """The earlier write carrying ``client_ref``'s marker in this visit, else ``None``.
+        """The earlier write named ``client_ref`` in this visit, else ``None``.
 
-        The outcome names every top-level obs of the encounter that carries the marker.
+        One read of the encounter the write named (``encounter/<client_ref>``); the
+        outcome names its top-level obs. An encounter of that uuid in another visit, or
+        an answer naming another encounter, is ``VendorRejected`` (nothing written).
         """
         _check_uuid("visit_uuid", visit_uuid)
-        marker = _marker(client_ref)
-        resp = await self._http.request("GET", f"{_VISIT}/{visit_uuid}", params={"v": _MARKER_REP})
+        _marker(client_ref)  # a UUID, or ValueError before any I/O
+        ref = str(client_ref)
+        resp = await self._http.request(
+            "GET", f"{_ENCOUNTER_READ}/{ref}", params={"v": _EARLIER_WRITE_REP}
+        )
         if resp.status_code == 404:
-            raise NotFound(f"bahmni: visit {visit_uuid} not found (HTTP 404)")
+            return None
         body = resp.json() if resp.content else None
-        rows = body.get("encounters") if isinstance(body, dict) else None
-        if not isinstance(rows, list):
-            raise VendorRejected("bahmni: visit response carried no encounter list")
-        for row in rows:
-            if not isinstance(row, dict) or not isinstance(row.get("uuid"), str):
-                continue
-            obs = row.get("obs")
-            if not isinstance(obs, list):
-                continue
-            if any(isinstance(o, dict) and o.get("comment") == marker for o in obs):
-                return NursingWriteOutcome(
-                    encounter_uuid=row["uuid"], obs_uuids=_top_obs_uuids(obs), created=False
-                )
-        return None
+        if not isinstance(body, dict) or body.get("uuid") != ref:
+            raise VendorRejected(f"bahmni: encounter read for {ref} named another encounter")
+        visit = body.get("visit")
+        found_visit = visit.get("uuid") if isinstance(visit, dict) else None
+        if found_visit != visit_uuid:
+            raise VendorRejected(
+                f"bahmni: encounter {ref} already exists outside visit {visit_uuid}; "
+                "client_ref reused"
+            )
+        return NursingWriteOutcome(
+            encounter_uuid=ref, obs_uuids=_top_obs_uuids(body.get("obs")), created=False
+        )
 
     def _check_write(
         self,
@@ -595,10 +606,14 @@ class BahmniIpdCareClient:
         client_ref: UUID,
         observations: list[dict[str, Any]],
     ) -> NursingWriteOutcome:
-        """One encounter POST named ``str(client_ref)``; the marker on the first obs."""
+        """One encounter POST named ``str(client_ref)``, unless that encounter exists
+        already; the marker on the first obs."""
         marker = self._check_write(
             patient_uuid, visit_uuid, provider_uuid, location_uuid, recorded_at, client_ref
         )
+        earlier = await self.find_write_by_ref(visit_uuid, client_ref)
+        if earlier is not None:
+            return earlier
         encounter_type = self._config.nursing_encounter_type_uuid
         observations[0]["comment"] = marker
         sent = str(client_ref)

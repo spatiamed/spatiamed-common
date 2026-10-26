@@ -1,0 +1,9 @@
+{
+  "uuid": "2c05f0f9-ba5c-47d4-95d3-f932678fc1a1",
+  "visit": {"uuid": "a3f0c2d4-6b1e-4f7a-9c8d-2e5b7a1c3f90"},
+  "obs": [
+    {"uuid": "a8e767b8-b016-41ff-9431-422dc7e1fa88", "comment": "sm:2c05f0f9-ba5c-47d4-95d3-f932678fc1a1"},
+    {"uuid": "9a325bbf-25b5-4b9e-83f7-9592259bb860", "comment": null},
+    {"uuid": "1dd1f6ae-ee02-4b51-8e1d-4f89a1a0ab6e"}
+  ]
+}

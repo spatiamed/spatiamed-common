@@ -305,6 +305,8 @@ async def test_ward_patients_unknown_ward_route_404_is_not_found() -> None:
 
 ENCOUNTER = f"{REST}/bahmnicore/bahmniencounter"
 VISIT = f"{REST}/visit"
+ENCOUNTER_READ = f"{REST}/encounter"
+ENCOUNTER_REP = "custom:(uuid,visit:(uuid),obs:(uuid,comment))"
 CLIENT_REF = UUID("2c05f0f9-ba5c-47d4-95d3-f932678fc1a1")
 OTHER_REF = UUID("759fcee5-d301-44c9-9066-45d3e9a26fa3")
 PROVIDER = "aedd07c0-787b-47e2-ad63-3ea36266f1a1"
@@ -350,6 +352,11 @@ def _who(**overrides: Any) -> dict[str, Any]:
     return base
 
 
+def _no_earlier_write() -> respx.Route:
+    """The pre-read of the write's own encounter answers 404: nothing written yet."""
+    return respx.get(f"{ENCOUNTER_READ}/{CLIENT_REF}").mock(return_value=httpx.Response(404))
+
+
 def _sent(route: respx.Route) -> dict[str, Any]:
     body: dict[str, Any] = json.loads(route.calls.last.request.content)
     return body
@@ -380,6 +387,7 @@ def _io_set(members: list[tuple[str, str]]) -> httpx.Response:
 @respx.mock
 async def test_vitals_concept_mapping_exact() -> None:
     _login()
+    _no_earlier_write()
     route = respx.post(ENCOUNTER).mock(
         return_value=httpx.Response(200, json=_fixture("nursing_encounter_response.json"))
     )
@@ -464,6 +472,7 @@ async def test_vitals_out_of_range_is_value_error_before_io(vitals: VitalsWrite)
 @respx.mock
 async def test_vitals_range_bounds_inclusive() -> None:
     _login()
+    _no_earlier_write()
     route = respx.post(ENCOUNTER).mock(return_value=_echo([OBS_1] * 8))
     for vitals in (
         VitalsWrite(
@@ -516,16 +525,18 @@ async def test_vitals_config_and_inputs_checked_before_io() -> None:
             await _client(_nursing_config()).write_vitals(
                 **_who(recorded_at=datetime(2026, 10, 20, 6, 30)), vitals=VitalsWrite(pulse=80)
             )
-        with pytest.raises(ValueError):
-            await _client(_nursing_config()).write_vitals(
-                **_who(visit_uuid="../session"), vitals=VitalsWrite(pulse=80)
-            )
+        for bad in ("patient_uuid", "visit_uuid", "provider_uuid", "location_uuid"):
+            with pytest.raises(ValueError, match=bad):
+                await _client(_nursing_config()).write_vitals(
+                    **_who(**{bad: "../session"}), vitals=VitalsWrite(pulse=80)
+                )
         assert not mock.calls
 
 
 @respx.mock
 async def test_first_obs_carries_marker_comment() -> None:
     _login()
+    _no_earlier_write()
     route = respx.post(ENCOUNTER).mock(return_value=_echo([OBS_1, OBS_2]))
     await _client(_nursing_config()).write_vitals(
         **_who(), vitals=VitalsWrite(spo2=96, resp_rate=18)
@@ -545,6 +556,7 @@ async def test_first_obs_carries_marker_comment() -> None:
 @respx.mock
 async def test_intake_output_group_members_resolved_from_set() -> None:
     _login()
+    _no_earlier_write()
     in_set = respx.get(f"{CONCEPT}/{IN_SET}").mock(
         return_value=_io_set([(IO_TIME, "Datetime"), (IO_QTY, "Numeric"), (IO_ROUTE, "Text")])
     )
@@ -663,9 +675,29 @@ async def test_intake_output_checked_before_io(
         assert not mock.calls
 
 
+@pytest.mark.parametrize(
+    "who",
+    [
+        {"patient_uuid": "../session"},
+        {"visit_uuid": "../session"},
+        {"provider_uuid": "../session"},
+        {"location_uuid": "../session"},
+        {"location_uuid": ""},
+        {"recorded_at": datetime(2026, 10, 20, 6, 30)},
+    ],
+)
+async def test_intake_output_caller_fields_checked_before_io(who: dict[str, Any]) -> None:
+    # Checked before the set read as well as before the write.
+    with respx.mock(assert_all_called=False) as mock:
+        with pytest.raises(ValueError):
+            await _client(_nursing_config()).write_intake_output(**_who(**who), entry=_io_entry())
+        assert not mock.calls
+
+
 @respx.mock
 async def test_nursing_note_length_limits() -> None:
     _login()
+    _no_earlier_write()
     route = respx.post(ENCOUNTER).mock(return_value=_echo([OBS_1]))
     client = _client(_nursing_config())
     for text in ("x", "y" * 4000):
@@ -687,47 +719,156 @@ async def test_nursing_note_length_limits() -> None:
 @respx.mock
 async def test_find_write_by_ref_hit_and_miss() -> None:
     _login()
-    route = respx.get(f"{VISIT}/{VISIT_A}").mock(
-        return_value=httpx.Response(200, json=_fixture("visit_obs_with_marker.json"))
+    route = respx.get(f"{ENCOUNTER_READ}/{CLIENT_REF}").mock(
+        return_value=httpx.Response(200, json=_fixture("encounter_with_marker.json"))
     )
     client = _client(_nursing_config())
     hit = await client.find_write_by_ref(VISIT_A, CLIENT_REF)
     assert hit == NursingWriteOutcome(
         encounter_uuid=str(CLIENT_REF), obs_uuids=(OBS_1, OBS_2, OBS_3), created=False
     )
-    assert route.calls.last.request.url.params["v"] == (
-        "custom:(encounters:(uuid,obs:(uuid,comment)))"
-    )
-    other = await client.find_write_by_ref(VISIT_A, OTHER_REF)
-    assert other is not None and other.encounter_uuid == "ac993197-bc51-4e18-8739-68ba69dead01"
+    # One read of the write's own encounter, never a scan of the visit.
+    assert route.calls.last.request.url.params["v"] == ENCOUNTER_REP
 
-    miss = UUID("85874928-01ba-4c8a-a397-8ff86d56ecc3")
-    assert await client.find_write_by_ref(VISIT_A, miss) is None
-
-    respx.get(f"{VISIT}/{VISIT_B}").mock(return_value=httpx.Response(404))
-    with pytest.raises(NotFound):
-        await client.find_write_by_ref(VISIT_B, CLIENT_REF)
+    respx.get(f"{ENCOUNTER_READ}/{OTHER_REF}").mock(return_value=httpx.Response(404))
+    assert await client.find_write_by_ref(VISIT_A, OTHER_REF) is None
 
     with respx.mock(assert_all_called=False) as mock:
         with pytest.raises(ValueError):
             await client.find_write_by_ref("../session", CLIENT_REF)
+        with pytest.raises(ValueError):
+            await client.find_write_by_ref(VISIT_A, str(CLIENT_REF))  # type: ignore[arg-type]
         assert not mock.calls
+
+
+@respx.mock
+async def test_find_write_by_ref_hit_without_marker_still_counts() -> None:
+    # The encounter uuid is the caller's ref, so the encounter existing is the proof;
+    # a marker obs voided (or edited) in the hospital record must not invite a re-send.
+    _login()
+    body = _fixture("encounter_with_marker.json")
+    body["obs"] = [{"uuid": OBS_2, "comment": f"note {MARKER}-x"}]
+    respx.get(f"{ENCOUNTER_READ}/{CLIENT_REF}").mock(return_value=httpx.Response(200, json=body))
+    hit = await _client(_nursing_config()).find_write_by_ref(VISIT_A, CLIENT_REF)
+    assert hit == NursingWriteOutcome(
+        encounter_uuid=str(CLIENT_REF), obs_uuids=(OBS_2,), created=False
+    )
+
+
+@respx.mock
+async def test_find_write_by_ref_in_another_visit_is_rejected() -> None:
+    _login()
+    respx.get(f"{ENCOUNTER_READ}/{CLIENT_REF}").mock(
+        return_value=httpx.Response(200, json=_fixture("encounter_with_marker.json"))
+    )
+    with pytest.raises(VendorRejected) as info:
+        await _client(_nursing_config()).find_write_by_ref(VISIT_B, CLIENT_REF)
+    assert info.value.landed is False
+
+
+@respx.mock
+async def test_find_write_by_ref_unreadable_encounter_is_rejected() -> None:
+    _login()
+    respx.get(f"{ENCOUNTER_READ}/{CLIENT_REF}").mock(
+        return_value=httpx.Response(200, json={"uuid": str(OTHER_REF), "visit": {"uuid": VISIT_A}})
+    )
+    with pytest.raises(VendorRejected):
+        await _client(_nursing_config()).find_write_by_ref(VISIT_A, CLIENT_REF)
+
+
+def _io_entry() -> IntakeOutputWrite:
+    return IntakeOutputWrite(kind="intake", route="Oral", quantity_ml=250, recorded_at=AT)
+
+
+_WRITES: list[tuple[str, str, Any]] = [
+    ("vitals", "write_vitals", lambda: {"vitals": VitalsWrite(pulse=80)}),
+    ("io", "write_intake_output", lambda: {"entry": _io_entry()}),
+    ("note", "write_nursing_note", lambda: {"text": "Comfortable, no complaints."}),
+]
+
+
+@pytest.mark.parametrize(("kind", "method", "args"), _WRITES)
+@respx.mock
+async def test_retry_after_unknown_outcome_finds_earlier_write_and_does_not_post(
+    kind: str, method: str, args: Any
+) -> None:
+    # The POST commits but its answer is lost (a gateway 502): the caller retries with
+    # the same client_ref, and the retry must find the write instead of charting twice.
+    _login()
+    respx.get(f"{CONCEPT}/{IN_SET}").mock(
+        return_value=_io_set([(IO_ROUTE, "Text"), (IO_QTY, "Numeric"), (IO_TIME, "Datetime")])
+    )
+    earlier = respx.get(f"{ENCOUNTER_READ}/{CLIENT_REF}").mock(
+        side_effect=[
+            httpx.Response(404),
+            httpx.Response(200, json=_fixture("encounter_with_marker.json")),
+        ]
+    )
+    post = respx.post(ENCOUNTER).mock(return_value=httpx.Response(502, text="bad gateway"))
+    client = _client(_nursing_config())
+    with pytest.raises(TransientError):
+        await getattr(client, method)(**_who(), **args())
+    out = await getattr(client, method)(**_who(), **args())
+    assert out == NursingWriteOutcome(
+        encounter_uuid=str(CLIENT_REF), obs_uuids=(OBS_1, OBS_2, OBS_3), created=False
+    )
+    assert post.call_count == 1
+    assert earlier.call_count == 2
+    assert earlier.calls.last.request.url.params["v"] == ENCOUNTER_REP
+
+
+@pytest.mark.parametrize(("kind", "method", "args"), _WRITES)
+@respx.mock
+async def test_write_whose_ref_names_an_encounter_in_another_visit_is_refused(
+    kind: str, method: str, args: Any
+) -> None:
+    _login()
+    respx.get(f"{CONCEPT}/{IN_SET}").mock(
+        return_value=_io_set([(IO_ROUTE, "Text"), (IO_QTY, "Numeric"), (IO_TIME, "Datetime")])
+    )
+    respx.get(f"{ENCOUNTER_READ}/{CLIENT_REF}").mock(
+        return_value=httpx.Response(200, json=_fixture("encounter_with_marker.json"))
+    )
+    post = respx.post(ENCOUNTER).mock(return_value=_echo([OBS_1]))
+    with pytest.raises(VendorRejected) as info:
+        await getattr(_client(_nursing_config()), method)(**_who(visit_uuid=VISIT_B), **args())
+    assert info.value.landed is False
+    assert not post.called
+
+
+@pytest.mark.parametrize(("kind", "method", "args"), _WRITES)
+@respx.mock
+async def test_pre_read_5xx_is_transient_and_nothing_posted(
+    kind: str, method: str, args: Any
+) -> None:
+    _login()
+    respx.get(f"{CONCEPT}/{IN_SET}").mock(
+        return_value=_io_set([(IO_ROUTE, "Text"), (IO_QTY, "Numeric"), (IO_TIME, "Datetime")])
+    )
+    respx.get(f"{ENCOUNTER_READ}/{CLIENT_REF}").mock(return_value=httpx.Response(503))
+    post = respx.post(ENCOUNTER).mock(return_value=_echo([OBS_1]))
+    with pytest.raises(TransientError):
+        await getattr(_client(_nursing_config()), method)(**_who(), **args())
+    assert not post.called
 
 
 @respx.mock
 async def test_write_500_is_transient_not_retried() -> None:
     _login()
+    earlier = _no_earlier_write()
     route = respx.post(ENCOUNTER).mock(return_value=httpx.Response(500, text="<html>error</html>"))
     visit = respx.get(f"{VISIT}/{VISIT_A}").mock(return_value=httpx.Response(200, json={}))
     with pytest.raises(TransientError):
         await _client(_nursing_config()).write_vitals(**_who(), vitals=VitalsWrite(pulse=80))
     assert route.call_count == 1
+    assert earlier.call_count == 1
     assert not visit.called
 
 
 @respx.mock
 async def test_write_response_naming_another_encounter_is_landed_rejection() -> None:
     _login()
+    _no_earlier_write()
     respx.post(ENCOUNTER).mock(
         return_value=httpx.Response(
             200, json={"encounterUuid": str(OTHER_REF), "observations": [{"uuid": OBS_1}]}
@@ -741,6 +882,7 @@ async def test_write_response_naming_another_encounter_is_landed_rejection() -> 
 @respx.mock
 async def test_write_route_404_is_not_found() -> None:
     _login()
+    _no_earlier_write()
     respx.post(ENCOUNTER).mock(return_value=httpx.Response(404))
     with pytest.raises(NotFound):
         await _client(_nursing_config()).write_vitals(**_who(), vitals=VitalsWrite(pulse=80))
