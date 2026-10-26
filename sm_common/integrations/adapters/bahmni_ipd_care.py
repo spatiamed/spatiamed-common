@@ -106,6 +106,7 @@ from sm_common.integrations.adapters.bahmni_http import BahmniHttp, from_epoch_m
 from sm_common.integrations.adapters.bahmni_parse import when
 from sm_common.integrations.exceptions import (
     ConfigError,
+    HmsAdapterError,
     NotFound,
     TransientError,
     VendorRejected,
@@ -473,18 +474,16 @@ def _refusal(code: str, message: str) -> VendorRejected:
     return exc
 
 
-def _landed(exc: VendorRejected) -> VendorRejected:
-    """A refusal raised after the record accepted the write: the dose may be saved."""
-    if exc.landed:
-        return exc
-    out = VendorRejected(*exc.args, landed=True)
-    out.code = exc.code
-    return out
-
-
 def _order_stopped(raw_slot: Mapping[str, Any]) -> bool:
-    """Positive evidence in one slot answer that its order is stopped."""
-    if raw_slot.get("status") == "STOPPED":
+    """Positive evidence in one slot answer that its order is stopped.
+
+    The module marks a slot STOPPED in two ways: the order was discontinued (its later
+    slots, with no administration), or one dose was recorded as ``stopped`` (that slot
+    only, holding the administration). Only the first says anything about the order.
+    """
+    if raw_slot.get("status") == "STOPPED" and not isinstance(
+        raw_slot.get("medicationAdministration"), dict
+    ):
         return True
     order = raw_slot.get("order")
     if not isinstance(order, dict):
@@ -523,6 +522,7 @@ def _administration_body(w: MarAdministrationWrite, marker: str) -> dict[str, An
     if w.notes is not None:
         notes.append({"authorUuid": author, "text": w.notes})
     if w.status_reason is not None:
+        # The module does not persist statusReason; this note is the copy that survives.
         notes.append({"authorUuid": author, "text": f"Reason: {w.status_reason.strip()}"})
     notes.append({"authorUuid": author, "text": marker})
     body: dict[str, Any] = {"patientUuid": w.patient_uuid, "orderUuid": w.order_uuid}
@@ -1047,9 +1047,15 @@ class BahmniIpdCareClient:
         is answered with it (``created=False``; ``ref_matched`` says whether it is this
         write's own earlier one) and nothing is sent. Otherwise an order the read shows
         stopped is ``VendorRejected`` with code ``order_not_active``, and a slot that is
-        not on the order or no longer open is ``slot_state_invalid``. After the POST
-        the slot is read back: an administration without this write's note was
-        recorded by someone else in between (``created=False``).
+        not on the order or no longer open is ``slot_state_invalid``. A slot holding a
+        dose recorded as ``stopped`` does not stop the order. After the POST the slot
+        is read back: an administration without this write's note was recorded by
+        someone else in between (``created=False``). Any error on that read-back is
+        raised with ``landed=True``: the dose may be saved, and a retry finds it.
+
+        The module resolves ``dose_units``, ``route`` and the performer function by
+        concept name and saves the dose without them when a name is unknown; the read
+        does not compare them with what was sent.
         """
         marker = _check_administration(w)
         if w.slot_uuid is None:
@@ -1091,8 +1097,10 @@ class BahmniIpdCareClient:
             )
         try:
             outcome = await self._scheduled_read_back(w, slot_uuid, answered, marker)
-        except VendorRejected as exc:
-            raise _landed(exc) from exc
+        except HmsAdapterError as exc:
+            # The POST was accepted: whatever stopped the read-back, the dose may be saved.
+            exc.landed = True
+            raise
         # Our note on it means this write saved it; without it the slot was filled by
         # someone else between the read and the POST and the module answered theirs.
         return replace(outcome, created=outcome.ref_matched)
@@ -1119,7 +1127,15 @@ class BahmniIpdCareClient:
         The order's earlier as-needed doses are read first; one carrying this write's
         note is answered (``created=False``, ``ref_matched=True``) and nothing is sent.
         An order that the dose slots or its chart placeholder show stopped is
-        ``order_not_active``. After the POST the new dose slot is read back.
+        ``order_not_active``. After the POST the new dose slot is read back; any error
+        on that read-back is raised with ``landed=True``.
+
+        Two limits are the caller's to cover. A PRN order never put on the chart (no
+        placeholder slot, no earlier dose) shows no stop evidence and is posted: the
+        module does not check the order's state on this route, so the caller checks
+        that the order is active first. And the route is not idempotent: two concurrent
+        writes with one ``client_ref`` can both pass the pre-read and record two doses,
+        so the caller serialises writes per ``client_ref`` (its own step marker/lock).
         """
         marker = _check_administration(w)
         if w.slot_uuid is not None:
@@ -1151,8 +1167,10 @@ class BahmniIpdCareClient:
             )
         try:
             return await self._adhoc_read_back(w, answered, marker)
-        except VendorRejected as exc:
-            raise _landed(exc) from exc
+        except HmsAdapterError as exc:
+            # The POST was accepted: whatever stopped the read-back, the dose may be saved.
+            exc.landed = True
+            raise
 
     async def _adhoc_read_back(
         self, w: MarAdministrationWrite, answered: str, marker: str

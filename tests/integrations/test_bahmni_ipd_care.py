@@ -1684,6 +1684,94 @@ async def test_stopped_order_refused_order_not_active(slot_status: str, order: A
     assert post.call_count == 0
 
 
+def _slots_with_one_dose_stopped(
+    admin: dict[str, Any] | None = None, status: str = "SCHEDULED", **order: Any
+) -> list[dict[str, Any]]:
+    """The order's slots where the second one holds a dose recorded as ``stopped``."""
+    body = _order_slots(admin, status, **order)
+    body[1]["status"] = "STOPPED"
+    body[1]["medicationAdministration"] = _admin_rep(OTHER_ADMIN, "stopped", ["infusion halted"])
+    return body
+
+
+@respx.mock
+async def test_one_dose_recorded_as_stopped_does_not_stop_the_order() -> None:
+    """A STOPPED slot holding an administration is one halted dose, not a stopped order."""
+    _login()
+    given = _admin_rep(NEW_ADMIN, "completed", [MAR_MARKER])
+    respx.get(MED).mock(
+        side_effect=_by_service_type(
+            {
+                "MEDICATION_REQUEST": [
+                    _slots_with_one_dose_stopped(),
+                    _slots_with_one_dose_stopped(given, "COMPLETED"),
+                ]
+            }
+        )
+    )
+    post = respx.post(SCHED_ADMIN).mock(return_value=httpx.Response(200, json=[given]))
+    out = await _client().record_administration(_admin_write())
+    assert post.call_count == 1
+    assert out.created is True and out.administration_uuid == NEW_ADMIN
+
+
+@pytest.mark.parametrize(
+    "order", [{"dateStopped": "2026-03-02T06:00:00.000+0000"}, {"action": "DISCONTINUE"}]
+)
+@respx.mock
+async def test_stopped_dose_beside_a_stopped_order_is_still_refused(order: Any) -> None:
+    _login()
+    respx.get(MED).mock(
+        side_effect=_by_service_type(
+            {"MEDICATION_REQUEST": [_slots_with_one_dose_stopped(**order)]}
+        )
+    )
+    post = respx.post(SCHED_ADMIN).mock(return_value=httpx.Response(200, json=[]))
+    with pytest.raises(VendorRejected) as exc:
+        await _client().record_administration(_admin_write())
+    assert _refusal_code(exc) == "order_not_active"
+    assert post.call_count == 0
+
+
+@pytest.mark.parametrize(
+    ("kind", "status", "error"),
+    [
+        ("scheduled", 500, TransientError),
+        ("scheduled", 403, AuthError),
+        ("adhoc", 500, TransientError),
+        ("adhoc", 403, AuthError),
+    ],
+)
+@respx.mock
+async def test_read_back_error_after_post_is_marked_landed(
+    kind: str, status: int, error: type[Exception]
+) -> None:
+    """The POST was accepted, so a failed read-back must not read as "not saved"."""
+    _login()
+    failed = httpx.Response(status, json={"error": {"message": "x"}})
+    answer = _fixture("administration_response.json")
+    if kind == "scheduled":
+        respx.get(MED).mock(side_effect=[httpx.Response(200, json=_order_slots()), failed])
+        respx.post(SCHED_ADMIN).mock(return_value=httpx.Response(200, json=answer))
+    else:
+        respx.get(MED).mock(
+            side_effect=[
+                httpx.Response(200, json=[]),
+                httpx.Response(200, json=_placeholder()),
+                failed,
+            ]
+        )
+        respx.post(ADHOC_ADMIN).mock(return_value=httpx.Response(200, json=answer[0]))
+    with pytest.raises(error) as exc:
+        if kind == "scheduled":
+            await _client().record_administration(_admin_write())
+        else:
+            await _client().record_adhoc_administration(_prn_write())
+    assert getattr(exc.value, "landed", None) is True
+    if status == 500:
+        assert getattr(exc.value, "status_code", None) == 500
+
+
 @pytest.mark.parametrize("case", ["slot_not_on_order", "done_without_administration"])
 @respx.mock
 async def test_slot_not_recordable_is_slot_state_invalid(case: str) -> None:
