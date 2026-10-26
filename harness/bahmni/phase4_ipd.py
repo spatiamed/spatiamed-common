@@ -17,7 +17,7 @@ units come from the same ``AdtCtx`` the ADT group uses.
 Setup: one 1x3 ward with three beds and two patients. ``LT-P4-<RUN> Stay`` is admitted,
 transferred and discharged inside ``bed_identity_across_stay``; ``LT-P4-<RUN> Care`` is
 admitted once and stays admitted for the ward board, medication chart and nursing
-checks. Admit, transfer and discharge are Phase 2's, through ``ctx.client()``. The two
+checks. Admit, transfer and discharge are the ADT group's, through ``ctx.client()``. The two
 drug orders (one scheduled, one as needed) are placed by a raw encounter push, because
 the record client's prescription write charts outpatient orders of quantity 1.
 
@@ -49,6 +49,7 @@ from adt_checks import (
     REST,
     RUN,
     AdtCtx,
+    Raw,
     Result,
     _cleanup,
     _one,
@@ -66,7 +67,12 @@ from sm_common.integrations.adapters.bahmni_ipd_care import (
     _slot_time,
 )
 from sm_common.integrations.adapters.bahmni_parse import when
-from sm_common.integrations.exceptions import ConfigError, HmsAdapterError, VendorRejected
+from sm_common.integrations.exceptions import (
+    AuthError,
+    ConfigError,
+    HmsAdapterError,
+    VendorRejected,
+)
 from sm_common.integrations.ipd_care_types import (
     IntakeOutputWrite,
     MarAdministrationWrite,
@@ -134,6 +140,12 @@ def _name(v: Any) -> str | None:
 
 def _now() -> datetime:
     return datetime.now(UTC).replace(microsecond=0)
+
+
+def _forbidden(got: Raw, what: str) -> None:
+    """A raw call's 403 is a privilege finding (INCONCLUSIVE with its name), not a FAIL."""
+    if got.status == 403:
+        raise AuthError(f"{what}: HTTP 403 forbidden")
 
 
 # ─── synthetic data ──────────────────────────────────────────────────────────
@@ -249,10 +261,12 @@ async def _drug_order(x: AdtCtx, patient: str, visit: str, label: str, as_needed
         ],
     }
     pushed = await x.raw("POST", "bahmnicore/bahmniencounter", body=body)
+    _forbidden(pushed, "drug order push")
     if not pushed.ok:
         raise RuntimeError(f"drug order push HTTP {pushed.status}")
     # Order fields only: the encounter's order list is a generic Order rep.
     got = await x.raw("GET", f"encounter/{encounter}", params={"v": "custom:(uuid,orders:(uuid))"})
+    _forbidden(got, "drug order read-back")
     orders = [o["uuid"] for o in (got.body or {}).get("orders") or [] if isinstance(o, dict)]
     if len(orders) != 1:
         raise RuntimeError(f"drug order push left {len(orders)} orders on its encounter")
@@ -267,6 +281,7 @@ async def _order_rows(x: AdtCtx, patient: str, order: str, service: str) -> list
         SCHEDULE,
         params={"patientUuid": patient, "orderUuids": order, "serviceType": service},
     )
+    _forbidden(got, "slot read")
     if not got.ok or not isinstance(got.body, list):
         raise RuntimeError(f"slot read HTTP {got.status}")
     return [r for r in got.body if isinstance(r, dict)]

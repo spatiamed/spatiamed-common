@@ -110,6 +110,7 @@ def _state(**over: Any) -> dict[str, Any]:
         "adhoc_drops_notes": False,
         "unknown_encounter_status": 404,
         "io_refuses_datetime": False,
+        "order_push_403": False,
     }
     state.update(over)
     return state
@@ -255,6 +256,8 @@ def _fake(state: dict[str, Any]) -> httpx.MockTransport:
         return httpx.Response(200, json=admin)
 
     def encounter_post(body: dict[str, Any]) -> httpx.Response:
+        if state["order_push_403"] and body.get("drugOrders"):
+            return httpx.Response(403, json=PRIVILEGE_403)
         enc = {"uuid": body["encounterUuid"], "visit": body["visitUuid"], "obs": [], "orders": []}
         for d in body.get("drugOrders") or []:
             uuid = _u()
@@ -762,3 +765,11 @@ async def test_ward_auth_probe_records_status_and_privilege(tmp_path, monkeypatc
     assert state["probe_user"].startswith("lt-p4-")
     # The probe's 403 is the point of that check, not a privilege finding for the login.
     assert rows["mar_privileges"][0] == "PASS"
+
+
+async def test_raw_call_403_is_inconclusive_with_name(tmp_path, monkeypatch):
+    # The harness's own raw calls (here the drug order push) report a 403 as a
+    # privilege finding too, never as a module FAIL.
+    rows = await _rows(_state(order_push_403=True), tmp_path, monkeypatch)
+    status, detail = rows["mar_schedule_create"]
+    assert status == "INCONCLUSIVE" and "Get Medication Tasks" in detail, detail
