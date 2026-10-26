@@ -272,6 +272,34 @@ class BahmniRadiologyClient:
             raise VendorRejected("bahmni: order response is not an object")
         return body
 
+    async def _read_back(
+        self, concepts: list[str], by_concept: dict[str, str], encounter_uuid: str
+    ) -> list[PlacedRadiologyOrder]:
+        """Read each placed order back for its order number, in request order."""
+        placed: list[PlacedRadiologyOrder] = []
+        for concept in concepts:
+            order_uuid = by_concept[concept]
+            back = await self._read_order(order_uuid, _ORDER_READBACK_REP)
+            if back is None:
+                raise VendorRejected(
+                    f"bahmni: placed order {order_uuid} not found on read-back", landed=True
+                )
+            number = _str(back.get("orderNumber"))
+            if back.get("uuid") != order_uuid or _ref(back.get("concept")) != concept or not number:
+                raise VendorRejected(
+                    f"bahmni: read-back of order {order_uuid} does not match the order placed",
+                    landed=True,
+                )
+            placed.append(
+                PlacedRadiologyOrder(
+                    order_uuid=order_uuid,
+                    order_number=number,
+                    concept_uuid=concept,
+                    encounter_uuid=encounter_uuid,
+                )
+            )
+        return placed
+
     async def place_radiology_orders(
         self,
         *,
@@ -290,8 +318,11 @@ class BahmniRadiologyClient:
         and carry a "PACS Procedure Code" mapping unless ``allow_unmapped`` (else
         ``procedure_not_pacs_mapped``); both are refused before any write. Each placed
         order is read back for its order number; one over 16 bytes is discontinued
-        (best effort) and ``order_number_too_long`` raised with ``landed=True``. Never
-        retried: after a lost response, reconcile with ``find_radiology_orders``.
+        (best effort) and ``order_number_too_long`` raised with ``landed=True``. Any
+        error once the write is answered (a failed read-back included, even a
+        ``TransientError``) carries ``landed=True``: the orders exist, and when the
+        read-back failed the accession check has not run. Never retried: after a lost
+        response or a landed error, reconcile with ``find_radiology_orders``.
         """
         self._check_context(
             patient_uuid=patient_uuid,
@@ -367,28 +398,13 @@ class BahmniRadiologyClient:
                 "bahmni: encounter response is missing a placed radiology order", landed=True
             )
 
-        placed: list[PlacedRadiologyOrder] = []
-        for concept in concepts:
-            order_uuid = by_concept[concept]
-            back = await self._read_order(order_uuid, _ORDER_READBACK_REP)
-            if back is None:
-                raise VendorRejected(
-                    f"bahmni: placed order {order_uuid} not found on read-back", landed=True
-                )
-            number = _str(back.get("orderNumber"))
-            if back.get("uuid") != order_uuid or _ref(back.get("concept")) != concept or not number:
-                raise VendorRejected(
-                    f"bahmni: read-back of order {order_uuid} does not match the order placed",
-                    landed=True,
-                )
-            placed.append(
-                PlacedRadiologyOrder(
-                    order_uuid=order_uuid,
-                    order_number=number,
-                    concept_uuid=concept,
-                    encounter_uuid=encounter_uuid,
-                )
-            )
+        try:
+            placed = await self._read_back(concepts, by_concept, encounter_uuid)
+        except HmsAdapterError as exc:
+            # The orders are in the record: even a transient read-back failure must
+            # not read as "safe to retry", or a retry would place them twice.
+            exc.landed = True
+            raise
 
         too_long = [p for p in placed if len(p.order_number.encode()) > MAX_ACCESSION_BYTES]
         if too_long:

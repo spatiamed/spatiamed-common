@@ -602,6 +602,38 @@ async def test_order_number_too_long_still_raised_when_discontinue_fails() -> No
     assert calls["n"] == 2
 
 
+@pytest.mark.parametrize("status", [500, 429])
+@respx.mock
+async def test_readback_transient_error_after_place_is_landed(status: int) -> None:
+    _login()
+    _set_route()
+    post = respx.post(ENCOUNTER_URL).mock(
+        side_effect=_echo_encounter(_fixture("encounter_with_orders_response.json"))
+    )
+    respx.get(f"{REST}/order/{ORDER_XRAY}").mock(return_value=httpx.Response(status))
+    with pytest.raises(TransientError) as exc:
+        await _client().place_radiology_orders(**PLACE_KW, orders=[RadiologyOrderWrite(XRAY_CHEST)])
+    assert exc.value.landed is True
+    assert exc.value.status_code == status
+    assert post.call_count == 1
+
+
+@respx.mock
+async def test_readback_non_json_after_place_is_landed() -> None:
+    _login()
+    _set_route()
+    post = respx.post(ENCOUNTER_URL).mock(
+        side_effect=_echo_encounter(_fixture("encounter_with_orders_response.json"))
+    )
+    respx.get(f"{REST}/order/{ORDER_XRAY}").mock(
+        return_value=httpx.Response(200, content=b"<html>not json</html>")
+    )
+    with pytest.raises(VendorRejected) as exc:
+        await _client().place_radiology_orders(**PLACE_KW, orders=[RadiologyOrderWrite(XRAY_CHEST)])
+    assert exc.value.landed is True
+    assert post.call_count == 1
+
+
 @respx.mock
 async def test_place_500_is_transient_not_retried() -> None:
     _login()
