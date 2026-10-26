@@ -84,9 +84,11 @@ module = [
     "sm_common.integrations.adapters.bahmni",
     "sm_common.integrations.adapters.bahmni_config",
     "sm_common.integrations.adapters.bahmni_http",
+    "sm_common.integrations.adapters.bahmni_ipd_care",
     "sm_common.integrations.adapters.bahmni_parse",
     "sm_common.integrations.adapters.bahmni_record",
     "sm_common.integrations.build_adapter",
+    "sm_common.integrations.ipd_care_types",
     "sm_common.integrations.record_types",
 ]
 ignore_errors = false
