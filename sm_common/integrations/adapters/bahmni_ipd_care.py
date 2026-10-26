@@ -67,13 +67,36 @@ Medication chart
     ``AS_NEEDED_MEDICATION_REQUEST``). Reading needs the ``Get Medication Tasks`` and
     ``Get Medication Administration`` privileges and charting ``Edit Medication
     Tasks``; the module answers 403 without them (``AuthError``).
+
+Administrations
+    ``POST ipd/scheduledMedicationAdministrations`` takes a list of requests, one per
+    slot, and answers the slot's existing administration when it already has one
+    (nothing new is saved). A request ``uuid`` makes the module answer that
+    administration instead of creating one, so none is sent. The request's
+    ``administeredDateTime`` is epoch SECONDS (``_slot_time``); the answer's is a java
+    date. ``statusReason`` is accepted but not saved by the module, so a not-done reason
+    also travels as a note. ``doseUnits``, ``route`` and the performer ``function`` are
+    resolved by concept name. Each write carries the note ``"sm:" + str(client_ref)``;
+    notes come back unordered, so any note equal to it matches.
+    The client reads the order's slots first (``order_not_active`` on a stopped order,
+    the slot's existing administration returned with ``created=False``), and after the
+    POST reads the slot back: the administration it holds is the outcome, and its notes
+    tell our write from one recorded by someone else in between.
+    ``POST ipd/adhocMedicationAdministrations`` (an as-needed dose) always creates: the
+    module files it as a new completed ``AsNeededMedicationRequest`` slot of the order
+    in the patient's active visit. It is not idempotent, so the client first reads the
+    order's as-needed dose slots (``serviceType=AS_NEEDED_MEDICATION_REQUEST``) for its
+    note and sends nothing when an earlier write is found. The visit medication read
+    (``ipdVisit/<visit>/medication``) lists only doses with no order, so it cannot see
+    these. The order's chart placeholder is read too, as the evidence that the order was
+    stopped before its first as-needed dose.
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, cast, get_args
@@ -88,8 +111,11 @@ from sm_common.integrations.exceptions import (
     VendorRejected,
 )
 from sm_common.integrations.ipd_care_types import (
+    AdministrationStatus,
     BedStatus,
     IntakeOutputWrite,
+    MarAdministrationOutcome,
+    MarAdministrationWrite,
     MarScheduleOutcome,
     MarScheduleWrite,
     MarSlot,
@@ -131,7 +157,16 @@ _SCHEDULE_SERVICE_TYPE = {
 _SERVICE_TYPE_ANSWER = {
     "MEDICATION_REQUEST": "MedicationRequest",
     "AS_NEEDED_PLACEHOLDER": "AsNeededPlaceholder",
+    "AS_NEEDED_MEDICATION_REQUEST": "AsNeededMedicationRequest",
 }
+_SCHEDULED_ADMINISTRATIONS = f"{_REST}/ipd/scheduledMedicationAdministrations"
+_ADHOC_ADMINISTRATIONS = f"{_REST}/ipd/adhocMedicationAdministrations"
+_ADMINISTRATION_STATUSES = frozenset(get_args(AdministrationStatus))
+_MAX_ADMINISTRATION_NOTE_CHARS = 1000
+_MAX_CONCEPT_NAME_CHARS = 255
+_PERFORMER_FUNCTION = "Performer"
+# Slot states that may still take an administration (a missed dose may be given late).
+_RECORDABLE_SLOT_STATUSES = frozenset({"SCHEDULED", "MISSED"})
 # Any given-at time before this is a unit slip (seconds read as ms), not a real dose.
 _EARLIEST_ADMINISTRATION = datetime(2000, 1, 1, tzinfo=timezone.utc)
 _SLOT_STATUSES = frozenset(get_args(SlotStatus))
@@ -430,6 +465,135 @@ def _top_obs_uuids(raw: Any) -> tuple[str, ...]:
     if not isinstance(raw, list):
         return ()
     return tuple(o["uuid"] for o in raw if isinstance(o, dict) and isinstance(o.get("uuid"), str))
+
+
+def _refusal(code: str, message: str) -> VendorRejected:
+    exc = VendorRejected(f"{code}: {message}")
+    exc.code = code
+    return exc
+
+
+def _order_stopped(raw_slot: Mapping[str, Any]) -> bool:
+    """Positive evidence in one slot answer that its order is stopped."""
+    if raw_slot.get("status") == "STOPPED":
+        return True
+    order = raw_slot.get("order")
+    if not isinstance(order, dict):
+        return False
+    return order.get("dateStopped") is not None or order.get("action") == "DISCONTINUE"
+
+
+def _admin_notes(admin: Mapping[str, Any]) -> list[str]:
+    notes = admin.get("notes")
+    if not isinstance(notes, list):
+        return []
+    return [n["text"] for n in notes if isinstance(n, dict) and isinstance(n.get("text"), str)]
+
+
+def _admin_status(slot_uuid: str, admin: Mapping[str, Any]) -> AdministrationStatus:
+    status = admin.get("status")
+    if status not in _ADMINISTRATION_STATUSES:
+        raise VendorRejected(
+            f"bahmni: medication slot {slot_uuid} administration has unknown status {status!r}"
+        )
+    return cast(AdministrationStatus, status)
+
+
+def _optional_name(name: str, value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip() or len(value) > _MAX_CONCEPT_NAME_CHARS:
+        raise ValueError(f"bahmni: {name} must be 1-{_MAX_CONCEPT_NAME_CHARS} characters")
+    return value.strip()
+
+
+def _administration_body(w: MarAdministrationWrite, marker: str) -> dict[str, Any]:
+    """The module's administration request (no ``uuid``, no ``slotUuid``)."""
+    author = w.provider_uuids[0]
+    notes: list[dict[str, str]] = []
+    if w.notes is not None:
+        notes.append({"authorUuid": author, "text": w.notes})
+    if w.status_reason is not None:
+        notes.append({"authorUuid": author, "text": f"Reason: {w.status_reason.strip()}"})
+    notes.append({"authorUuid": author, "text": marker})
+    body: dict[str, Any] = {"patientUuid": w.patient_uuid, "orderUuid": w.order_uuid}
+    if w.encounter_uuid is not None:
+        body["encounterUuid"] = w.encounter_uuid
+    body["providers"] = [
+        {"providerUuid": p, "function": _PERFORMER_FUNCTION} for p in w.provider_uuids
+    ]
+    body["notes"] = notes
+    body["status"] = w.status
+    if w.status_reason is not None:
+        body["statusReason"] = w.status_reason.strip()
+    body["administeredDateTime"] = _slot_time(w.administered_at)
+    if w.dose is not None:
+        body["dose"] = float(w.dose)
+    for key, value in (("doseUnits", w.dose_units), ("route", w.route)):
+        if value is not None:
+            body[key] = value.strip()
+    return body
+
+
+def _check_administration(w: MarAdministrationWrite) -> str:
+    """Caller input checks shared by both writes (before any I/O); the marker."""
+    if not isinstance(w, MarAdministrationWrite):
+        raise ValueError("bahmni: w must be a MarAdministrationWrite")
+    for name in ("patient_uuid", "visit_uuid", "order_uuid"):
+        _check_uuid(name, getattr(w, name))
+    if w.encounter_uuid is not None:
+        _check_uuid("encounter_uuid", w.encounter_uuid)
+    if not isinstance(w.provider_uuids, tuple) or not w.provider_uuids:
+        raise ValueError("bahmni: an administration needs at least one provider")
+    for provider in w.provider_uuids:
+        _check_uuid("provider_uuid", provider)
+    if w.status not in _ADMINISTRATION_STATUSES:
+        raise ValueError(
+            f"bahmni: administration status must be one of "
+            f"{sorted(_ADMINISTRATION_STATUSES)}: {w.status!r}"
+        )
+    if w.status_reason is not None and (
+        not isinstance(w.status_reason, str)
+        or len(w.status_reason) > _MAX_ADMINISTRATION_NOTE_CHARS
+    ):
+        raise ValueError(
+            f"bahmni: status_reason must be at most {_MAX_ADMINISTRATION_NOTE_CHARS} chars"
+        )
+    if w.status == "not-done" and (w.status_reason is None or not w.status_reason.strip()):
+        raise ValueError("bahmni: a not-done administration needs a status_reason")
+    if w.status_reason is not None and not w.status_reason.strip():
+        raise ValueError("bahmni: status_reason must not be blank")
+    _slot_time(w.administered_at)  # naive -> ValueError
+    if w.dose is not None and (
+        not isinstance(w.dose, Decimal) or not w.dose.is_finite() or w.dose <= 0
+    ):
+        raise ValueError(f"bahmni: dose must be a positive finite Decimal: {w.dose!r}")
+    _optional_name("dose_units", w.dose_units)
+    _optional_name("route", w.route)
+    if w.notes is not None and (
+        not isinstance(w.notes, str)
+        or not w.notes.strip()
+        or len(w.notes) > _MAX_ADMINISTRATION_NOTE_CHARS
+    ):
+        raise ValueError(
+            f"bahmni: administration notes must be 1-{_MAX_ADMINISTRATION_NOTE_CHARS} chars"
+        )
+    return _marker(w.client_ref)
+
+
+def _outcome(
+    slot_uuid: str, admin: Mapping[str, Any], marker: str, *, created: bool
+) -> MarAdministrationOutcome:
+    uuid = admin.get("uuid")
+    if not isinstance(uuid, str) or not uuid:
+        raise VendorRejected(f"bahmni: medication slot {slot_uuid} administration has no uuid")
+    return MarAdministrationOutcome(
+        administration_uuid=uuid,
+        slot_uuid=slot_uuid,
+        created=created,
+        status=_admin_status(slot_uuid, admin),
+        ref_matched=marker in _admin_notes(admin),
+    )
 
 
 class BahmniIpdCareClient:
@@ -867,9 +1031,131 @@ class BahmniIpdCareClient:
             slot_uuids=tuple(s.slot_uuid for s in created),
         )
 
+    async def record_administration(self, w: MarAdministrationWrite) -> MarAdministrationOutcome:
+        """Record a scheduled dose (given, not given or stopped) on its chart slot.
+
+        The order's slots are read first. A slot that already holds an administration
+        is answered with it (``created=False``; ``ref_matched`` says whether it is this
+        write's own earlier one) and nothing is sent. Otherwise an order the read shows
+        stopped is ``VendorRejected`` with code ``order_not_active``, and a slot that is
+        not on the order or no longer open is ``slot_state_invalid``. After the POST
+        the slot is read back: an administration without this write's note was
+        recorded by someone else in between (``created=False``).
+        """
+        marker = _check_administration(w)
+        if w.slot_uuid is None:
+            raise ValueError("bahmni: a scheduled administration needs its slot_uuid")
+        _check_uuid("slot_uuid", w.slot_uuid)
+        slot_uuid = w.slot_uuid
+        rows = await self._order_slot_rows(w.patient_uuid, w.order_uuid, "MEDICATION_REQUEST")
+        target = next(((s, r) for s, r in rows if s.slot_uuid == slot_uuid), None)
+        if target is None:
+            raise _refusal(
+                "slot_state_invalid",
+                f"slot {slot_uuid} is not a scheduled slot of order {w.order_uuid}",
+            )
+        slot, raw = target
+        admin = raw.get("medicationAdministration")
+        if isinstance(admin, dict):
+            return _outcome(slot_uuid, admin, marker, created=False)
+        if any(_order_stopped(r) for _, r in rows):
+            raise _refusal("order_not_active", f"order {w.order_uuid} is stopped")
+        if slot.status not in _RECORDABLE_SLOT_STATUSES:
+            raise _refusal(
+                "slot_state_invalid",
+                f"slot {slot_uuid} is {slot.status} with no administration",
+            )
+        body = _administration_body(w, marker)
+        body["slotUuid"] = slot_uuid
+        resp = await self._http.request("POST", _SCHEDULED_ADMINISTRATIONS, json=[body])
+        if resp.status_code == 404:
+            raise NotFound("bahmni: scheduled administration route not found (HTTP 404)")
+        parsed = resp.json() if resp.content else None
+        answered = (
+            parsed[0].get("uuid")
+            if isinstance(parsed, list) and len(parsed) == 1 and isinstance(parsed[0], dict)
+            else None
+        )
+        if not isinstance(answered, str) or not answered:
+            raise VendorRejected(
+                "bahmni: scheduled administration answer named no administration", landed=True
+            )
+        after = await self._order_slot_rows(w.patient_uuid, w.order_uuid, "MEDICATION_REQUEST")
+        held = next(
+            (r.get("medicationAdministration") for s, r in after if s.slot_uuid == slot_uuid), None
+        )
+        if not isinstance(held, dict) or held.get("uuid") != answered:
+            raise VendorRejected(
+                f"bahmni: slot {slot_uuid} does not hold the administration {answered} "
+                "answered for it",
+                landed=True,
+            )
+        outcome = _outcome(slot_uuid, held, marker, created=False)
+        # Our note on it means this write saved it; without it the slot was filled by
+        # someone else between the read and the POST and the module answered theirs.
+        return replace(outcome, created=outcome.ref_matched)
+
+    async def record_adhoc_administration(
+        self, w: MarAdministrationWrite
+    ) -> MarAdministrationOutcome:
+        """Record an as-needed dose of an active order (``slot_uuid`` None, ``completed``).
+
+        The order's earlier as-needed doses are read first; one carrying this write's
+        note is answered (``created=False``, ``ref_matched=True``) and nothing is sent.
+        An order that the dose slots or its chart placeholder show stopped is
+        ``order_not_active``. After the POST the new dose slot is read back.
+        """
+        marker = _check_administration(w)
+        if w.slot_uuid is not None:
+            raise ValueError("bahmni: an as-needed administration names no slot")
+        if w.status != "completed":
+            raise ValueError("bahmni: an as-needed administration is recorded as completed")
+        doses = await self._order_slot_rows(
+            w.patient_uuid, w.order_uuid, "AS_NEEDED_MEDICATION_REQUEST"
+        )
+        for slot, raw in doses:
+            admin = raw.get("medicationAdministration")
+            if isinstance(admin, dict) and marker in _admin_notes(admin):
+                return _outcome(slot.slot_uuid, admin, marker, created=False)
+        placeholder = await self._order_slot_rows(
+            w.patient_uuid, w.order_uuid, "AS_NEEDED_PLACEHOLDER"
+        )
+        if any(_order_stopped(r) for _, r in [*doses, *placeholder]):
+            raise _refusal("order_not_active", f"order {w.order_uuid} is stopped")
+        resp = await self._http.request(
+            "POST", _ADHOC_ADMINISTRATIONS, json=_administration_body(w, marker)
+        )
+        if resp.status_code == 404:
+            raise NotFound("bahmni: adhoc administration route not found (HTTP 404)")
+        parsed = resp.json() if resp.content else None
+        answered = parsed.get("uuid") if isinstance(parsed, dict) else None
+        if not isinstance(answered, str) or not answered:
+            raise VendorRejected(
+                "bahmni: adhoc administration answer named no administration", landed=True
+            )
+        after = await self._order_slot_rows(
+            w.patient_uuid, w.order_uuid, "AS_NEEDED_MEDICATION_REQUEST"
+        )
+        for slot, raw in after:
+            admin = raw.get("medicationAdministration")
+            if isinstance(admin, dict) and admin.get("uuid") == answered:
+                return _outcome(slot.slot_uuid, admin, marker, created=True)
+        raise VendorRejected(
+            f"bahmni: no as-needed dose slot of order {w.order_uuid} holds the administration "
+            f"{answered}",
+            landed=True,
+        )
+
     async def _order_slots(
         self, patient_uuid: str, order_uuid: str, wire_type: str
     ) -> list[MarSlot]:
+        rows = await self._order_slot_rows(patient_uuid, order_uuid, wire_type)
+        return sorted((slot for slot, _ in rows), key=lambda s: (s.start_at, s.slot_uuid))
+
+    async def _order_slot_rows(
+        self, patient_uuid: str, order_uuid: str, wire_type: str
+    ) -> list[tuple[MarSlot, dict[str, Any]]]:
+        """The order's slots of one service type, each with its raw answer."""
         body = await self._schedule_get(
             {"patientUuid": patient_uuid, "orderUuids": order_uuid, "serviceType": wire_type}
         )
@@ -887,7 +1173,7 @@ class BahmniIpdCareClient:
                 f"bahmni: medication slot read for order {order_uuid} answered a service "
                 f"type other than {expected}"
             )
-        return sorted(slots, key=lambda s: (s.start_at, s.slot_uuid))
+        return list(zip(slots, cast(list[dict[str, Any]], body), strict=True))
 
     async def _schedule_get(self, params: dict[str, str]) -> list[Any]:
         resp = await self._http.request("GET", _MEDICATION_SCHEDULE, params=params)

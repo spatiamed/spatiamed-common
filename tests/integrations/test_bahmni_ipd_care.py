@@ -25,6 +25,8 @@ from sm_common.integrations.exceptions import (
 )
 from sm_common.integrations.ipd_care_types import (
     IntakeOutputWrite,
+    MarAdministrationOutcome,
+    MarAdministrationWrite,
     MarScheduleOutcome,
     MarScheduleWrite,
     MarSlot,
@@ -1352,3 +1354,574 @@ async def test_schedule_route_404_is_not_found() -> None:
     start = _utc(2026, 3, 2, 0, 0)
     with pytest.raises(NotFound):
         await _client().medication_schedule(PATIENT_A, start, start + timedelta(days=1))
+
+
+# ─── Medication chart: administrations ──────────────────────────────────────
+
+SCHED_ADMIN = f"{REST}/ipd/scheduledMedicationAdministrations"
+ADHOC_ADMIN = f"{REST}/ipd/adhocMedicationAdministrations"
+SLOT_1 = "c1000000-0000-4000-8000-000000000001"
+PRN_SLOT = "c2000000-0000-4000-8000-000000000001"
+NEW_ADMIN = "d1000000-0000-4000-8000-000000000001"
+OTHER_ADMIN = "d1000000-0000-4000-8000-000000000077"
+MAR_REF = UUID("9c4e2b1a-7d3f-4a5b-8c6d-1e2f3a4b5c6d")
+MAR_MARKER = "sm:" + str(MAR_REF)
+GIVEN_AT = _utc(2026, 3, 2, 8, 51)
+
+
+def _admin_write(**over: Any) -> MarAdministrationWrite:
+    base: dict[str, Any] = {
+        "patient_uuid": PATIENT_A,
+        "visit_uuid": VISIT_A,
+        "encounter_uuid": None,
+        "order_uuid": ORDER_A,
+        "slot_uuid": SLOT_1,
+        "provider_uuids": (PROVIDER,),
+        "status": "completed",
+        "status_reason": None,
+        "administered_at": GIVEN_AT,
+        "dose": Decimal("1"),
+        "dose_units": "Tablet(s)",
+        "route": "Oral",
+        "notes": "after food",
+        "client_ref": MAR_REF,
+    }
+    base.update(over)
+    return MarAdministrationWrite(**base)
+
+
+def _prn_write(**over: Any) -> MarAdministrationWrite:
+    return _admin_write(**{"slot_uuid": None, "notes": "fever above 38.5", **over})
+
+
+def _admin_rep(uuid: str, status: str, notes: list[str]) -> dict[str, Any]:
+    rep: dict[str, Any] = _fixture("administration_response.json")[0]
+    rep["uuid"] = uuid
+    rep["status"] = status
+    rep["notes"] = [{"uuid": f"n-{i}", "author": None, "text": t} for i, t in enumerate(notes)]
+    return rep
+
+
+def _order_slots(
+    admin: dict[str, Any] | None = None, status: str = "SCHEDULED", **order: Any
+) -> list[dict[str, Any]]:
+    """The order's scheduled slots; the first one is the slot being recorded."""
+    body: list[dict[str, Any]] = _fixture("medication_schedule_by_order.json")
+    body[0]["medicationAdministration"] = admin
+    body[0]["status"] = status
+    for slot in body:
+        slot["order"].update(order)
+    return body
+
+
+def _placeholder(**order: Any) -> list[dict[str, Any]]:
+    body = _order_slots(**order)[:1]
+    body[0]["uuid"] = "c3000000-0000-4000-8000-000000000001"
+    body[0]["serviceType"] = "AsNeededPlaceholder"
+    return body
+
+
+def _by_service_type(answers: dict[str, list[Any]]) -> Any:
+    """GET side effect: answer each by-order read from a queue per serviceType."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        kind = request.url.params["serviceType"]
+        return httpx.Response(200, json=answers[kind].pop(0))
+
+    return answer
+
+
+def _refusal_code(exc: pytest.ExceptionInfo[VendorRejected]) -> str | None:
+    return exc.value.code
+
+
+@respx.mock
+async def test_record_administration_body_and_marker() -> None:
+    _login()
+    given = _admin_rep(NEW_ADMIN, "completed", ["after food", MAR_MARKER])
+    reads = respx.get(MED).mock(
+        side_effect=_by_service_type(
+            {"MEDICATION_REQUEST": [_order_slots(), _order_slots(given, "COMPLETED")]}
+        )
+    )
+    post = respx.post(SCHED_ADMIN).mock(
+        return_value=httpx.Response(200, json=_fixture("administration_response.json"))
+    )
+    out = await _client().record_administration(_admin_write())
+
+    assert out == MarAdministrationOutcome(
+        administration_uuid=NEW_ADMIN,
+        slot_uuid=SLOT_1,
+        created=True,
+        status="completed",
+        ref_matched=True,
+    )
+    assert dict(reads.calls[0].request.url.params) == {
+        "patientUuid": PATIENT_A,
+        "orderUuids": ORDER_A,
+        "serviceType": "MEDICATION_REQUEST",
+    }
+    assert post.call_count == 1
+    sent = json.loads(post.calls.last.request.content)
+    assert sent == [
+        {
+            "patientUuid": PATIENT_A,
+            "orderUuid": ORDER_A,
+            "slotUuid": SLOT_1,
+            "providers": [{"providerUuid": PROVIDER, "function": "Performer"}],
+            "notes": [
+                {"authorUuid": PROVIDER, "text": "after food"},
+                {"authorUuid": PROVIDER, "text": MAR_MARKER},
+            ],
+            "status": "completed",
+            # The request takes epoch SECONDS (the answer gives a java date in ms).
+            "administeredDateTime": _epoch_s(GIVEN_AT),
+            "dose": 1.0,
+            "doseUnits": "Tablet(s)",
+            "route": "Oral",
+        }
+    ]
+    assert sent[0]["administeredDateTime"] == 1772441460
+    # A request uuid makes the module return that administration instead of creating one.
+    assert "uuid" not in sent[0]
+
+
+@respx.mock
+async def test_record_administration_names_encounter_when_given() -> None:
+    _login()
+    given = _admin_rep(NEW_ADMIN, "completed", [MAR_MARKER])
+    respx.get(MED).mock(
+        side_effect=_by_service_type(
+            {"MEDICATION_REQUEST": [_order_slots(), _order_slots(given, "COMPLETED")]}
+        )
+    )
+    post = respx.post(SCHED_ADMIN).mock(
+        return_value=httpx.Response(200, json=_fixture("administration_response.json"))
+    )
+    await _client().record_administration(_admin_write(encounter_uuid=VISIT_B, notes=None))
+    sent = json.loads(post.calls.last.request.content)[0]
+    assert sent["encounterUuid"] == VISIT_B
+    assert sent["notes"] == [{"authorUuid": PROVIDER, "text": MAR_MARKER}]
+
+
+@respx.mock
+async def test_slot_already_recorded_returns_existing_not_created() -> None:
+    """Someone else recorded the slot: report their administration, never "saved"."""
+    _login()
+    theirs = _admin_rep(OTHER_ADMIN, "not-done", ["patient vomiting"])
+    respx.get(MED).mock(
+        side_effect=_by_service_type({"MEDICATION_REQUEST": [_order_slots(theirs, "NOT_DONE")]})
+    )
+    post = respx.post(SCHED_ADMIN).mock(return_value=httpx.Response(200, json=[]))
+    out = await _client().record_administration(_admin_write())
+    assert out == MarAdministrationOutcome(
+        administration_uuid=OTHER_ADMIN,
+        slot_uuid=SLOT_1,
+        created=False,
+        status="not-done",
+        ref_matched=False,
+    )
+    assert post.call_count == 0
+
+
+@respx.mock
+async def test_slot_recorded_by_this_ref_earlier_is_matched_not_created() -> None:
+    """A retry after an unknown outcome finds its own earlier administration."""
+    _login()
+    ours = _admin_rep(NEW_ADMIN, "completed", [MAR_MARKER, "after food"])
+    respx.get(MED).mock(
+        side_effect=_by_service_type({"MEDICATION_REQUEST": [_order_slots(ours, "COMPLETED")]})
+    )
+    post = respx.post(SCHED_ADMIN).mock(return_value=httpx.Response(200, json=[]))
+    out = await _client().record_administration(_admin_write())
+    assert out.created is False and out.ref_matched is True
+    assert out.administration_uuid == NEW_ADMIN
+    assert post.call_count == 0
+
+
+@respx.mock
+async def test_slot_filled_between_read_and_post_reports_the_other_administration() -> None:
+    """The module answers the slot's existing administration; the read-back shows whose."""
+    _login()
+    theirs = _admin_rep(OTHER_ADMIN, "completed", ["given early"])
+    respx.get(MED).mock(
+        side_effect=_by_service_type(
+            {"MEDICATION_REQUEST": [_order_slots(), _order_slots(theirs, "COMPLETED")]}
+        )
+    )
+    respx.post(SCHED_ADMIN).mock(return_value=httpx.Response(200, json=[theirs]))
+    out = await _client().record_administration(_admin_write())
+    assert out == MarAdministrationOutcome(
+        administration_uuid=OTHER_ADMIN,
+        slot_uuid=SLOT_1,
+        created=False,
+        status="completed",
+        ref_matched=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        [_admin_rep(OTHER_ADMIN, "completed", [MAR_MARKER])],  # names another administration
+        {"uuid": NEW_ADMIN},  # not a list
+        [],  # nothing answered
+    ],
+)
+@respx.mock
+async def test_post_answer_not_matching_slot_is_landed_rejection(answer: Any) -> None:
+    _login()
+    given = _admin_rep(NEW_ADMIN, "completed", [MAR_MARKER])
+    respx.get(MED).mock(
+        side_effect=_by_service_type(
+            {"MEDICATION_REQUEST": [_order_slots(), _order_slots(given, "COMPLETED")]}
+        )
+    )
+    respx.post(SCHED_ADMIN).mock(return_value=httpx.Response(200, json=answer))
+    with pytest.raises(VendorRejected) as exc:
+        await _client().record_administration(_admin_write())
+    assert exc.value.landed is True
+
+
+@respx.mock
+async def test_read_back_slot_without_administration_is_landed_rejection() -> None:
+    _login()
+    respx.get(MED).mock(
+        side_effect=_by_service_type({"MEDICATION_REQUEST": [_order_slots(), _order_slots()]})
+    )
+    respx.post(SCHED_ADMIN).mock(
+        return_value=httpx.Response(200, json=_fixture("administration_response.json"))
+    )
+    with pytest.raises(VendorRejected) as exc:
+        await _client().record_administration(_admin_write())
+    assert exc.value.landed is True
+
+
+@pytest.mark.parametrize("reason", [None, "", "   "])
+@respx.mock
+async def test_not_done_without_reason_is_value_error(reason: str | None) -> None:
+    with pytest.raises(ValueError):
+        await _client().record_administration(_admin_write(status="not-done", status_reason=reason))
+    assert len(respx.calls) == 0
+
+
+@respx.mock
+async def test_not_done_reason_is_sent_and_kept_as_a_note() -> None:
+    """The module drops statusReason when it saves; the reason survives as a note."""
+    _login()
+    skipped = _admin_rep(NEW_ADMIN, "not-done", ["Reason: patient refused", MAR_MARKER])
+    respx.get(MED).mock(
+        side_effect=_by_service_type(
+            {"MEDICATION_REQUEST": [_order_slots(), _order_slots(skipped, "NOT_DONE")]}
+        )
+    )
+    post = respx.post(SCHED_ADMIN).mock(return_value=httpx.Response(200, json=[skipped]))
+    out = await _client().record_administration(
+        _admin_write(status="not-done", status_reason="patient refused", notes=None, dose=None)
+    )
+    sent = json.loads(post.calls.last.request.content)[0]
+    assert sent["status"] == "not-done"
+    assert sent["statusReason"] == "patient refused"
+    assert sent["notes"] == [
+        {"authorUuid": PROVIDER, "text": "Reason: patient refused"},
+        {"authorUuid": PROVIDER, "text": MAR_MARKER},
+    ]
+    assert "dose" not in sent
+    assert out.status == "not-done" and out.created is True
+
+
+@pytest.mark.parametrize(
+    ("slot_status", "order"),
+    [
+        ("STOPPED", {}),
+        ("SCHEDULED", {"dateStopped": "2026-03-02T06:00:00.000+0000"}),
+        ("SCHEDULED", {"action": "DISCONTINUE"}),
+        ("SCHEDULED", "other_slot_stopped"),
+    ],
+)
+@respx.mock
+async def test_stopped_order_refused_order_not_active(slot_status: str, order: Any) -> None:
+    _login()
+    if order == "other_slot_stopped":
+        body = _order_slots()
+        body[1]["status"] = "STOPPED"
+    else:
+        body = _order_slots(status=slot_status, **order)
+    respx.get(MED).mock(side_effect=_by_service_type({"MEDICATION_REQUEST": [body]}))
+    post = respx.post(SCHED_ADMIN).mock(return_value=httpx.Response(200, json=[]))
+    with pytest.raises(VendorRejected) as exc:
+        await _client().record_administration(_admin_write())
+    assert _refusal_code(exc) == "order_not_active"
+    assert "order_not_active" in str(exc.value)
+    assert post.call_count == 0
+
+
+@pytest.mark.parametrize("case", ["slot_not_on_order", "done_without_administration"])
+@respx.mock
+async def test_slot_not_recordable_is_slot_state_invalid(case: str) -> None:
+    _login()
+    on_order = case != "slot_not_on_order"
+    body = _order_slots(status="COMPLETED") if on_order else _order_slots()[1:]
+    respx.get(MED).mock(side_effect=_by_service_type({"MEDICATION_REQUEST": [body]}))
+    post = respx.post(SCHED_ADMIN).mock(return_value=httpx.Response(200, json=[]))
+    with pytest.raises(VendorRejected) as exc:
+        await _client().record_administration(_admin_write())
+    assert _refusal_code(exc) == "slot_state_invalid"
+    assert post.call_count == 0
+
+
+@respx.mock
+async def test_missed_slot_may_still_be_recorded() -> None:
+    _login()
+    given = _admin_rep(NEW_ADMIN, "completed", [MAR_MARKER])
+    respx.get(MED).mock(
+        side_effect=_by_service_type(
+            {
+                "MEDICATION_REQUEST": [
+                    _order_slots(status="MISSED"),
+                    _order_slots(given, "COMPLETED"),
+                ]
+            }
+        )
+    )
+    post = respx.post(SCHED_ADMIN).mock(return_value=httpx.Response(200, json=[given]))
+    out = await _client().record_administration(_admin_write())
+    assert out.created is True and post.call_count == 1
+
+
+@pytest.mark.parametrize("status", ["given", "COMPLETED", "in-progress", "", "not_done"])
+@respx.mock
+async def test_status_codes_exact(status: str) -> None:
+    with pytest.raises(ValueError):
+        await _client().record_administration(_admin_write(status=status, status_reason="x"))
+    with pytest.raises(ValueError):
+        await _client().record_adhoc_administration(_prn_write(status=status, status_reason="x"))
+    assert len(respx.calls) == 0
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"slot_uuid": None},
+        {"slot_uuid": "../x"},
+        {"provider_uuids": ()},
+        {"provider_uuids": ("../x",)},
+        {"order_uuid": ""},
+        {"patient_uuid": "a b"},
+        {"encounter_uuid": "../x"},
+        {"administered_at": datetime(2026, 3, 2, 8, 51)},
+        {"dose": Decimal("-1")},
+        {"dose": Decimal("NaN")},
+        {"dose": 1.5},
+        {"notes": "x" * 1001},
+        {"dose_units": "x" * 256},
+        {"route": ""},
+        {"client_ref": str(MAR_REF)},
+    ],
+)
+@respx.mock
+async def test_record_administration_input_checked_before_io(over: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        await _client().record_administration(_admin_write(**over))
+    assert len(respx.calls) == 0
+
+
+@respx.mock
+async def test_adhoc_retry_finds_marker_and_does_not_post() -> None:
+    _login()
+    reads = respx.get(MED).mock(
+        side_effect=_by_service_type(
+            {"AS_NEEDED_MEDICATION_REQUEST": [_fixture("medication_slots_as_needed.json")]}
+        )
+    )
+    post = respx.post(ADHOC_ADMIN).mock(return_value=httpx.Response(200, json={}))
+    out = await _client().record_adhoc_administration(_prn_write())
+    assert out == MarAdministrationOutcome(
+        administration_uuid="d1000000-0000-4000-8000-000000000009",
+        slot_uuid=PRN_SLOT,
+        created=False,
+        status="completed",
+        ref_matched=True,
+    )
+    # The as-needed dose sits on an AS_NEEDED_MEDICATION_REQUEST slot of the order.
+    assert dict(reads.calls[0].request.url.params) == {
+        "patientUuid": PATIENT_A,
+        "orderUuids": ORDER_A,
+        "serviceType": "AS_NEEDED_MEDICATION_REQUEST",
+    }
+    assert post.call_count == 0
+
+
+@respx.mock
+async def test_adhoc_first_call_posts() -> None:
+    _login()
+    earlier = _fixture("medication_slots_as_needed.json")
+    # An earlier dose of the same order by another write: not ours, so not a retry.
+    earlier[0]["medicationAdministration"]["notes"] = [{"uuid": "n", "text": "sm:other"}]
+    after = json.loads(json.dumps(earlier))
+    new_slot = json.loads(json.dumps(_fixture("medication_slots_as_needed.json")[0]))
+    new_slot["uuid"] = "c2000000-0000-4000-8000-000000000002"
+    new_slot["medicationAdministration"]["uuid"] = NEW_ADMIN
+    after.append(new_slot)
+    reads = respx.get(MED).mock(
+        side_effect=_by_service_type(
+            {
+                "AS_NEEDED_MEDICATION_REQUEST": [earlier, after],
+                "AS_NEEDED_PLACEHOLDER": [_placeholder()],
+            }
+        )
+    )
+    post = respx.post(ADHOC_ADMIN).mock(
+        return_value=httpx.Response(200, json=_fixture("administration_response.json")[0])
+    )
+    out = await _client().record_adhoc_administration(_prn_write())
+    assert out == MarAdministrationOutcome(
+        administration_uuid=NEW_ADMIN,
+        slot_uuid="c2000000-0000-4000-8000-000000000002",
+        created=True,
+        status="completed",
+        ref_matched=True,
+    )
+    assert reads.call_count == 3
+    sent = json.loads(post.calls.last.request.content)
+    assert sent == {
+        "patientUuid": PATIENT_A,
+        "orderUuid": ORDER_A,
+        "providers": [{"providerUuid": PROVIDER, "function": "Performer"}],
+        "notes": [
+            {"authorUuid": PROVIDER, "text": "fever above 38.5"},
+            {"authorUuid": PROVIDER, "text": MAR_MARKER},
+        ],
+        "status": "completed",
+        "administeredDateTime": _epoch_s(GIVEN_AT),
+        "dose": 1.0,
+        "doseUnits": "Tablet(s)",
+        "route": "Oral",
+    }
+
+
+@pytest.mark.parametrize(
+    "order",
+    [{"dateStopped": "2026-03-02T06:00:00.000+0000"}, {"action": "DISCONTINUE"}, "slot_stopped"],
+)
+@respx.mock
+async def test_adhoc_stopped_order_refused_order_not_active(order: Any) -> None:
+    _login()
+    if order == "slot_stopped":
+        placeholder = _placeholder()
+        placeholder[0]["status"] = "STOPPED"
+    else:
+        placeholder = _placeholder(**order)
+    respx.get(MED).mock(
+        side_effect=_by_service_type(
+            {"AS_NEEDED_MEDICATION_REQUEST": [[]], "AS_NEEDED_PLACEHOLDER": [placeholder]}
+        )
+    )
+    post = respx.post(ADHOC_ADMIN).mock(return_value=httpx.Response(200, json={}))
+    with pytest.raises(VendorRejected) as exc:
+        await _client().record_adhoc_administration(_prn_write())
+    assert _refusal_code(exc) == "order_not_active"
+    assert post.call_count == 0
+
+
+@respx.mock
+async def test_adhoc_earlier_dose_of_stopped_order_refuses_new_dose() -> None:
+    _login()
+    earlier = _fixture("medication_slots_as_needed.json")
+    earlier[0]["medicationAdministration"]["notes"] = []
+    earlier[0]["order"]["dateStopped"] = "2026-03-02T06:00:00.000+0000"
+    respx.get(MED).mock(
+        side_effect=_by_service_type(
+            {"AS_NEEDED_MEDICATION_REQUEST": [earlier], "AS_NEEDED_PLACEHOLDER": [[]]}
+        )
+    )
+    post = respx.post(ADHOC_ADMIN).mock(return_value=httpx.Response(200, json={}))
+    with pytest.raises(VendorRejected) as exc:
+        await _client().record_adhoc_administration(_prn_write())
+    assert _refusal_code(exc) == "order_not_active"
+    assert post.call_count == 0
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"slot_uuid": SLOT_1},
+        {"status": "not-done", "status_reason": "refused"},
+        {"status": "stopped"},
+        {"provider_uuids": ()},
+        {"visit_uuid": "../x"},
+    ],
+)
+@respx.mock
+async def test_adhoc_input_checked_before_io(over: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        await _client().record_adhoc_administration(_prn_write(**over))
+    assert len(respx.calls) == 0
+
+
+@pytest.mark.parametrize("answer", [{}, [], {"uuid": OTHER_ADMIN}])
+@respx.mock
+async def test_adhoc_read_back_missing_is_landed_rejection(answer: Any) -> None:
+    _login()
+    respx.get(MED).mock(
+        side_effect=_by_service_type(
+            {"AS_NEEDED_MEDICATION_REQUEST": [[], []], "AS_NEEDED_PLACEHOLDER": [_placeholder()]}
+        )
+    )
+    respx.post(ADHOC_ADMIN).mock(return_value=httpx.Response(200, json=answer))
+    with pytest.raises(VendorRejected) as exc:
+        await _client().record_adhoc_administration(_prn_write())
+    assert exc.value.landed is True
+
+
+@respx.mock
+async def test_adhoc_read_answering_another_service_type_is_rejected() -> None:
+    """Scheduled slots in the answer mean the type filter was not applied."""
+    _login()
+    respx.get(MED).mock(
+        side_effect=_by_service_type({"AS_NEEDED_MEDICATION_REQUEST": [_order_slots()]})
+    )
+    post = respx.post(ADHOC_ADMIN).mock(return_value=httpx.Response(200, json={}))
+    with pytest.raises(VendorRejected):
+        await _client().record_adhoc_administration(_prn_write())
+    assert post.call_count == 0
+
+
+@pytest.mark.parametrize("kind", ["scheduled", "adhoc"])
+@respx.mock
+async def test_administration_post_403_is_auth_error(kind: str) -> None:
+    _login()
+    forbidden = httpx.Response(
+        403, json={"error": {"message": "User doesn't have the following privilege"}}
+    )
+    respx.get(MED).mock(
+        side_effect=_by_service_type(
+            {
+                "MEDICATION_REQUEST": [_order_slots()],
+                "AS_NEEDED_MEDICATION_REQUEST": [[]],
+                "AS_NEEDED_PLACEHOLDER": [_placeholder()],
+            }
+        )
+    )
+    respx.post(SCHED_ADMIN).mock(return_value=forbidden)
+    respx.post(ADHOC_ADMIN).mock(return_value=forbidden)
+    with pytest.raises(AuthError):
+        if kind == "scheduled":
+            await _client().record_administration(_admin_write())
+        else:
+            await _client().record_adhoc_administration(_prn_write())
+
+
+@respx.mock
+async def test_administration_post_500_is_transient_not_retried() -> None:
+    _login()
+    respx.get(MED).mock(side_effect=_by_service_type({"MEDICATION_REQUEST": [_order_slots()]}))
+    post = respx.post(SCHED_ADMIN).mock(return_value=httpx.Response(500))
+    with pytest.raises(TransientError):
+        await _client().record_administration(_admin_write())
+    assert post.call_count == 1
+
+
+def test_administration_write_requires_keywords() -> None:
+    with pytest.raises(TypeError):
+        MarAdministrationWrite(PATIENT_A)  # type: ignore[misc]

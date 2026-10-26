@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal
+from uuid import UUID
 
 BedStatus = Literal["AVAILABLE", "OCCUPIED"]
 SlotStatus = Literal["SCHEDULED", "NOT_DONE", "COMPLETED", "STOPPED", "MISSED"]
@@ -21,6 +22,7 @@ SlotServiceType = Literal[
     "AsNeededMedicationRequest",
     "AsNeededPlaceholder",
 ]
+AdministrationStatus = Literal["completed", "not-done", "stopped"]
 
 
 @dataclass(frozen=True)
@@ -135,3 +137,45 @@ class MarScheduleOutcome:
     # False when the order was already on the chart (nothing sent).
     created: bool
     slot_uuids: tuple[str, ...]
+
+
+@dataclass(frozen=True, kw_only=True)
+class MarAdministrationWrite:
+    """One dose (or a dose not given) recorded against an active drug order.
+
+    ``slot_uuid`` names the chart slot for a scheduled dose and is ``None`` for an
+    as-needed dose. ``status_reason`` is required for ``not-done``; the record keeps it
+    only as a note. ``dose_units`` and ``route`` are concept NAMES (the record resolves
+    them by name), not uuids. ``administered_at`` is timezone-aware. The record files an
+    as-needed dose under the patient's active visit; ``visit_uuid`` is the caller's
+    reference and is not sent.
+    """
+
+    patient_uuid: str
+    visit_uuid: str
+    encounter_uuid: str | None
+    order_uuid: str
+    slot_uuid: str | None
+    provider_uuids: tuple[str, ...]
+    status: AdministrationStatus
+    status_reason: str | None
+    administered_at: datetime
+    dose: Decimal | None = None
+    dose_units: str | None = None
+    route: str | None = None
+    notes: str | None = None
+    client_ref: UUID
+
+
+@dataclass(frozen=True)
+class MarAdministrationOutcome:
+    administration_uuid: str
+    # The chart slot holding the administration (an as-needed dose gets a new one).
+    slot_uuid: str | None
+    # False when the slot already held an administration (nothing new recorded), or when
+    # an earlier write with the same client_ref was found.
+    created: bool
+    status: AdministrationStatus
+    # True when the administration carries this write's client_ref marker: our own
+    # earlier write rather than one recorded by someone else.
+    ref_matched: bool = False

@@ -1,0 +1,50 @@
+[
+  {
+    "id": 7,
+    "uuid": "c2000000-0000-4000-8000-000000000001",
+    "serviceType": "AsNeededMedicationRequest",
+    "status": "COMPLETED",
+    "startTime": 1772441460,
+    "order": {
+      "uuid": "5d1c7a2e-3b4f-4e6a-9c8d-7f1e2a3b4c5d",
+      "orderNumber": "ORD-T-1",
+      "drug": {
+        "uuid": "1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e",
+        "display": "Test Paracetamol 500 mg"
+      },
+      "action": "NEW",
+      "dateStopped": null
+    },
+    "medicationAdministration": {
+      "uuid": "d1000000-0000-4000-8000-000000000009",
+      "patientUuid": "7b6e3725-544e-4850-a807-08db11c429ce",
+      "encounterUuid": null,
+      "orderUuid": "5d1c7a2e-3b4f-4e6a-9c8d-7f1e2a3b4c5d",
+      "providers": [],
+      "notes": [
+        {
+          "uuid": "d3000000-0000-4000-8000-000000000009",
+          "author": null,
+          "recordedTime": 1772441460000,
+          "text": "fever above 38.5"
+        },
+        {
+          "uuid": "d3000000-0000-4000-8000-00000000000a",
+          "author": null,
+          "recordedTime": 1772441460000,
+          "text": "sm:9c4e2b1a-7d3f-4a5b-8c6d-1e2f3a4b5c6d"
+        }
+      ],
+      "status": "completed",
+      "statusReason": null,
+      "drug": null,
+      "dosingInstructions": null,
+      "dose": 1.0,
+      "doseUnits": null,
+      "route": null,
+      "site": null,
+      "administeredDateTime": 1772441460000
+    },
+    "notes": ""
+  }
+]

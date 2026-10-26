@@ -1,0 +1,35 @@
+[
+  {
+    "uuid": "d1000000-0000-4000-8000-000000000001",
+    "patientUuid": "7b6e3725-544e-4850-a807-08db11c429ce",
+    "encounterUuid": null,
+    "orderUuid": "5d1c7a2e-3b4f-4e6a-9c8d-7f1e2a3b4c5d",
+    "providers": [
+      {
+        "uuid": "d2000000-0000-4000-8000-000000000001",
+        "provider": {
+          "uuid": "e4f5a6b7-c8d9-4e0f-a1b2-c3d4e5f6a7b8",
+          "display": "Test Nurse"
+        },
+        "function": "Performer"
+      }
+    ],
+    "notes": [
+      {
+        "uuid": "d3000000-0000-4000-8000-000000000001",
+        "author": {"uuid": "e4f5a6b7-c8d9-4e0f-a1b2-c3d4e5f6a7b8"},
+        "recordedTime": 1772441460000,
+        "text": "sm:9c4e2b1a-7d3f-4a5b-8c6d-1e2f3a4b5c6d"
+      }
+    ],
+    "status": "completed",
+    "statusReason": null,
+    "drug": null,
+    "dosingInstructions": null,
+    "dose": 1.0,
+    "doseUnits": {"uuid": "d4000000-0000-4000-8000-000000000001", "display": "Tablet(s)"},
+    "route": {"uuid": "d4000000-0000-4000-8000-000000000002", "display": "Oral"},
+    "site": null,
+    "administeredDateTime": 1772441460000
+  }
+]
