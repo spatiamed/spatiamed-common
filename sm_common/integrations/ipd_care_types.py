@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 
 BedStatus = Literal["AVAILABLE", "OCCUPIED"]
@@ -48,3 +49,36 @@ class WardPatient:
     bed_number: str | None
     admitted_at: datetime | None
     display_name: str
+
+
+@dataclass(frozen=True)
+class VitalsWrite:
+    """One set of vitals; unset fields are not written. At least one must be set."""
+
+    pulse: int | None = None
+    bp_systolic: int | None = None
+    bp_diastolic: int | None = None
+    temp_c: Decimal | None = None
+    spo2: int | None = None
+    resp_rate: int | None = None
+    weight_kg: Decimal | None = None
+    height_cm: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class IntakeOutputWrite:
+    kind: Literal["intake", "output"]
+    # Free text, e.g. "Oral", "IV", "Urine", "Drain".
+    route: str
+    quantity_ml: int
+    # When the intake was taken or the output measured (aware UTC).
+    recorded_at: datetime
+
+
+@dataclass(frozen=True)
+class NursingWriteOutcome:
+    encounter_uuid: str
+    # Top-level obs of the write (an intake/output entry is one group obs).
+    obs_uuids: tuple[str, ...]
+    # False when an earlier write with the same client_ref was found instead.
+    created: bool

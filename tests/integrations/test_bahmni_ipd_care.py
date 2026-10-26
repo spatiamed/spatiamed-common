@@ -4,17 +4,31 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import httpx
 import pytest
 import respx
 
-from sm_common.integrations.adapters.bahmni_http import BahmniHttp
+from sm_common.integrations.adapters.bahmni_http import BahmniHttp, to_epoch_ms
 from sm_common.integrations.adapters.bahmni_ipd_care import BahmniIpdCareClient, NursingConfig
-from sm_common.integrations.exceptions import ConfigError, NotFound, TransientError
-from sm_common.integrations.ipd_care_types import WardBed, WardLayout, WardPatient
+from sm_common.integrations.exceptions import (
+    ConfigError,
+    NotFound,
+    TransientError,
+    VendorRejected,
+)
+from sm_common.integrations.ipd_care_types import (
+    IntakeOutputWrite,
+    NursingWriteOutcome,
+    VitalsWrite,
+    WardBed,
+    WardLayout,
+    WardPatient,
+)
 
 BASE = "https://bahmni.example.test"
 REST = f"{BASE}/openmrs/ws/rest/v1"
@@ -285,3 +299,448 @@ async def test_ward_patients_unknown_ward_route_404_is_not_found() -> None:
     respx.get(f"{IPD_WARDS}/{WARD}/patients").mock(return_value=httpx.Response(404))
     with pytest.raises(NotFound):
         await _client().ward_patients(WARD)
+
+
+# ─── Nursing observations ───────────────────────────────────────────────────
+
+ENCOUNTER = f"{REST}/bahmnicore/bahmniencounter"
+VISIT = f"{REST}/visit"
+CLIENT_REF = UUID("2c05f0f9-ba5c-47d4-95d3-f932678fc1a1")
+OTHER_REF = UUID("759fcee5-d301-44c9-9066-45d3e9a26fa3")
+PROVIDER = "aedd07c0-787b-47e2-ad63-3ea36266f1a1"
+WARD_LOCATION = "69f420a7-68df-4979-b6c5-ce10721eefb4"
+NURSING_ET = "d98c4111-9352-490a-a489-4719915fd5c9"
+NOTE_CONCEPT = "6a81cc24-d4f6-41ee-8ab9-bab701f32a92"
+IN_SET = "d2a8bf32-d22c-4a5c-a0fb-504a33c00db5"
+OUT_SET = "dd39d0c5-a2f6-47fc-8368-2481718a8f62"
+IO_ROUTE = "a98f12d0-f21c-4c3e-9630-711fb1ce8751"
+IO_QTY = "4a5c1c53-0e4c-4126-aad4-79a189d5d1d2"
+IO_TIME = "60ae43bc-06b3-45f7-8d54-489cba0fd079"
+OBS_1 = "a8e767b8-b016-41ff-9431-422dc7e1fa88"
+OBS_2 = "9a325bbf-25b5-4b9e-83f7-9592259bb860"
+OBS_3 = "1dd1f6ae-ee02-4b51-8e1d-4f89a1a0ab6e"
+AT = datetime(2026, 10, 20, 6, 30, tzinfo=timezone.utc)
+AT_MS = 1792477800000
+MARKER = f"sm:{CLIENT_REF}"
+IO_SET_REP = "custom:(setMembers:(uuid,display,datatype:(display)))"
+
+
+def _nursing_config(**overrides: Any) -> NursingConfig:
+    base: dict[str, Any] = {
+        "vitals_concepts": VITALS,
+        "intake_concept_set_uuid": IN_SET,
+        "output_concept_set_uuid": OUT_SET,
+        "nursing_note_concept_uuid": NOTE_CONCEPT,
+        "nursing_encounter_type_uuid": NURSING_ET,
+    }
+    base.update(overrides)
+    return NursingConfig.from_mapping(base)
+
+
+def _who(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "patient_uuid": PATIENT_A,
+        "visit_uuid": VISIT_A,
+        "provider_uuid": PROVIDER,
+        "location_uuid": WARD_LOCATION,
+        "recorded_at": AT,
+        "client_ref": CLIENT_REF,
+    }
+    base.update(overrides)
+    return base
+
+
+def _sent(route: respx.Route) -> dict[str, Any]:
+    body: dict[str, Any] = json.loads(route.calls.last.request.content)
+    return body
+
+
+def _echo(obs_uuids: list[str]) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "encounterUuid": str(CLIENT_REF),
+            "observations": [{"uuid": u, "groupMembers": []} for u in obs_uuids],
+        },
+    )
+
+
+def _io_set(members: list[tuple[str, str]]) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "setMembers": [
+                {"uuid": uuid, "display": f"member {i}", "datatype": {"display": dt}}
+                for i, (uuid, dt) in enumerate(members)
+            ]
+        },
+    )
+
+
+@respx.mock
+async def test_vitals_concept_mapping_exact() -> None:
+    _login()
+    route = respx.post(ENCOUNTER).mock(
+        return_value=httpx.Response(200, json=_fixture("nursing_encounter_response.json"))
+    )
+    out = await _client(_nursing_config()).write_vitals(
+        **_who(), vitals=VitalsWrite(pulse=88, bp_systolic=120, bp_diastolic=80)
+    )
+    assert out == NursingWriteOutcome(
+        encounter_uuid=str(CLIENT_REF), obs_uuids=(OBS_1, OBS_2, OBS_3), created=True
+    )
+    body = _sent(route)
+    # Every field lands on its own configured concept; unset fields are absent.
+    assert [(o["concept"]["uuid"], o["value"]) for o in body["observations"]] == [
+        (VITALS["pulse"], 88),
+        (VITALS["bp_systolic"], 120),
+        (VITALS["bp_diastolic"], 80),
+    ]
+    assert body["encounterUuid"] == str(CLIENT_REF)
+    assert body["patientUuid"] == PATIENT_A
+    assert body["visitUuid"] == VISIT_A
+    assert body["locationUuid"] == WARD_LOCATION
+    assert body["encounterTypeUuid"] == NURSING_ET
+    assert body["encounterDateTime"] == AT_MS
+    assert body["providers"] == [{"uuid": PROVIDER}]
+    assert route.call_count == 1
+
+    full = VitalsWrite(
+        pulse=72,
+        bp_systolic=130,
+        bp_diastolic=85,
+        temp_c=Decimal("37.2"),
+        spo2=97,
+        resp_rate=16,
+        weight_kg=Decimal("68.5"),
+        height_cm=Decimal("172"),
+    )
+    route.mock(return_value=_echo([OBS_1] * 8))
+    await _client(_nursing_config()).write_vitals(**_who(), vitals=full)
+    got = {o["concept"]["uuid"]: o["value"] for o in _sent(route)["observations"]}
+    assert got == {
+        VITALS["pulse"]: 72,
+        VITALS["bp_systolic"]: 130,
+        VITALS["bp_diastolic"]: 85,
+        VITALS["temp_c"]: 37.2,
+        VITALS["spo2"]: 97,
+        VITALS["resp_rate"]: 16,
+        VITALS["weight_kg"]: 68.5,
+        VITALS["height_cm"]: 172,
+    }
+
+
+@pytest.mark.parametrize(
+    "vitals",
+    [
+        VitalsWrite(pulse=19),
+        VitalsWrite(pulse=251),
+        VitalsWrite(bp_systolic=39),
+        VitalsWrite(bp_systolic=301),
+        VitalsWrite(bp_diastolic=19),
+        VitalsWrite(bp_diastolic=201),
+        VitalsWrite(temp_c=Decimal("29.9")),
+        VitalsWrite(temp_c=Decimal("45.1")),
+        VitalsWrite(spo2=49),
+        VitalsWrite(spo2=101),
+        VitalsWrite(resp_rate=3),
+        VitalsWrite(resp_rate=81),
+        VitalsWrite(weight_kg=Decimal("0.2")),
+        VitalsWrite(weight_kg=Decimal("400.1")),
+        VitalsWrite(height_cm=Decimal("19.9")),
+        VitalsWrite(height_cm=Decimal("250.5")),
+        VitalsWrite(temp_c=Decimal("NaN")),
+        VitalsWrite(pulse=True),
+        VitalsWrite(),
+    ],
+)
+async def test_vitals_out_of_range_is_value_error_before_io(vitals: VitalsWrite) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        with pytest.raises(ValueError):
+            await _client(_nursing_config()).write_vitals(**_who(), vitals=vitals)
+        assert not mock.calls
+
+
+@respx.mock
+async def test_vitals_range_bounds_inclusive() -> None:
+    _login()
+    route = respx.post(ENCOUNTER).mock(return_value=_echo([OBS_1] * 8))
+    for vitals in (
+        VitalsWrite(
+            pulse=20,
+            bp_systolic=40,
+            bp_diastolic=20,
+            temp_c=Decimal("30.0"),
+            spo2=50,
+            resp_rate=4,
+            weight_kg=Decimal("0.3"),
+            height_cm=Decimal("20"),
+        ),
+        VitalsWrite(
+            pulse=250,
+            bp_systolic=300,
+            bp_diastolic=200,
+            temp_c=Decimal("45.0"),
+            spo2=100,
+            resp_rate=80,
+            weight_kg=Decimal("400"),
+            height_cm=Decimal("250"),
+        ),
+    ):
+        await _client(_nursing_config()).write_vitals(**_who(), vitals=vitals)
+    assert route.call_count == 2
+
+
+@pytest.mark.parametrize(("systolic", "diastolic"), [(120, 120), (100, 140)])
+async def test_diastolic_not_below_systolic_refused(systolic: int, diastolic: int) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        with pytest.raises(ValueError, match="diastolic"):
+            await _client(_nursing_config()).write_vitals(
+                **_who(), vitals=VitalsWrite(bp_systolic=systolic, bp_diastolic=diastolic)
+            )
+        assert not mock.calls
+
+
+async def test_vitals_config_and_inputs_checked_before_io() -> None:
+    missing_pulse = {k: v for k, v in VITALS.items() if k != "pulse"}
+    with respx.mock(assert_all_called=False) as mock:
+        with pytest.raises(ConfigError, match="pulse"):
+            await _client(_nursing_config(vitals_concepts=missing_pulse)).write_vitals(
+                **_who(), vitals=VitalsWrite(pulse=80)
+            )
+        with pytest.raises(ConfigError, match="nursing_encounter_type_uuid"):
+            await _client(_nursing_config(nursing_encounter_type_uuid="")).write_vitals(
+                **_who(), vitals=VitalsWrite(pulse=80)
+            )
+        with pytest.raises(ValueError):
+            await _client(_nursing_config()).write_vitals(
+                **_who(recorded_at=datetime(2026, 10, 20, 6, 30)), vitals=VitalsWrite(pulse=80)
+            )
+        with pytest.raises(ValueError):
+            await _client(_nursing_config()).write_vitals(
+                **_who(visit_uuid="../session"), vitals=VitalsWrite(pulse=80)
+            )
+        assert not mock.calls
+
+
+@respx.mock
+async def test_first_obs_carries_marker_comment() -> None:
+    _login()
+    route = respx.post(ENCOUNTER).mock(return_value=_echo([OBS_1, OBS_2]))
+    await _client(_nursing_config()).write_vitals(
+        **_who(), vitals=VitalsWrite(spo2=96, resp_rate=18)
+    )
+    obs = _sent(route)["observations"]
+    assert obs[0]["comment"] == MARKER
+    assert all("comment" not in o for o in obs[1:])
+
+    route.mock(return_value=_echo([OBS_1]))
+    await _client(_nursing_config()).write_nursing_note(**_who(), text="Slept well overnight.")
+    obs = _sent(route)["observations"]
+    assert obs == [
+        {"concept": {"uuid": NOTE_CONCEPT}, "value": "Slept well overnight.", "comment": MARKER}
+    ]
+
+
+@respx.mock
+async def test_intake_output_group_members_resolved_from_set() -> None:
+    _login()
+    in_set = respx.get(f"{CONCEPT}/{IN_SET}").mock(
+        return_value=_io_set([(IO_TIME, "Datetime"), (IO_QTY, "Numeric"), (IO_ROUTE, "Text")])
+    )
+    route = respx.post(ENCOUNTER).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "encounterUuid": str(CLIENT_REF),
+                "observations": [
+                    {
+                        "uuid": OBS_1,
+                        "groupMembers": [{"uuid": OBS_2}, {"uuid": OBS_3}, {"uuid": OTHER_REF.hex}],
+                    }
+                ],
+            },
+        )
+    )
+    taken = datetime(2026, 10, 20, 5, 0, tzinfo=timezone.utc)
+    client = _client(_nursing_config())
+    out = await client.write_intake_output(
+        **_who(),
+        entry=IntakeOutputWrite(kind="intake", route="Oral", quantity_ml=250, recorded_at=taken),
+    )
+    assert out == NursingWriteOutcome(
+        encounter_uuid=str(CLIENT_REF), obs_uuids=(OBS_1,), created=True
+    )
+    assert in_set.calls.last.request.url.params["v"] == IO_SET_REP
+    (group,) = _sent(route)["observations"]
+    assert group["concept"] == {"uuid": IN_SET}
+    assert group["comment"] == MARKER
+    members = {m["concept"]["uuid"]: m["value"] for m in group["groupMembers"]}
+    assert members == {IO_ROUTE: "Oral", IO_QTY: 250, IO_TIME: to_epoch_ms(taken)}
+    assert all("comment" not in m for m in group["groupMembers"])
+
+    # The set is read once per client; output reads its own set.
+    await client.write_intake_output(
+        **_who(),
+        entry=IntakeOutputWrite(kind="intake", route="IV", quantity_ml=500, recorded_at=taken),
+    )
+    assert in_set.call_count == 1
+    out_set = respx.get(f"{CONCEPT}/{OUT_SET}").mock(
+        return_value=_io_set([(IO_ROUTE, "Text"), (IO_QTY, "Numeric"), (IO_TIME, "Datetime")])
+    )
+    await client.write_intake_output(
+        **_who(),
+        entry=IntakeOutputWrite(kind="output", route="Urine", quantity_ml=0, recorded_at=taken),
+    )
+    assert out_set.call_count == 1
+    assert _sent(route)["observations"][0]["concept"] == {"uuid": OUT_SET}
+
+
+@pytest.mark.parametrize(
+    "members",
+    [
+        [(IO_ROUTE, "Text"), (IO_QTY, "Numeric")],
+        [(IO_ROUTE, "Text"), (IO_TIME, "Datetime")],
+        [(IO_QTY, "Numeric"), (IO_TIME, "Datetime")],
+        [(IO_ROUTE, "Text"), (IO_QTY, "Numeric"), (IO_TIME, "Datetime"), (OBS_1, "Numeric")],
+        [],
+    ],
+)
+@respx.mock
+async def test_io_set_missing_members_is_config_error(members: list[tuple[str, str]]) -> None:
+    _login()
+    respx.get(f"{CONCEPT}/{IN_SET}").mock(return_value=_io_set(members))
+    post = respx.post(ENCOUNTER).mock(return_value=_echo([OBS_1]))
+    entry = IntakeOutputWrite(kind="intake", route="Oral", quantity_ml=100, recorded_at=AT)
+    with pytest.raises(ConfigError, match="io_concepts_incomplete"):
+        await _client(_nursing_config()).write_intake_output(**_who(), entry=entry)
+    assert not post.called
+
+
+@respx.mock
+async def test_io_set_unknown_is_config_error() -> None:
+    _login()
+    respx.get(f"{CONCEPT}/{IN_SET}").mock(return_value=httpx.Response(404))
+    post = respx.post(ENCOUNTER).mock(return_value=_echo([OBS_1]))
+    entry = IntakeOutputWrite(kind="intake", route="Oral", quantity_ml=100, recorded_at=AT)
+    with pytest.raises(ConfigError, match="io_concepts_incomplete"):
+        await _client(_nursing_config()).write_intake_output(**_who(), entry=entry)
+    assert not post.called
+
+
+@pytest.mark.parametrize(
+    ("entry", "config", "error"),
+    [
+        (IntakeOutputWrite("intake", "Oral", -1, AT), {}, ValueError),
+        (IntakeOutputWrite("intake", "Oral", 10001, AT), {}, ValueError),
+        (IntakeOutputWrite("intake", "  ", 100, AT), {}, ValueError),
+        (IntakeOutputWrite("intake", "x" * 256, 100, AT), {}, ValueError),
+        (IntakeOutputWrite("intake", "Oral", 100, datetime(2026, 10, 20)), {}, ValueError),
+        (IntakeOutputWrite("drain", "Oral", 100, AT), {}, ValueError),  # type: ignore[arg-type]
+        (
+            IntakeOutputWrite("intake", "Oral", 100, AT),
+            {"intake_concept_set_uuid": ""},
+            ConfigError,
+        ),
+        (
+            IntakeOutputWrite("output", "Urine", 100, AT),
+            {"output_concept_set_uuid": ""},
+            ConfigError,
+        ),
+        (
+            IntakeOutputWrite("intake", "Oral", 100, AT),
+            {"nursing_encounter_type_uuid": ""},
+            ConfigError,
+        ),
+    ],
+)
+async def test_intake_output_checked_before_io(
+    entry: IntakeOutputWrite, config: dict[str, Any], error: type[Exception]
+) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        with pytest.raises(error):
+            await _client(_nursing_config(**config)).write_intake_output(**_who(), entry=entry)
+        assert not mock.calls
+
+
+@respx.mock
+async def test_nursing_note_length_limits() -> None:
+    _login()
+    route = respx.post(ENCOUNTER).mock(return_value=_echo([OBS_1]))
+    client = _client(_nursing_config())
+    for text in ("x", "y" * 4000):
+        await client.write_nursing_note(**_who(), text=text)
+        assert _sent(route)["observations"][0]["value"] == text
+    assert route.call_count == 2
+
+    with respx.mock(assert_all_called=False) as mock:
+        for bad in ("", "   \n", "z" * 4001):
+            with pytest.raises(ValueError):
+                await client.write_nursing_note(**_who(), text=bad)
+        with pytest.raises(ConfigError, match="nursing_note_concept_uuid"):
+            await _client(_nursing_config(nursing_note_concept_uuid="")).write_nursing_note(
+                **_who(), text="ok"
+            )
+        assert not mock.calls
+
+
+@respx.mock
+async def test_find_write_by_ref_hit_and_miss() -> None:
+    _login()
+    route = respx.get(f"{VISIT}/{VISIT_A}").mock(
+        return_value=httpx.Response(200, json=_fixture("visit_obs_with_marker.json"))
+    )
+    client = _client(_nursing_config())
+    hit = await client.find_write_by_ref(VISIT_A, CLIENT_REF)
+    assert hit == NursingWriteOutcome(
+        encounter_uuid=str(CLIENT_REF), obs_uuids=(OBS_1, OBS_2, OBS_3), created=False
+    )
+    assert route.calls.last.request.url.params["v"] == (
+        "custom:(encounters:(uuid,obs:(uuid,comment)))"
+    )
+    other = await client.find_write_by_ref(VISIT_A, OTHER_REF)
+    assert other is not None and other.encounter_uuid == "ac993197-bc51-4e18-8739-68ba69dead01"
+
+    miss = UUID("85874928-01ba-4c8a-a397-8ff86d56ecc3")
+    assert await client.find_write_by_ref(VISIT_A, miss) is None
+
+    respx.get(f"{VISIT}/{VISIT_B}").mock(return_value=httpx.Response(404))
+    with pytest.raises(NotFound):
+        await client.find_write_by_ref(VISIT_B, CLIENT_REF)
+
+    with respx.mock(assert_all_called=False) as mock:
+        with pytest.raises(ValueError):
+            await client.find_write_by_ref("../session", CLIENT_REF)
+        assert not mock.calls
+
+
+@respx.mock
+async def test_write_500_is_transient_not_retried() -> None:
+    _login()
+    route = respx.post(ENCOUNTER).mock(return_value=httpx.Response(500, text="<html>error</html>"))
+    visit = respx.get(f"{VISIT}/{VISIT_A}").mock(return_value=httpx.Response(200, json={}))
+    with pytest.raises(TransientError):
+        await _client(_nursing_config()).write_vitals(**_who(), vitals=VitalsWrite(pulse=80))
+    assert route.call_count == 1
+    assert not visit.called
+
+
+@respx.mock
+async def test_write_response_naming_another_encounter_is_landed_rejection() -> None:
+    _login()
+    respx.post(ENCOUNTER).mock(
+        return_value=httpx.Response(
+            200, json={"encounterUuid": str(OTHER_REF), "observations": [{"uuid": OBS_1}]}
+        )
+    )
+    with pytest.raises(VendorRejected) as info:
+        await _client(_nursing_config()).write_vitals(**_who(), vitals=VitalsWrite(pulse=80))
+    assert info.value.landed is True
+
+
+@respx.mock
+async def test_write_route_404_is_not_found() -> None:
+    _login()
+    respx.post(ENCOUNTER).mock(return_value=httpx.Response(404))
+    with pytest.raises(NotFound):
+        await _client(_nursing_config()).write_vitals(**_who(), vitals=VitalsWrite(pulse=80))
