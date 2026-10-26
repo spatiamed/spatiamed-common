@@ -112,16 +112,16 @@ class MarScheduleWrite:
     """Put one active drug order on the medication chart.
 
     Every instant is timezone-aware. ``first_day_slots`` are the doses left on the
-    first day, ``day_wise_slots`` the doses of the first full day (the record repeats
-    them every 24 hours until the order's quantity is used up) and
-    ``remaining_day_slots`` the doses of the last day. An as-needed order is charted
-    with no slots.
+    first day, ``day_wise_slots`` the dose instants of the first full day (the record
+    repeats them every 24 hours) and ``remaining_day_slots`` the doses of the last day.
+    The record creates ``ceil(quantity / dose)`` slots in total and drops any time past
+    that count. An as-needed order is charted with no slots. The record charts against
+    the patient's active visit; no visit is named here.
     """
 
     patient_uuid: str
     order_uuid: str
     provider_uuid: str
-    visit_uuid: str
     first_day_slots: tuple[datetime, ...]
     day_wise_slots: tuple[datetime, ...]
     remaining_day_slots: tuple[datetime, ...] = ()

@@ -37,22 +37,33 @@ Nursing observations
     (``_obs_time``). Values are checked against data-entry limits before any I/O.
 
 Medication chart
-    openmrs-module-ipd keeps one schedule per visit with one slot per due dose.
-    Its wire instants are epoch SECONDS (UTC): the ``startTime``/``endTime`` read
-    params, the slot arrays sent to create a schedule and each slot's ``startTime``
-    in an answer. ``_slot_time`` / ``_slot_instant`` are the only places that know
-    this. A slot's administration carries ``administeredDateTime`` as a plain date
-    (epoch ms or an ISO string), parsed like every other record date.
+    openmrs-module-ipd (1.1.1) keeps one schedule per visit with one slot per due
+    dose. Its wire instants are epoch SECONDS (UTC), not ms: the module converts with
+    ``Instant.ofEpochSecond`` / ``toEpochSecond`` (``DateTimeUtil``) for the
+    ``startTime``/``endTime`` read params, the slot arrays sent to create a schedule
+    and each slot's ``startTime`` in an answer. ``_slot_time`` / ``_slot_instant`` are
+    the only places that know this. A slot's administration carries
+    ``administeredDateTime`` as a java ``Date`` (epoch ms), parsed like every other
+    record date and refused when it does not parse or falls before 2000 (a seconds
+    value would read as 1970).
     ``GET ipd/schedule/type/medication?patientUuid&startTime&endTime[&visitUuid]``
     answers schedules with their ``slots``; ``?patientUuid&orderUuids&serviceType``
-    answers a flat slot list for one order. ``POST ipd/schedule/type/medication``
-    charts an order; its answer names no slots, so they are read back by order.
-    The client reads the order's slots first and sends nothing when the order is on
-    the chart already: the module refuses a second scheduled chart only with a 400
-    and does not refuse a second as-needed placeholder at all. ``serviceType`` is
-    sent as the module's enum name (``MEDICATION_REQUEST``, ``AS_NEEDED_PLACEHOLDER``)
-    and answered as its concept name (``MedicationRequest``). An as-needed order is
-    charted as a placeholder with no slots (the module charts nothing for
+    answers a flat slot list for one order. ``serviceType`` there binds to the
+    module's enum by name, and when it is absent the module reads scheduled slots
+    only, so the read for an as-needed order must name ``AS_NEEDED_PLACEHOLDER``; a
+    slot of another type in the answer is refused (the filter was not applied).
+    ``POST ipd/schedule/type/medication`` charts an order against the patient's
+    active visit; its answer names no slots, so they are read back by order, and an
+    empty read-back is refused (nothing was charted). The client reads the order's
+    slots first and sends nothing when the order is on the chart already: the module
+    refuses a second scheduled chart only with a 400 and does not refuse a second
+    as-needed placeholder at all. ``serviceType`` is sent as the enum name
+    (``MEDICATION_REQUEST``, ``AS_NEEDED_PLACEHOLDER``) and answered as its concept
+    name (``MedicationRequest``). ``medicationFrequency`` is
+    ``FIXED_SCHEDULE_FREQUENCY``, the mode that charts the three slot arrays as
+    given; ``slotStartTime`` is read only in the other mode and is sent as the
+    earliest slot for reference. An as-needed order is charted as one placeholder
+    slot that starts at the order's start (the module charts nothing for
     ``AS_NEEDED_MEDICATION_REQUEST``). Reading needs the ``Get Medication Tasks`` and
     ``Get Medication Administration`` privileges and charting ``Edit Medication
     Tasks``; the module answers 403 without them (``AuthError``).
@@ -63,7 +74,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, cast, get_args
 from uuid import UUID
@@ -116,6 +127,13 @@ _SCHEDULE_SERVICE_TYPE = {
     "MedicationRequest": "MEDICATION_REQUEST",
     "AsNeededMedicationRequest": "AS_NEEDED_PLACEHOLDER",
 }
+# The concept name the module answers for each enum name it is sent.
+_SERVICE_TYPE_ANSWER = {
+    "MEDICATION_REQUEST": "MedicationRequest",
+    "AS_NEEDED_PLACEHOLDER": "AsNeededPlaceholder",
+}
+# Any given-at time before this is a unit slip (seconds read as ms), not a real dose.
+_EARLIEST_ADMINISTRATION = datetime(2000, 1, 1, tzinfo=timezone.utc)
 _SLOT_STATUSES = frozenset(get_args(SlotStatus))
 _SLOT_SERVICE_TYPES = frozenset(get_args(SlotServiceType))
 
@@ -240,6 +258,20 @@ def _slot_instant(raw: Any) -> datetime:
         ) from exc
 
 
+def _administered_at(slot_uuid: str, admin: Mapping[str, Any]) -> datetime | None:
+    """A slot administration's given-at time: a java date (epoch ms), not a slot instant."""
+    raw = admin.get("administeredDateTime")
+    if raw is None:
+        return None
+    at = when(raw)
+    if at is None or at < _EARLIEST_ADMINISTRATION:
+        raise VendorRejected(
+            f"bahmni: medication slot {slot_uuid} administration time was not a plausible "
+            f"date: {raw!r}"
+        )
+    return at
+
+
 def _mar_slot(raw: Any) -> MarSlot:
     if not isinstance(raw, dict):
         raise VendorRejected("bahmni: medication slot was not an object")
@@ -271,8 +303,7 @@ def _mar_slot(raw: Any) -> MarSlot:
         start_at=_slot_instant(raw.get("startTime")),
         status=cast(SlotStatus, status),
         administration_uuid=_optional_text(admin.get("uuid")) if admin else None,
-        # A java date (epoch ms or ISO), not a slot instant.
-        administered_at=when(admin.get("administeredDateTime")) if admin else None,
+        administered_at=_administered_at(slot_uuid, admin) if admin else None,
         notes=_optional_text(raw.get("notes")),
     )
 
@@ -780,7 +811,7 @@ class BahmniIpdCareClient:
         """
         if not isinstance(w, MarScheduleWrite):
             raise ValueError("bahmni: w must be a MarScheduleWrite")
-        for name in ("patient_uuid", "order_uuid", "provider_uuid", "visit_uuid"):
+        for name in ("patient_uuid", "order_uuid", "provider_uuid"):
             _check_uuid(name, getattr(w, name))
         wire_type = _SCHEDULE_SERVICE_TYPE.get(w.service_type)
         if wire_type is None:
@@ -823,6 +854,13 @@ class BahmniIpdCareClient:
         if resp.status_code == 404:
             raise NotFound("bahmni: medication schedule route not found (HTTP 404)")
         created = await self._order_slots(w.patient_uuid, w.order_uuid, wire_type)
+        if not created:
+            # The create was accepted but charted nothing: a scheduled order gets
+            # ceil(quantity / dose) slots, so a zero or sub-dose quantity charts none.
+            raise VendorRejected(
+                f"bahmni: medication schedule for order {w.order_uuid} charted no slots "
+                "(check the order's quantity and dose)"
+            )
         return MarScheduleOutcome(
             order_uuid=w.order_uuid,
             created=True,
@@ -839,6 +877,15 @@ class BahmniIpdCareClient:
         if any(s.order_uuid != order_uuid for s in slots):
             raise VendorRejected(
                 f"bahmni: medication slot read for order {order_uuid} named another order"
+            )
+        # The module filters by service type (scheduled only when none is named); a
+        # slot of another type means the filter was not applied, so an empty answer
+        # for this type would prove nothing either.
+        expected = _SERVICE_TYPE_ANSWER[wire_type]
+        if any(s.service_type != expected for s in slots):
+            raise VendorRejected(
+                f"bahmni: medication slot read for order {order_uuid} answered a service "
+                f"type other than {expected}"
             )
         return sorted(slots, key=lambda s: (s.start_at, s.slot_uuid))
 
