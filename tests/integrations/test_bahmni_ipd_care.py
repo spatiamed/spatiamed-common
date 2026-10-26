@@ -1597,6 +1597,34 @@ async def test_read_back_slot_without_administration_is_landed_rejection() -> No
     assert exc.value.landed is True
 
 
+@pytest.mark.parametrize("kind", ["scheduled", "adhoc"])
+@respx.mock
+async def test_unreadable_read_back_after_post_is_landed_rejection(kind: str) -> None:
+    """Once the POST is accepted, any refusal reading the result says it may have landed."""
+    _login()
+    bad = _admin_rep(NEW_ADMIN, "on-hold", [MAR_MARKER])
+    after = _fixture("medication_slots_as_needed.json")
+    after[0]["medicationAdministration"] = bad
+    respx.get(MED).mock(
+        side_effect=_by_service_type(
+            {
+                "MEDICATION_REQUEST": [_order_slots(), _order_slots(bad, "COMPLETED")],
+                "AS_NEEDED_MEDICATION_REQUEST": [[], after],
+                "AS_NEEDED_PLACEHOLDER": [_placeholder()],
+            }
+        )
+    )
+    answer = _fixture("administration_response.json")
+    respx.post(SCHED_ADMIN).mock(return_value=httpx.Response(200, json=answer))
+    respx.post(ADHOC_ADMIN).mock(return_value=httpx.Response(200, json=answer[0]))
+    with pytest.raises(VendorRejected) as exc:
+        if kind == "scheduled":
+            await _client().record_administration(_admin_write())
+        else:
+            await _client().record_adhoc_administration(_prn_write())
+    assert exc.value.landed is True
+
+
 @pytest.mark.parametrize("reason", [None, "", "   "])
 @respx.mock
 async def test_not_done_without_reason_is_value_error(reason: str | None) -> None:

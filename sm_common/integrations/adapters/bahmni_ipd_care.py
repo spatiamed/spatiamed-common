@@ -473,6 +473,15 @@ def _refusal(code: str, message: str) -> VendorRejected:
     return exc
 
 
+def _landed(exc: VendorRejected) -> VendorRejected:
+    """A refusal raised after the record accepted the write: the dose may be saved."""
+    if exc.landed:
+        return exc
+    out = VendorRejected(*exc.args, landed=True)
+    out.code = exc.code
+    return out
+
+
 def _order_stopped(raw_slot: Mapping[str, Any]) -> bool:
     """Positive evidence in one slot answer that its order is stopped."""
     if raw_slot.get("status") == "STOPPED":
@@ -1080,6 +1089,17 @@ class BahmniIpdCareClient:
             raise VendorRejected(
                 "bahmni: scheduled administration answer named no administration", landed=True
             )
+        try:
+            outcome = await self._scheduled_read_back(w, slot_uuid, answered, marker)
+        except VendorRejected as exc:
+            raise _landed(exc) from exc
+        # Our note on it means this write saved it; without it the slot was filled by
+        # someone else between the read and the POST and the module answered theirs.
+        return replace(outcome, created=outcome.ref_matched)
+
+    async def _scheduled_read_back(
+        self, w: MarAdministrationWrite, slot_uuid: str, answered: str, marker: str
+    ) -> MarAdministrationOutcome:
         after = await self._order_slot_rows(w.patient_uuid, w.order_uuid, "MEDICATION_REQUEST")
         held = next(
             (r.get("medicationAdministration") for s, r in after if s.slot_uuid == slot_uuid), None
@@ -1087,13 +1107,9 @@ class BahmniIpdCareClient:
         if not isinstance(held, dict) or held.get("uuid") != answered:
             raise VendorRejected(
                 f"bahmni: slot {slot_uuid} does not hold the administration {answered} "
-                "answered for it",
-                landed=True,
+                "answered for it"
             )
-        outcome = _outcome(slot_uuid, held, marker, created=False)
-        # Our note on it means this write saved it; without it the slot was filled by
-        # someone else between the read and the POST and the module answered theirs.
-        return replace(outcome, created=outcome.ref_matched)
+        return _outcome(slot_uuid, held, marker, created=False)
 
     async def record_adhoc_administration(
         self, w: MarAdministrationWrite
@@ -1133,6 +1149,14 @@ class BahmniIpdCareClient:
             raise VendorRejected(
                 "bahmni: adhoc administration answer named no administration", landed=True
             )
+        try:
+            return await self._adhoc_read_back(w, answered, marker)
+        except VendorRejected as exc:
+            raise _landed(exc) from exc
+
+    async def _adhoc_read_back(
+        self, w: MarAdministrationWrite, answered: str, marker: str
+    ) -> MarAdministrationOutcome:
         after = await self._order_slot_rows(
             w.patient_uuid, w.order_uuid, "AS_NEEDED_MEDICATION_REQUEST"
         )
@@ -1142,8 +1166,7 @@ class BahmniIpdCareClient:
                 return _outcome(slot.slot_uuid, admin, marker, created=True)
         raise VendorRejected(
             f"bahmni: no as-needed dose slot of order {w.order_uuid} holds the administration "
-            f"{answered}",
-            landed=True,
+            f"{answered}"
         )
 
     async def _order_slots(
