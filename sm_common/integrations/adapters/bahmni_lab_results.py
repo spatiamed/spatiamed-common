@@ -25,10 +25,19 @@ Bahmni links each obs to its order from that field, and its reader finds a resul
 the top-level obs's order and then descends by concept.
 
 Write guard: every write first reads ``labOrderResults`` for its visit and refuses
-(``ConflictError`` with code ``record_result_newer``, nothing posted) when an order it
-targets already holds a result at or after the new result time. A newer result in
-the record is never overwritten; an amendment voids the old result group
-(``void_lab_result``) and then writes afresh.
+(``LabResultConflictError``, a ``ConflictError``; nothing posted) when an order it targets
+already holds a result at or after the new result time. A newer result in the record
+is never overwritten; an amendment voids the old result group (``void_lab_result``)
+and then writes afresh.
+
+A write that landed but was never acknowledged (a timeout, a 5xx after commit, a
+worker stopping between the POST and its bookkeeping) shows up on the retry's
+pre-read as this write's own result: same order and test, same value, and a result
+time within one second (the record may keep whole seconds). Such a retry is never
+posted again. It raises ``LabResultConflictError`` with code
+``record_result_already_written`` and ``landed=True``; when the caller named its
+encounter (``encounter_uuid``), the client instead reads that encounter back and
+returns its result groups with ``recovered=True``.
 
 Void: ``DELETE obs/<uuid>?reason=`` voids (never purges) an obs; voiding a group obs
 voids its members with it.
@@ -44,7 +53,7 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 from urllib.parse import urlencode
@@ -77,6 +86,29 @@ _TEST_DEFINITION_REP = "custom:(uuid,datatype:(name),units,answers:(uuid,display
 # OpenMRS uuids are 36 characters, but older installs carry other shapes; this keeps
 # anything that could escape a path segment or a query value out.
 _UUID_SHAPE = re.compile(r"[A-Za-z0-9-]{1,38}")
+# OpenMRS may store obs times to the whole second; times this close are one instant.
+_SAME_INSTANT = timedelta(seconds=1)
+
+RECORD_RESULT_NEWER = "record_result_newer"
+RECORD_RESULT_ALREADY_WRITTEN = "record_result_already_written"
+LAB_ORDER_NOT_IN_VISIT = "lab_order_not_in_visit"
+
+
+class LabResultConflictError(ConflictError):
+    """The record already answers an order this write targets; nothing was posted.
+
+    ``code`` is ``record_result_newer`` when another result is at or after ours (or
+    has no time), and ``record_result_already_written`` when every target order
+    already holds exactly this write's results, i.e. an earlier attempt landed.
+    ``rows`` are the record's rows behind the refusal (order, test, value, value
+    uuid, result time). ``already_written`` (and ``landed``) mark the second case.
+    """
+
+    def __init__(self, code: str, rows: Sequence[LabResultRow], *, already_written: bool) -> None:
+        super().__init__(code, landed=already_written)
+        self.code = code
+        self.rows: tuple[LabResultRow, ...] = tuple(rows)
+        self.already_written = already_written
 
 
 @dataclass(frozen=True)
@@ -265,50 +297,107 @@ def _check_result(r: Any) -> None:
         raise ValueError("bahmni: notes must be a string")
 
 
-def _coded(exc: ConflictError | NotFound, code: str) -> ConflictError | NotFound:
-    """Tag a refusal with a stable machine-readable code (the message is the code)."""
-    exc.code = code
-    return exc
+def _same_instant(a: datetime, b: datetime) -> bool:
+    return abs(a - b) < _SAME_INSTANT
 
 
-def _check_against_record(results: Sequence[LabResultWrite], rows: Sequence[LabResultRow]) -> None:
-    """Refuse a write the record already answers at or after its result time.
+def _same_value(r: LabResultWrite, row: LabResultRow) -> bool:
+    if r.value_kind == "coded":
+        return row.result_uuid is not None and row.result_uuid == r.value
+    if r.value_kind == "numeric":
+        recorded = _decimal(row.result)
+        return recorded is not None and recorded == r.value
+    return (
+        row.result is not None
+        and isinstance(r.value, str)
+        and (row.result.strip() == r.value.strip())
+    )
 
-    Rows are matched on the order uuid only: for a panel order, every member row
-    counts, because a second result group for one order is what the reader cannot
-    tell apart. A resulted row without a result time cannot be shown to be older, so
-    it refuses too. An order absent from the visit's rows is ``NotFound``.
+
+def _is_own(r: LabResultWrite, row: LabResultRow) -> bool:
+    """Whether ``row`` is ``r`` as the record keeps it (same test, value and instant)."""
+    return (
+        row.status == "resulted"
+        and row.order_uuid == r.order_uuid
+        and row.test_uuid == r.test_concept_uuid
+        and row.result_at is not None
+        and _same_instant(row.result_at, r.result_at)
+        and _same_value(r, row)
+    )
+
+
+def _check_against_record(
+    results: Sequence[LabResultWrite], rows: Sequence[LabResultRow]
+) -> tuple[LabResultRow, ...]:
+    """Refuse a write the record already answers; return this write's own rows.
+
+    Rows are matched on the order uuid: for a panel order, every member row counts,
+    because a second result group for one order is what the reader cannot tell
+    apart. A resulted row blocks when its time is at or after a new result time of
+    its order (within the same second counts: the record may keep whole seconds), or
+    missing (it cannot be shown to be older), unless it is this write's own result
+    (``_is_own``).
+
+    Returns ``()`` when the write may go ahead, and this write's own rows when every
+    written result is already in the record and nothing else blocks (an earlier
+    attempt landed). Raises ``LabResultConflictError`` (``record_result_newer``) carrying
+    the blocking and own rows otherwise, including when only some orders show this
+    write's results: one POST lands whole or not at all, so that record was not made
+    by this write. An order absent from the visit's rows is ``NotFound``.
     """
-    by_order: dict[str, list[LabResultRow]] = {}
+    by_order: dict[str, list[LabResultWrite]] = {}
+    for r in results:
+        by_order.setdefault(r.order_uuid, []).append(r)
+    present = {row.order_uuid for row in rows}
+    for order in by_order:
+        if order not in present:
+            exc = NotFound(LAB_ORDER_NOT_IN_VISIT)
+            exc.code = LAB_ORDER_NOT_IN_VISIT
+            raise exc
+    own: list[LabResultRow] = []
+    against: list[LabResultRow] = []
     for row in rows:
-        by_order.setdefault(row.order_uuid, []).append(row)
-    for r in results:
-        if r.order_uuid not in by_order:
-            raise _coded(NotFound("lab_order_not_in_visit"), "lab_order_not_in_visit")
-    for r in results:
-        new_at = r.result_at
-        for row in by_order[r.order_uuid]:
-            if row.status != "resulted":
-                continue
-            if row.result_at is None or row.result_at >= new_at:
-                raise _coded(ConflictError("record_result_newer"), "record_result_newer")
+        writes = by_order.get(row.order_uuid)
+        if not writes or row.status != "resulted":
+            continue
+        if any(_is_own(r, row) for r in writes):
+            own.append(row)
+            against.append(row)
+        elif row.result_at is None or any(
+            row.result_at > r.result_at - _SAME_INSTANT for r in writes
+        ):
+            against.append(row)
+    if not against:
+        return ()
+    if len(own) == len(against) and all(any(_is_own(r, row) for row in own) for r in results):
+        return tuple(own)
+    raise LabResultConflictError(RECORD_RESULT_NEWER, against, already_written=False)
 
 
 def _top_level_groups(
-    body: Any, wanted: Mapping[str, str]
+    body: Any, wanted: Mapping[str, tuple[str, datetime]], *, named: str | None = None
 ) -> tuple[str, dict[str, tuple[str, ...]]]:
     """(encounter uuid, unvoided top-level group obs uuids per written order).
 
     ``wanted`` maps each written order to its top-level concept (the panel concept
-    for a panel order, else the test concept). Session merging can put other orders'
-    groups, and voided groups, in the same encounter; those are skipped. Any failure
-    here happens after Bahmni accepted the write, so it is raised with ``landed``.
+    for a panel order, else the test concept) and the group's time (the latest
+    member result time for a panel). Session merging can put other orders' groups,
+    earlier groups of the same order, and voided groups in the same encounter; a
+    group counts only with this write's order, concept and time (within a second).
+    ``named`` is the encounter uuid the write named, which the body must carry. Any
+    failure here happens after Bahmni accepted the write, so it is raised with
+    ``landed``.
     """
     if not isinstance(body, Mapping):
         raise VendorRejected("bahmni: encounter response is not an object", landed=True)
     encounter = _text(body.get("encounterUuid"))
     if encounter is None:
         raise VendorRejected("bahmni: encounter response had no encounterUuid", landed=True)
+    if named is not None and encounter != named:
+        raise VendorRejected(
+            "bahmni: encounter response named another encounterUuid than the one sent",
+            landed=True,
+        )
     raw_obs = body.get("observations")
     found: dict[str, list[str]] = {order: [] for order in wanted}
     if isinstance(raw_obs, list):
@@ -321,7 +410,11 @@ def _top_level_groups(
             uuid = _text(obs.get("uuid"))
             if order is None or uuid is None or order not in wanted:
                 continue
-            if concept_uuid != wanted[order]:
+            wanted_concept, wanted_at = wanted[order]
+            if concept_uuid != wanted_concept:
+                continue
+            at = when(obs.get("observationDateTime"))
+            if at is None or not _same_instant(at, wanted_at):
                 continue
             found[order].append(uuid)
     missing = [order for order, uuids in found.items() if not uuids]
@@ -392,15 +485,18 @@ def _result_encounter_body(
     location_uuid: str,
     encounter_datetime: datetime,
     results: Sequence[LabResultWrite],
+    encounter_uuid: str | None = None,
 ) -> dict[str, Any]:
     """The ``bahmniencounter`` body for a batch of lab results. Pure: no I/O.
 
     Results are grouped per order in first-seen order: a single-test order becomes
     one ``Test -> Test -> [...]`` group; members of a panel order (same order uuid and
     panel concept) share one panel obs, whose time is the latest member result time.
-    ``location_uuid`` falls back to ``cfg.result_location_uuid``. A config key the
-    body needs (encounter type, location, and each result concept actually written)
-    raises ``ConfigError`` naming the key; bad caller input raises ``ValueError``.
+    ``location_uuid`` falls back to ``cfg.result_location_uuid``. ``encounter_uuid``,
+    when given, is sent as ``encounterUuid`` (Bahmni then writes into that encounter,
+    creating it under that uuid if it does not exist). A config key the body needs
+    (encounter type, location, and each result concept actually written) raises
+    ``ConfigError`` naming the key; bad caller input raises ``ValueError``.
     Datetimes go out as epoch milliseconds.
     """
     for name, value in (
@@ -409,6 +505,8 @@ def _result_encounter_body(
         ("provider_uuid", provider_uuid),
     ):
         _check_uuid(name, value)
+    if encounter_uuid is not None:
+        _check_uuid("encounter_uuid", encounter_uuid)
     encounter_at = to_epoch_ms(_aware("encounter_datetime", encounter_datetime))
     if isinstance(results, (str, bytes)) or not results:
         raise ValueError("bahmni: results must be a non-empty sequence")
@@ -439,7 +537,9 @@ def _result_encounter_body(
         observations.append(
             _obs(panel, order, latest, members=[_test_group(cfg, m) for m in members])
         )
+    body: dict[str, Any] = {} if encounter_uuid is None else {"encounterUuid": encounter_uuid}
     return {
+        **body,
         "patientUuid": patient_uuid,
         "visitUuid": visit_uuid,
         "encounterTypeUuid": encounter_type,
@@ -562,22 +662,38 @@ class BahmniLabResultsClient:
         location_uuid: str,
         encounter_datetime: datetime,
         results: Sequence[LabResultWrite],
+        encounter_uuid: str | None = None,
     ) -> LabResultWriteOutcome:
-        """Write lab results into the record, never over a newer one.
+        """Write lab results into the record, never over a newer one, never twice.
 
         1. Build the body (every input and config check; ``ValueError`` /
            ``ConfigError`` before any I/O).
         2. Read the visit's ``labOrderResults``: an order not in it raises
-           ``NotFound`` (code ``lab_order_not_in_visit``); an order already resulted
-           at or after a new ``result_at`` raises ``ConflictError`` (code
-           ``record_result_newer``). Nothing is posted in either case.
+           ``NotFound`` (code ``lab_order_not_in_visit``; an unknown patient reads as
+           no rows, so it surfaces as this code too); an order already resulted at or
+           after a new ``result_at`` raises ``LabResultConflictError`` (code
+           ``record_result_newer``). When the record already holds exactly these
+           results (an earlier attempt landed), see "Retries" below. Nothing is
+           posted in any of these cases.
         3. POST the body to ``bahmniencounter`` once (no retries here: a 5xx is a
            ``TransientError`` for the caller to cap; a 404 is ``NotFound``).
 
+        ``encounter_uuid`` (optional) names the encounter to write into; the
+        response must carry the same uuid. Without it Bahmni merges the write into a
+        matching encounter of the same type, visit and provider within its session
+        window, and answers a bare HTTP 500 (a ``TransientError`` here) once two such
+        encounters exist, so a caller should send a stable uuid of its own per write.
+
+        Retries: a retry whose pre-read shows this write's own results raises
+        ``LabResultConflictError`` with code ``record_result_already_written`` and
+        ``landed=True``; with ``encounter_uuid`` it instead reads that encounter
+        (``GET bahmniencounter/<uuid>``) and returns its groups with
+        ``recovered=True``.
+
         An older result in the record does not block the write. To replace it, void
-        its group first (``void_lab_result``), then write. The outcome's
-        ``encounter_uuid`` is not unique per write (Bahmni merges writes of one type,
-        visit and provider within its session window into one encounter).
+        its group first (``void_lab_result``), then write. The outcome's groups are
+        those with this write's order, top-level concept and time; the
+        ``encounter_uuid`` is not unique per write when none was named.
         """
         body = _result_encounter_body(
             self._config,
@@ -587,10 +703,21 @@ class BahmniLabResultsClient:
             location_uuid=location_uuid,
             encounter_datetime=encounter_datetime,
             results=results,
+            encounter_uuid=encounter_uuid,
         )
+        wanted: dict[str, tuple[str, datetime]] = {}
+        for r in results:
+            concept = r.panel_concept_uuid or r.test_concept_uuid
+            _, at = wanted.get(r.order_uuid, (concept, r.result_at))
+            wanted[r.order_uuid] = (concept, max(at, r.result_at))
         rows = await self.read_lab_results(patient_uuid, visit_uuids=[visit_uuid])
-        _check_against_record(results, rows)
-        wanted = {r.order_uuid: r.panel_concept_uuid or r.test_concept_uuid for r in results}
+        own = _check_against_record(results, rows)
+        if own:
+            if encounter_uuid is None:
+                raise LabResultConflictError(
+                    RECORD_RESULT_ALREADY_WRITTEN, own, already_written=True
+                )
+            return await self._recover(encounter_uuid, wanted, own)
         resp = await self._http.request("POST", _ENCOUNTER, json=body)
         if resp.status_code == 404:
             raise NotFound("bahmni: bahmniencounter route not found (HTTP 404)")
@@ -598,8 +725,28 @@ class BahmniLabResultsClient:
             parsed = resp.json()
         except ValueError as exc:
             raise VendorRejected("bahmni: encounter response is not JSON", landed=True) from exc
-        encounter, groups = _top_level_groups(parsed, wanted)
+        encounter, groups = _top_level_groups(parsed, wanted, named=encounter_uuid)
         return LabResultWriteOutcome(encounter_uuid=encounter, obs_uuids_by_order=groups)
+
+    async def _recover(
+        self,
+        encounter_uuid: str,
+        wanted: Mapping[str, tuple[str, datetime]],
+        own: Sequence[LabResultRow],
+    ) -> LabResultWriteOutcome:
+        """Read back the groups an earlier, unacknowledged attempt wrote."""
+        resp = await self._http.request("GET", f"{_ENCOUNTER}/{encounter_uuid}")
+        if resp.status_code == 404:
+            # The results landed, but not in the encounter this call names.
+            raise LabResultConflictError(RECORD_RESULT_ALREADY_WRITTEN, own, already_written=True)
+        try:
+            parsed = resp.json()
+        except ValueError as exc:
+            raise VendorRejected("bahmni: encounter response is not JSON", landed=True) from exc
+        encounter, groups = _top_level_groups(parsed, wanted, named=encounter_uuid)
+        return LabResultWriteOutcome(
+            encounter_uuid=encounter, obs_uuids_by_order=groups, recovered=True
+        )
 
     async def void_lab_result(self, obs_uuid: str, reason: str) -> None:
         """Void one result obs (usually a top-level result group) with a reason.

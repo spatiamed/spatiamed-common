@@ -11,6 +11,7 @@ import respx
 from sm_common.integrations.adapters.bahmni_http import BahmniHttp
 from sm_common.integrations.adapters.bahmni_lab_results import (
     BahmniLabResultsClient,
+    LabResultConflictError,
     LabResultsConfig,
     _result_encounter_body,
 )
@@ -24,6 +25,7 @@ from sm_common.integrations.exceptions import (
 from sm_common.integrations.lab_results_types import (
     LabResultRow,
     LabResultWrite,
+    LabResultWriteOutcome,
     LabTestDefinition,
 )
 
@@ -728,6 +730,8 @@ GROUP_CREAT = "89d4c671-7761-4a94-82c8-f4f5f46e2761"
 GROUP_CREAT_VOIDED = "efe36ef8-5ebd-4618-b7b5-db925a9fbb81"
 GROUP_PANEL = "994efa28-5fce-4eab-8efe-22c73b733f9b"
 GROUP_HB_EARLIER = "02d91117-b5a5-4de9-9346-683f43f6b0e9"
+GROUP_HB = "4b9f2c61-8d3e-4a57-b0c2-7e1f5a9d3c84"
+OWN_ENCOUNTER = "3e7c1b52-6a0d-4f89-b2e4-9c51d7a08f36"
 # The mixed fixture's HB result time (10:15 +05:30).
 HB_RECORDED_AT = datetime(2026, 10, 20, 4, 45, tzinfo=timezone.utc)
 
@@ -753,8 +757,11 @@ def _creat(**over: object) -> LabResultWrite:
 
 
 async def _write(
-    results: list[LabResultWrite], *, client: BahmniLabResultsClient | None = None
-) -> object:
+    results: list[LabResultWrite],
+    *,
+    client: BahmniLabResultsClient | None = None,
+    encounter_uuid: str | None = None,
+) -> LabResultWriteOutcome:
     return await (client or _write_client()).write_lab_results(
         patient_uuid=PATIENT,
         visit_uuid=VISIT_A,
@@ -762,6 +769,7 @@ async def _write(
         location_uuid="",
         encounter_datetime=ENCOUNTER_AT,
         results=results,
+        encounter_uuid=encounter_uuid,
     )
 
 
@@ -773,7 +781,7 @@ def _mock_pre_read(name: str = "lab_order_results_mixed.json") -> respx.Route:
 @pytest.mark.parametrize(
     "result",
     [
-        # Same time as the recorded HB result.
+        # Same time as the recorded HB result, another value.
         "same",
         # Older than the recorded HB result.
         "older",
@@ -790,7 +798,7 @@ async def test_write_refuses_when_record_has_same_or_newer_result(result: str) -
         return_value=httpx.Response(200, json=_fixture("encounter_post_response.json"))
     )
     write = {
-        "same": _hb(result_at=HB_RECORDED_AT),
+        "same": _hb(result_at=HB_RECORDED_AT, value=Decimal("12.0")),
         "older": _hb(result_at=HB_RECORDED_AT - timedelta(minutes=1)),
         "panel": replace(_panel_results()[0], result_at=HB_RECORDED_AT),
         "referred": _hb(
@@ -801,6 +809,13 @@ async def test_write_refuses_when_record_has_same_or_newer_result(result: str) -
         await _write([_creat(), write])
     assert str(info.value) == "record_result_newer"
     assert info.value.code == "record_result_newer"
+    # The refusal carries the record's rows that block the write.
+    assert isinstance(info.value, LabResultConflictError)
+    assert info.value.already_written is False
+    assert info.value.landed is False
+    assert info.value.rows
+    assert {row.order_uuid for row in info.value.rows} == {write.order_uuid}
+    assert all(row.status == "resulted" for row in info.value.rows)
     assert pre.call_count == 1
     # The pre-read is scoped to the write's visit.
     assert pre.calls.last.request.url.params.get_list("visitUuids") == [VISIT_A]
@@ -832,7 +847,238 @@ async def test_write_allows_when_existing_result_is_older() -> None:
     )
     outcome = await _write([_hb()])
     assert post.call_count == 1
-    assert outcome.obs_uuids_by_order == {ORDER_HB: (GROUP_HB_EARLIER,)}
+    # Session merging returns the earlier HB group in the same encounter; only the
+    # group at our result time is this write's.
+    assert dict(outcome.obs_uuids_by_order) == {ORDER_HB: (GROUP_HB,)}
+    assert outcome.recovered is False
+
+
+# --- a write that landed but was never acknowledged --------------------------
+
+
+def _after_write(creat_at: str | None = "2026-10-20T14:45:00.000+0530") -> dict:
+    """The record after our creatinine write landed (by default stored to the second)."""
+    pre = _fixture("lab_order_results_after_write.json")
+    for row in pre["results"]:
+        if row["orderUuid"] == ORDER_CREAT:
+            row["resultDateTime"] = creat_at
+    return pre
+
+
+def _encounter_get(uuid: str) -> str:
+    return f"{ENCOUNTER}/{uuid}"
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "stored_at",
+    [
+        # The record keeps whole seconds: our 09:15:00.250 reads back as 09:15:00.
+        "2026-10-20T14:45:00.000+0530",
+        # The exact millisecond we sent.
+        "2026-10-20T14:45:00.250+0530",
+    ],
+)
+async def test_write_seeing_its_own_landed_result_is_already_written(stored_at: str) -> None:
+    _login()
+    respx.get(LAB_RESULTS).mock(return_value=httpx.Response(200, json=_after_write(stored_at)))
+    post = respx.post(ENCOUNTER).mock(
+        return_value=httpx.Response(200, json=_fixture("encounter_post_response.json"))
+    )
+    with pytest.raises(LabResultConflictError) as info:
+        await _write([_creat()])
+    assert info.value.code == "record_result_already_written"
+    assert str(info.value) == "record_result_already_written"
+    assert info.value.already_written is True
+    # The record holds this write: it landed.
+    assert info.value.landed is True
+    assert [(r.order_uuid, r.result) for r in info.value.rows] == [(ORDER_CREAT, "1.4")]
+    assert post.call_count == 0
+
+
+@respx.mock
+async def test_write_with_encounter_uuid_recovers_its_landed_groups() -> None:
+    _login()
+    respx.get(LAB_RESULTS).mock(return_value=httpx.Response(200, json=_after_write()))
+    post = respx.post(ENCOUNTER).mock(return_value=httpx.Response(200, json={}))
+    stored = _fixture("encounter_post_response.json")
+    stored["encounterUuid"] = OWN_ENCOUNTER
+    get = respx.get(_encounter_get(OWN_ENCOUNTER)).mock(
+        return_value=httpx.Response(200, json=stored)
+    )
+    outcome = await _write([_creat()], encounter_uuid=OWN_ENCOUNTER)
+    assert post.call_count == 0
+    assert get.call_count == 1
+    assert outcome.recovered is True
+    assert outcome.encounter_uuid == OWN_ENCOUNTER
+    assert dict(outcome.obs_uuids_by_order) == {ORDER_CREAT: (GROUP_CREAT,)}
+
+
+@respx.mock
+async def test_recovery_when_named_encounter_is_missing_is_already_written() -> None:
+    _login()
+    respx.get(LAB_RESULTS).mock(return_value=httpx.Response(200, json=_after_write()))
+    post = respx.post(ENCOUNTER).mock(return_value=httpx.Response(200, json={}))
+    respx.get(_encounter_get(OWN_ENCOUNTER)).mock(return_value=httpx.Response(404))
+    with pytest.raises(LabResultConflictError) as info:
+        await _write([_creat()], encounter_uuid=OWN_ENCOUNTER)
+    assert info.value.code == "record_result_already_written"
+    assert info.value.landed is True
+    assert post.call_count == 0
+
+
+@respx.mock
+async def test_recovered_encounter_without_our_group_is_vendor_rejected_landed() -> None:
+    _login()
+    respx.get(LAB_RESULTS).mock(return_value=httpx.Response(200, json=_after_write()))
+    stored = _fixture("encounter_post_response.json")
+    stored["encounterUuid"] = OWN_ENCOUNTER
+    stored["observations"] = [o for o in stored["observations"] if o["uuid"] != GROUP_CREAT]
+    respx.get(_encounter_get(OWN_ENCOUNTER)).mock(return_value=httpx.Response(200, json=stored))
+    with pytest.raises(VendorRejected) as info:
+        await _write([_creat()], encounter_uuid=OWN_ENCOUNTER)
+    assert info.value.landed is True
+
+
+@respx.mock
+async def test_own_result_for_one_order_only_is_record_result_newer() -> None:
+    # Creatinine shows our result; HB shows only an older one. One POST is all or
+    # nothing, so this record was not made by this write alone: refuse, never post.
+    _login()
+    respx.get(LAB_RESULTS).mock(return_value=httpx.Response(200, json=_after_write()))
+    post = respx.post(ENCOUNTER).mock(return_value=httpx.Response(200, json={}))
+    with pytest.raises(LabResultConflictError) as info:
+        await _write([_creat(), _hb()], encounter_uuid=OWN_ENCOUNTER)
+    assert info.value.code == "record_result_newer"
+    assert info.value.already_written is False
+    assert [r.order_uuid for r in info.value.rows] == [ORDER_CREAT]
+    assert post.call_count == 0
+
+
+@respx.mock
+async def test_same_time_different_value_is_record_result_newer() -> None:
+    _login()
+    respx.get(LAB_RESULTS).mock(return_value=httpx.Response(200, json=_after_write()))
+    post = respx.post(ENCOUNTER).mock(return_value=httpx.Response(200, json={}))
+    with pytest.raises(LabResultConflictError) as info:
+        await _write([_creat(value=Decimal("1.5"))])
+    assert info.value.code == "record_result_newer"
+    assert post.call_count == 0
+
+
+def _bg(value: str) -> LabResultWrite:
+    return LabResultWrite(
+        order_uuid=ORDER_BG,
+        test_concept_uuid=TEST_BG,
+        panel_concept_uuid=None,
+        value_kind="coded",
+        value=value,
+        # The mixed fixture's blood group result time (10:25 +05:30).
+        result_at=datetime(2026, 10, 20, 4, 55, tzinfo=timezone.utc),
+    )
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("answer", "code"),
+    [
+        (ANSWER_B_POS, "record_result_already_written"),
+        (ANSWER_O_POS, "record_result_newer"),
+    ],
+)
+async def test_coded_own_result_matches_on_answer_uuid(answer: str, code: str) -> None:
+    _login()
+    _mock_pre_read()
+    post = respx.post(ENCOUNTER).mock(return_value=httpx.Response(200, json={}))
+    with pytest.raises(LabResultConflictError) as info:
+        await _write([_bg(answer)])
+    assert info.value.code == code
+    assert post.call_count == 0
+
+
+@respx.mock
+async def test_panel_own_result_needs_every_member() -> None:
+    _login()
+    pre = _fixture("lab_order_results_mixed.json")
+    panel_rows = [r for r in pre["results"] if r["orderUuid"] == ORDER_PANEL]
+    panel_rows[0].update(
+        testUuid=TEST_SGOT, result="52", resultDateTime="2026-10-20T14:45:00.000+0530"
+    )
+    panel_rows[1].update(
+        testUuid=TEST_SGPT,
+        result="Haemolysed sample",
+        resultDateTime="2026-10-20T14:50:00.000+0530",
+    )
+    respx.get(LAB_RESULTS).mock(return_value=httpx.Response(200, json=pre))
+    post = respx.post(ENCOUNTER).mock(return_value=httpx.Response(200, json={}))
+    with pytest.raises(LabResultConflictError) as info:
+        await _write(_panel_results())
+    assert info.value.code == "record_result_already_written"
+    assert len(info.value.rows) == 2
+
+    # One member showing another value: not ours.
+    panel_rows[1]["result"] = "Clear sample"
+    respx.get(LAB_RESULTS).mock(return_value=httpx.Response(200, json=pre))
+    with pytest.raises(LabResultConflictError) as info:
+        await _write(_panel_results())
+    assert info.value.code == "record_result_newer"
+    assert post.call_count == 0
+
+
+@respx.mock
+async def test_write_names_the_caller_encounter_uuid() -> None:
+    _login()
+    _mock_pre_read()
+    response = _fixture("encounter_post_response.json")
+    response["encounterUuid"] = OWN_ENCOUNTER
+    post = respx.post(ENCOUNTER).mock(return_value=httpx.Response(200, json=response))
+    outcome = await _write([_creat()], encounter_uuid=OWN_ENCOUNTER)
+    sent = json.loads(post.calls.last.request.content)
+    assert sent["encounterUuid"] == OWN_ENCOUNTER
+    assert outcome.encounter_uuid == OWN_ENCOUNTER
+
+
+@respx.mock
+async def test_write_without_encounter_uuid_names_none() -> None:
+    _login()
+    _mock_pre_read()
+    post = respx.post(ENCOUNTER).mock(
+        return_value=httpx.Response(200, json=_fixture("encounter_post_response.json"))
+    )
+    await _write([_creat()])
+    assert "encounterUuid" not in json.loads(post.calls.last.request.content)
+
+
+@respx.mock
+async def test_response_naming_another_encounter_is_vendor_rejected_landed() -> None:
+    _login()
+    _mock_pre_read()
+    respx.post(ENCOUNTER).mock(
+        return_value=httpx.Response(200, json=_fixture("encounter_post_response.json"))
+    )
+    with pytest.raises(VendorRejected) as info:
+        await _write([_creat()], encounter_uuid=OWN_ENCOUNTER)
+    assert info.value.landed is True
+
+
+async def test_bad_encounter_uuid_is_value_error_before_io() -> None:
+    with respx.mock(assert_all_called=False) as router:
+        route = router.route()
+        with pytest.raises(ValueError):
+            await _write([_creat()], encounter_uuid="../visit")
+        assert route.call_count == 0
+
+
+@respx.mock
+async def test_response_test_obs_with_panel_order_is_not_the_panel_group() -> None:
+    _login()
+    _mock_pre_read()
+    response = _fixture("encounter_post_response.json")
+    stray = [o for o in response["observations"] if o["concept"]["uuid"] == TEST_SGOT]
+    assert len(stray) == 1 and stray[0]["orderUuid"] == ORDER_PANEL
+    respx.post(ENCOUNTER).mock(return_value=httpx.Response(200, json=response))
+    outcome = await _write(_panel_results())
+    assert dict(outcome.obs_uuids_by_order) == {ORDER_PANEL: (GROUP_PANEL,)}
 
 
 @respx.mock

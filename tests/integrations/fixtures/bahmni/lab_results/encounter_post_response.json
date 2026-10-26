@@ -13,7 +13,7 @@
       },
       "orderUuid": "5086fb24-30d7-473c-8fb2-9ea6a784a7eb",
       "voided": false,
-      "observationDateTime": "2026-10-20T14:45:00.000+0530",
+      "observationDateTime": "2026-10-20T10:15:00.000+0530",
       "groupMembers": [
         {
           "uuid": "f21207c9-376f-4346-80fb-09790f95be3b",
@@ -23,10 +23,48 @@
           },
           "orderUuid": "5086fb24-30d7-473c-8fb2-9ea6a784a7eb",
           "voided": false,
-          "observationDateTime": "2026-10-20T14:45:00.000+0530",
+          "observationDateTime": "2026-10-20T10:15:00.000+0530",
           "groupMembers": [
             {
               "uuid": "5b0e1d8e-4f43-4c55-9d0c-4a4f1e1a7c11",
+              "concept": {
+                "uuid": "6dd34379-e216-49e4-89e8-e9e356cd31d6",
+                "name": "Test Haemoglobin"
+              },
+              "orderUuid": "5086fb24-30d7-473c-8fb2-9ea6a784a7eb",
+              "voided": false,
+              "observationDateTime": "2026-10-20T10:15:00.000+0530",
+              "groupMembers": [],
+              "value": 11.2
+            }
+          ],
+          "value": null
+        }
+      ],
+      "value": null
+    },
+    {
+      "uuid": "4b9f2c61-8d3e-4a57-b0c2-7e1f5a9d3c84",
+      "concept": {
+        "uuid": "6dd34379-e216-49e4-89e8-e9e356cd31d6",
+        "name": "Test Haemoglobin"
+      },
+      "orderUuid": "5086fb24-30d7-473c-8fb2-9ea6a784a7eb",
+      "voided": false,
+      "observationDateTime": "2026-10-20T14:45:00.000+0530",
+      "groupMembers": [
+        {
+          "uuid": "c7e05a1d-2f94-4b6e-9d38-15a0c4e7f2b9",
+          "concept": {
+            "uuid": "6dd34379-e216-49e4-89e8-e9e356cd31d6",
+            "name": "Test Haemoglobin"
+          },
+          "orderUuid": "5086fb24-30d7-473c-8fb2-9ea6a784a7eb",
+          "voided": false,
+          "observationDateTime": "2026-10-20T14:45:00.000+0530",
+          "groupMembers": [
+            {
+              "uuid": "e2a8d7f3-6c41-4f0b-8a95-3d7b1e60c2f5",
               "concept": {
                 "uuid": "6dd34379-e216-49e4-89e8-e9e356cd31d6",
                 "name": "Test Haemoglobin"
@@ -127,7 +165,7 @@
       },
       "orderUuid": "ecc6d325-5533-4c72-8dca-a3a72f4452c8",
       "voided": false,
-      "observationDateTime": "2026-10-20T14:45:00.000+0530",
+      "observationDateTime": "2026-10-20T14:50:00.000+0530",
       "groupMembers": [
         {
           "uuid": "a3405dd7-31ff-40a9-928c-0524bcd8a60c",
@@ -175,7 +213,7 @@
           },
           "orderUuid": "ecc6d325-5533-4c72-8dca-a3a72f4452c8",
           "voided": false,
-          "observationDateTime": "2026-10-20T14:45:00.000+0530",
+          "observationDateTime": "2026-10-20T14:50:00.000+0530",
           "groupMembers": [
             {
               "uuid": "0cf2fe17-8213-48d0-a218-98632210a0fd",
@@ -185,7 +223,7 @@
               },
               "orderUuid": "ecc6d325-5533-4c72-8dca-a3a72f4452c8",
               "voided": false,
-              "observationDateTime": "2026-10-20T14:45:00.000+0530",
+              "observationDateTime": "2026-10-20T14:50:00.000+0530",
               "groupMembers": [
                 {
                   "uuid": "208d49c0-bba3-4a3a-9dce-1f53cc93f170",
@@ -195,7 +233,7 @@
                   },
                   "orderUuid": "ecc6d325-5533-4c72-8dca-a3a72f4452c8",
                   "voided": false,
-                  "observationDateTime": "2026-10-20T14:45:00.000+0530",
+                  "observationDateTime": "2026-10-20T14:50:00.000+0530",
                   "groupMembers": [],
                   "value": "Haemolysed sample"
                 }
@@ -207,6 +245,18 @@
         }
       ],
       "value": null
+    },
+    {
+      "uuid": "5d3a1f80-9e27-4c6b-a4f1-6b2e8c0d7a93",
+      "concept": {
+        "uuid": "d6193f4c-8ba0-48bb-a705-93f8289ffd4c",
+        "name": "SGOT"
+      },
+      "orderUuid": "ecc6d325-5533-4c72-8dca-a3a72f4452c8",
+      "observationDateTime": "2026-10-20T14:50:00.000+0530",
+      "voided": false,
+      "value": 52.0,
+      "groupMembers": []
     }
   ],
   "orders": [],

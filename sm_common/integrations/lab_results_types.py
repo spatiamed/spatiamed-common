@@ -80,10 +80,14 @@ class LabResultWriteOutcome:
     ``encounter_uuid`` is NOT unique per write: Bahmni folds writes of the same
     encounter type, visit and provider within its session window into one
     encounter. ``obs_uuids_by_order`` holds the top-level group obs uuids per order.
+    ``recovered`` is True when nothing was posted because the record already held
+    this write (an earlier attempt landed unacknowledged) and the groups were read
+    back from the encounter the caller named.
     """
 
     encounter_uuid: str
     obs_uuids_by_order: Mapping[str, tuple[str, ...]]
+    recovered: bool = False
 
 
 @dataclass(frozen=True)
