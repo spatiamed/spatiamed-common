@@ -25,10 +25,15 @@ Shared-box safety:
 - Only this run's ``LT-P4-`` ward, beds, bed type, patients and probe user are written.
 - Cleanup runs at the end of ``run_checks`` whatever happened: the probe user is
   retired and its person voided, the patients are voided (bed unassigned and visits
-  ended first, which voids their encounters, orders and obs with them), then the beds
-  are deleted by id (the uuid is read from the ward layout at cleanup time, because
-  Bahmni gives a bed a new uuid when a patient leaves it), the ward is retired and the
-  bed type is deleted only when this run created it.
+  ended first; ending a visit voids nothing, voiding the patient voids its
+  encounters, orders and obs), then the beds are deleted by id (the uuid is read from
+  the ward layout at cleanup time, because Bahmni gives a bed a new uuid when a
+  patient leaves it), the ward is retired and the bed type is deleted only when this
+  run created it.
+- The inpatient module's medication chart rows (schedule, slots, administrations) have
+  no void of their own and a patient void is not expected to void them (to confirm on
+  a live run), so they stay on the box under the voided ``LT-P4-`` patient. Cleanup
+  lists them as a ``CLEANUP medication chart ... SKIPPED`` line.
 """
 
 from __future__ import annotations
@@ -70,7 +75,6 @@ from sm_common.integrations.adapters.bahmni_parse import when
 from sm_common.integrations.exceptions import (
     AuthError,
     ConfigError,
-    HmsAdapterError,
     VendorRejected,
 )
 from sm_common.integrations.ipd_care_types import (
@@ -152,6 +156,7 @@ def _forbidden(got: Raw, what: str) -> None:
 
 
 async def _patient(x: AdtCtx, role: str) -> str:
+    # Not ``AdtCtx.new_patient``: that names patients with the ADT group's prefix.
     label = f"{NAME} {role}"
     rec, _ = await x.record.create_patient(
         RecordPatientInput(
@@ -180,9 +185,13 @@ async def _ward(x: AdtCtx) -> tuple[str, list[RecordBed]]:
     x.later(3, "ward", f"{NAME} Ward", lambda: x._delete(f"location/{ward.uuid}"))
     wanted = f"{NAME}-IPD"
     # Only a type this run creates is ever deleted (bed types have no retire).
-    before = (await x.raw("GET", "bedtype", params={"name": wanted})).results()
+    got = await x.raw("GET", "bedtype", params={"name": wanted})
+    _forbidden(got, "bed type read")
+    before = got.results()
     bed_type = await x.record.ensure_bed_type(name=wanted, display_name=f"P4{RUN[:4]}")
-    after = (await x.raw("GET", "bedtype", params={"name": wanted})).results()
+    got = await x.raw("GET", "bedtype", params={"name": wanted})
+    _forbidden(got, "bed type read")
+    after = got.results()
     made = next((r.get("uuid") for r in after if r.get("name") == wanted), None)
     if not before and isinstance(made, str):
         x.later(4, "bed type", bed_type, lambda: x._delete(f"bedtype/{made}"))
@@ -292,6 +301,7 @@ async def _order_rows(x: AdtCtx, patient: str, order: str, service: str) -> list
 
 async def ipd_module_versions(x: AdtCtx) -> Result:
     got = await x.raw("GET", "module", params={"v": "custom:(uuid,version)"})
+    _forbidden(got, "module list")
     if not got.ok:
         return passed(False, f"module list {got.shape()}")
     found = {
@@ -364,11 +374,27 @@ async def ward_layout_occupants(x: AdtCtx) -> Result:
     )
 
 
+def _chart_left(x: AdtCtx) -> None:
+    """Name the medication chart rows cleanup cannot remove (once per run)."""
+    if x.state.get("ipd_chart_noted"):
+        return
+    x.state["ipd_chart_noted"] = True
+
+    async def left() -> str:
+        return (
+            "SKIPPED no void route: schedule, slot and administration rows stay "
+            "under the voided patient"
+        )
+
+    x.later(0, "medication chart", f"{NAME} Care", left)
+
+
 async def mar_schedule_create(x: AdtCtx) -> Result:
     patient, visit, _ = await _care(x)
     ipd = _ipd(x)
     order = await _drug_order(x, patient, visit, "Paracetamol 500", as_needed=False)
     prn = await _drug_order(x, patient, visit, "Ondansetron 4", as_needed=True)
+    _chart_left(x)
     t0 = _now() + timedelta(hours=1)
     first_day = (t0, t0 + timedelta(hours=6))
     day_wise = (t0 + timedelta(hours=24), t0 + timedelta(hours=30))
@@ -398,6 +424,8 @@ async def mar_schedule_create(x: AdtCtx) -> Result:
     if scheduled_ok:
         x.state["ipd_orders"] = (order, prn)
         x.state["ipd_slots"] = slots
+    # The client always sends slotStartTime as the earliest slot, so whether the module
+    # ignores it under FIXED_SCHEDULE_FREQUENCY cannot be told apart here: needs live.
 
     # As needed: one placeholder slot starting at the order's effective start.
     first_prn = await ipd.create_medication_schedule(
@@ -412,6 +440,7 @@ async def mar_schedule_create(x: AdtCtx) -> Result:
     )
     placeholder = await _order_rows(x, patient, prn, "AS_NEEDED_PLACEHOLDER")
     got = await x.raw("GET", f"order/{prn}", params={"v": ORDER_START_REP})
+    _forbidden(got, "order read")
     body = got.body if isinstance(got.body, dict) else {}
     effective = when(body.get("scheduledDate")) or when(body.get("dateActivated"))
     one = placeholder[0] if len(placeholder) == 1 else {}
@@ -435,6 +464,9 @@ async def mar_schedule_create(x: AdtCtx) -> Result:
     )
     repeat_ok = not again.created and x.writes == writes
     prn_ok = first_prn.created and shape_ok and repeat_ok
+    if first_prn.created and shape_ok:
+        # The as-needed check needs only this order, not the scheduled chart.
+        x.state["ipd_prn"] = prn
     return passed(
         scheduled_ok and prn_ok,
         f"created={out.created} sent={len(first_day) + len(day_wise)} charted={len(starts)} "
@@ -442,7 +474,7 @@ async def mar_schedule_create(x: AdtCtx) -> Result:
         f"sent_seconds={sent} raw_startTime={raw_first} "
         f"prn_created={first_prn.created} placeholder_slots={len(placeholder)} "
         f"placeholder_shape_ok={shape_ok} prn_repeat_created={again.created} "
-        f"prn_repeat_writes={x.writes - writes}",
+        f"prn_repeat_writes={x.writes - writes} slotStartTime_ignored=needs_live",
     )
 
 
@@ -524,7 +556,7 @@ async def mar_administration_idempotent(x: AdtCtx) -> Result:
 
 async def mar_adhoc_marker(x: AdtCtx) -> Result:
     patient, visit, _ = await _care(x)
-    _, prn = x.state["ipd_orders"]
+    prn: str = x.state["ipd_prn"]
     ipd = _ipd(x)
     names = _drug_names(x)
     w = MarAdministrationWrite(
@@ -581,6 +613,7 @@ async def mar_adhoc_marker(x: AdtCtx) -> Result:
 async def vitals_readback(x: AdtCtx) -> Result:
     # The write pre-read relies on an unknown encounter answering 404.
     unknown = await x.raw("GET", f"encounter/{uuid4()}", params={"v": "custom:(uuid)"})
+    _forbidden(unknown, "unknown encounter read")
     if unknown.status != 404:
         return passed(
             False, f"unknown_encounter_status={unknown.status} (the write pre-read needs 404)"
@@ -613,6 +646,7 @@ async def vitals_readback(x: AdtCtx) -> Result:
                 "v": "custom:(uuid,value,voided,concept:(display),encounter:(uuid))",
             },
         )
+        _forbidden(got, "obs read")
         rows = [
             r
             for r in got.results()
@@ -626,6 +660,7 @@ async def vitals_readback(x: AdtCtx) -> Result:
         enc = await x.raw(
             "GET", f"encounter/{ref}", params={"v": "custom:(uuid,obs:(uuid,comment,voided))"}
         )
+        _forbidden(enc, "encounter read")
         body = enc.body if isinstance(enc.body, dict) else {}
         return [o for o in body.get("obs") or [] if isinstance(o, dict)]
 
@@ -660,6 +695,7 @@ async def io_concepts_present(x: AdtCtx) -> Result:
     datetime_member: dict[str, str] = {}
     for key in keys:
         got = await x.raw("GET", f"concept/{getattr(cfg, key)}", params={"v": IO_SET_REP})
+        _forbidden(got, "concept set read")
         members = (got.body or {}).get("setMembers") if isinstance(got.body, dict) else None
         rows = [m for m in members or [] if isinstance(m, dict)]
         kinds = Counter(_name(m.get("datatype")) for m in rows)
@@ -687,7 +723,10 @@ async def io_concepts_present(x: AdtCtx) -> Result:
                 kind="intake", route="Oral", quantity_ml=200, recorded_at=taken
             ),
         )
-    except (HmsAdapterError, ConfigError) as exc:
+    except AuthError:
+        raise
+    except VendorRejected as exc:
+        # Only a write the record refused points at the date-time value.
         return passed(
             False,
             f"intake write refused ({err(exc)}): switch _obs_time to the record's date string",
@@ -697,6 +736,7 @@ async def io_concepts_present(x: AdtCtx) -> Result:
         f"encounter/{ref}",
         params={"v": "custom:(uuid,obs:(uuid,groupMembers:(value,concept:(uuid))))"},
     )
+    _forbidden(enc, "encounter read")
     body = enc.body if isinstance(enc.body, dict) else {}
     members = [
         m
@@ -799,7 +839,12 @@ CHECKS: list[tuple[str, str, IpdCheck]] = [
 
 
 def _tally(x: AdtCtx, calls_before: int) -> None:
-    """Count this check's inpatient-module calls and note every 403 among them."""
+    """Count this check's inpatient-module calls and note every 403 among them.
+
+    Reads ``x.tap``, which keeps the last 80 calls only: a check making more drops its
+    early ones here. Defense in depth: every 403 is also raised (``BahmniHttp`` or
+    ``_forbidden``) and ``_one`` reports it INCONCLUSIVE with the privilege name.
+    """
     new = min(x.calls - calls_before, len(x.tap))
     for _method, path, status, body in x.tap[len(x.tap) - new :] if new else []:
         if "/ipd/" not in path:

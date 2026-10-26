@@ -15,6 +15,7 @@ import math
 import pathlib
 import re
 import sys
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from typing import Any
 from uuid import uuid4
@@ -111,6 +112,24 @@ def _state(**over: Any) -> dict[str, Any]:
         "unknown_encounter_status": 404,
         "io_refuses_datetime": False,
         "order_push_403": False,
+        # (method, path fragment, query fragment): answered 403 with a named privilege.
+        "forbid": [],
+        "io_write_403": False,
+        "admin_uuid_churn": False,  # a filled slot names a new administration on each read
+        "admin_at_shift_ms": 0,
+        "stop_stops_order": False,  # one dose recorded stopped discontinues the order
+        "placeholder_offset_s": 0,
+        "drop_obs_comment": False,
+        "extra_voided_obs": False,
+        "obs_value_off": 0,
+        "obs_concept_unnamed": False,
+        "retry_preread_misses": False,  # the nursing write's retry pre-read answers 404
+        "io_datetime_shift_s": 0,
+        "discharge_keeps_bed": False,
+        "layout_hides_patients": False,
+        "layout_patient_on_two_beds": False,
+        "ward_patients_omit": False,
+        "adhoc_charts_nothing": False,
     }
     state.update(over)
     return state
@@ -124,13 +143,18 @@ def _layout(state: dict[str, Any]) -> dict[str, Any]:
         )
         cell: dict[str, Any] = {"rowNumber": 1, "columnNumber": col, "bedId": None}
         if bed is not None:
+            shown = list(bed["patients"])
+            if state["layout_patient_on_two_beds"] and col == 2:
+                # The bed next door also lists the patients of the third bed.
+                third = [b for b in state["beds"].values() if b["column"] == 3]
+                shown += [p for b in third for p in b["patients"]]
             cell.update(
                 bedId=bed["id"],
                 bedUuid=bed["uuid"],
                 bedNumber=bed["number"],
                 status="OCCUPIED" if bed["patients"] else "AVAILABLE",
                 bedType={"name": bed["type"]} if bed["type"] else None,
-                patients=[{"uuid": p} for p in bed["patients"]],
+                patients=[] if state["layout_hides_patients"] else [{"uuid": p} for p in shown],
                 bedTagMaps=[],
             )
         cells.append(cell)
@@ -188,6 +212,14 @@ def _admin(state: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
 
 def _wire_slot(state: dict[str, Any], slot: dict[str, Any]) -> dict[str, Any]:
     out = {k: v for k, v in slot.items() if k != "patient"}
+    admin = slot.get("medicationAdministration")
+    if isinstance(admin, dict) and slot["serviceType"] == "MedicationRequest":
+        admin = dict(admin)
+        admin["administeredDateTime"] += state["admin_at_shift_ms"]
+        reads = slot["admin_reads"] = slot.get("admin_reads", 0) + 1
+        if state["admin_uuid_churn"] and reads > 1:
+            admin["uuid"] = _u()
+        out["medicationAdministration"] = admin
     if state["seconds_as_ms"]:
         out["startTime"] = slot["startTime"] * 1000
     return out
@@ -219,7 +251,8 @@ def _fake(state: dict[str, Any]) -> httpx.MockTransport:
         state.setdefault("schedule_bodies", []).append(body)
         order = state["orders"][body["orderUuid"]]
         if body["serviceType"] == "AS_NEEDED_PLACEHOLDER":
-            _slot(state, order["uuid"], "AsNeededPlaceholder", order["activated_ms"] // 1000)
+            start = order["activated_ms"] // 1000 + state["placeholder_offset_s"]
+            _slot(state, order["uuid"], "AsNeededPlaceholder", start)
             return httpx.Response(200, json={"id": 1})
         times = (
             body["firstDaySlotsStartTime"]
@@ -239,12 +272,20 @@ def _fake(state: dict[str, Any]) -> httpx.MockTransport:
             if slot["medicationAdministration"] is None:
                 slot["medicationAdministration"] = _admin(state, req)
                 slot["status"] = ADMIN_SLOT_STATUS[req["status"]]
+                if state["stop_stops_order"] and req["status"] == "stopped":
+                    for s in state["slots"]:
+                        if s["order"]["uuid"] == slot["order"]["uuid"]:
+                            s["order"]["dateStopped"] = "2026-01-01T00:00:00.000+0000"
+                            if s["medicationAdministration"] is None:
+                                s["status"] = "STOPPED"
             out.append(slot["medicationAdministration"])
         return httpx.Response(200, json=out)
 
     def adhoc_admin(body: dict[str, Any]) -> httpx.Response:
         state["adhoc_posts"] += 1
         admin = _admin(state, body)
+        if state["adhoc_charts_nothing"]:
+            return httpx.Response(200, json=admin)
         _slot(
             state,
             body["orderUuid"],
@@ -258,7 +299,16 @@ def _fake(state: dict[str, Any]) -> httpx.MockTransport:
     def encounter_post(body: dict[str, Any]) -> httpx.Response:
         if state["order_push_403"] and body.get("drugOrders"):
             return httpx.Response(403, json=PRIVILEGE_403)
-        enc = {"uuid": body["encounterUuid"], "visit": body["visitUuid"], "obs": [], "orders": []}
+        groups = [o for o in body.get("observations") or [] if o.get("groupMembers")]
+        if state["io_write_403"] and groups:
+            return httpx.Response(403, json=PRIVILEGE_403)
+        # A push naming an existing encounter adds to it, as bahmniencounter does.
+        enc = state["encounters"].get(body["encounterUuid"]) or {
+            "uuid": body["encounterUuid"],
+            "visit": body["visitUuid"],
+            "obs": [],
+            "orders": [],
+        }
         for d in body.get("drugOrders") or []:
             uuid = _u()
             dosing = d["dosingInstructions"]
@@ -281,14 +331,14 @@ def _fake(state: dict[str, Any]) -> httpx.MockTransport:
                     "uuid": _u(),
                     "concept": o["concept"]["uuid"],
                     "value": o.get("value"),
-                    "comment": o.get("comment"),
+                    "comment": None if state["drop_obs_comment"] else o.get("comment"),
                     # Datetime obs come back as the record's date string.
                     "groupMembers": [
                         {
                             "value": (
-                                datetime.fromtimestamp(m["value"] / 1000, UTC).strftime(
-                                    "%Y-%m-%dT%H:%M:%S.000+0000"
-                                )
+                                datetime.fromtimestamp(
+                                    m["value"] / 1000 + state["io_datetime_shift_s"], UTC
+                                ).strftime("%Y-%m-%dT%H:%M:%S.000+0000")
                                 if isinstance(m["value"], int) and m["value"] > 10**12
                                 else m["value"]
                             ),
@@ -311,6 +361,11 @@ def _fake(state: dict[str, Any]) -> httpx.MockTransport:
         enc = state["encounters"].get(uuid)
         if enc is None:
             return httpx.Response(state["unknown_encounter_status"], json={"error": {}})
+        enc["reads"] = enc.get("reads", 0) + 1
+        # Reads of a nursing encounter: the harness's own read, then the retry's pre-read.
+        if state["retry_preread_misses"] and enc["obs"] and enc["reads"] == 2:
+            return httpx.Response(404, json={"error": {}})
+        extra = [{"uuid": _u(), "comment": None, "voided": True, "groupMembers": []}]
         return httpx.Response(
             200,
             json={
@@ -325,7 +380,8 @@ def _fake(state: dict[str, Any]) -> httpx.MockTransport:
                         "groupMembers": o["groupMembers"],
                     }
                     for o in enc["obs"]
-                ],
+                ]
+                + (extra if state["extra_voided_obs"] and enc["obs"] else []),
             },
         )
 
@@ -333,9 +389,12 @@ def _fake(state: dict[str, Any]) -> httpx.MockTransport:
         rows = [
             {
                 "uuid": o["uuid"],
-                "value": float(o["value"]),
+                "value": float(o["value"]) + state["obs_value_off"],
                 "voided": False,
-                "concept": {"uuid": o["concept"], "display": "LT-P4 Pulse"},
+                "concept": {
+                    "uuid": o["concept"],
+                    "display": None if state["obs_concept_unnamed"] else "LT-P4 Pulse",
+                },
                 "encounter": {"uuid": e["uuid"]},
             }
             for e in state["encounters"].values()
@@ -351,6 +410,10 @@ def _fake(state: dict[str, Any]) -> httpx.MockTransport:
             return httpx.Response(
                 200, json={"authenticated": True}, headers={"set-cookie": "JSESSIONID=x"}
             )
+        query = str(params)
+        for f_method, f_path, f_query in state["forbid"]:
+            if method == f_method and f_path in path and f_query in query:
+                return httpx.Response(403, json=PRIVILEGE_403)
         body = json.loads(req.content) if req.content else None
         auth = req.headers.get("authorization", "")
         user = base64.b64decode(auth.split(" ", 1)[1]).decode().split(":")[0] if auth else ""
@@ -398,6 +461,7 @@ def _fake(state: dict[str, Any]) -> httpx.MockTransport:
                 }
                 for b in state["beds"].values()
                 for p in b["patients"]
+                if not state["ward_patients_omit"]
             ]
             return httpx.Response(200, json={"totalPatients": len(rows), "activePatients": rows})
         if method == "POST" and path == f"{REST}/bahmnicore/bahmniencounter":
@@ -491,7 +555,8 @@ class _Adt:
         )
 
     async def discharge(self, a: Any, *, end_visit: bool = True) -> RecordEncounterResult:
-        _free(self.state, a.patient_uuid)
+        if not self.state["discharge_keeps_bed"]:
+            _free(self.state, a.patient_uuid)
         return RecordEncounterResult(encounter_uuid=_u(), created=True)
 
 
@@ -666,7 +731,7 @@ async def test_patients_wards_and_beds_are_lt_p4_named(tmp_path, monkeypatch):
     assert state["user_deleted"] and state["person_deleted"]
 
 
-# ─── each PASS condition also FAILs: one fake variant per guard ─────────────
+# ─── each PASS condition also FAILs: a fake or client variant per guard ─────
 
 
 async def test_bed_uuid_kept_is_recorded_not_failed(tmp_path, monkeypatch):
@@ -773,3 +838,206 @@ async def test_raw_call_403_is_inconclusive_with_name(tmp_path, monkeypatch):
     rows = await _rows(_state(order_push_403=True), tmp_path, monkeypatch)
     status, detail = rows["mar_schedule_create"]
     assert status == "INCONCLUSIVE" and "Get Medication Tasks" in detail, detail
+
+
+def _fails(check: str, rows: dict[str, Any], *expect: str) -> str:
+    status, detail = rows[check]
+    assert status == "FAIL", (check, rows[check])
+    for token in expect:
+        assert token in detail, (token, detail)
+    return detail
+
+
+async def test_scheduled_retry_answering_another_administration_fails(tmp_path, monkeypatch):
+    rows = await _rows(_state(admin_uuid_churn=True), tmp_path, monkeypatch)
+    _fails("mar_administration_idempotent", rows, "same_administration=False")
+
+
+async def test_administered_at_read_back_shifted_fails(tmp_path, monkeypatch):
+    # A 5 h 30 m slip on the dose time.
+    rows = await _rows(_state(admin_at_shift_ms=19_800_000), tmp_path, monkeypatch)
+    _fails("mar_administration_idempotent", rows, "administered_at_matches=False")
+
+
+async def test_stopped_dose_stopping_the_order_fails(tmp_path, monkeypatch):
+    rows = await _rows(_state(stop_stops_order=True), tmp_path, monkeypatch)
+    _fails(
+        "mar_administration_idempotent",
+        rows,
+        "later_slot_after_stopped_records=False",
+        "refused=order_not_active",
+    )
+
+
+async def test_placeholder_start_not_the_order_start_fails(tmp_path, monkeypatch):
+    rows = await _rows(_state(placeholder_offset_s=3600), tmp_path, monkeypatch)
+    _fails("mar_schedule_create", rows, "placeholder_shape_ok=False")
+
+
+async def test_second_prn_create_that_posts_a_placeholder_fails(tmp_path, monkeypatch):
+    # A client that answers the repeat as not created but still sends a placeholder.
+    original = phase4_ipd.BahmniIpdCareClient.create_medication_schedule
+    calls: list[Any] = []
+
+    async def reposting(self: Any, w: Any) -> Any:
+        out = await original(self, w)
+        calls.append(w)
+        if len(calls) == 3:
+            body = {"orderUuid": w.order_uuid, "serviceType": "AS_NEEDED_PLACEHOLDER"}
+            await self._http.request("POST", f"{REST}/ipd/schedule/type/medication", json=body)
+        return out
+
+    monkeypatch.setattr(phase4_ipd.BahmniIpdCareClient, "create_medication_schedule", reposting)
+    rows = await _rows(_state(), tmp_path, monkeypatch)
+    _fails("mar_schedule_create", rows, "prn_repeat_created=False", "prn_repeat_writes=1")
+
+
+async def test_fresh_chart_answered_not_created_fails(tmp_path, monkeypatch):
+    original = phase4_ipd.BahmniIpdCareClient.create_medication_schedule
+    calls: list[Any] = []
+
+    async def not_created(self: Any, w: Any) -> Any:
+        out = await original(self, w)
+        calls.append(w)
+        return replace(out, created=False) if len(calls) == 1 else out
+
+    monkeypatch.setattr(phase4_ipd.BahmniIpdCareClient, "create_medication_schedule", not_created)
+    rows = await _rows(_state(), tmp_path, monkeypatch)
+    _fails("mar_schedule_create", rows, "created=False", "instants_match=True")
+
+
+def _adhoc_retry(monkeypatch: Any, state: dict[str, Any], how: str) -> None:
+    """A client whose as-needed retry answers the first dose but did something else too."""
+    original = phase4_ipd.BahmniIpdCareClient.record_adhoc_administration
+    calls: list[Any] = []
+
+    async def retry(self: Any, w: Any) -> Any:
+        out = await original(self, w)
+        calls.append(w)
+        if len(calls) == 2 and how == "post":
+            # Sends the dose again; the module takes the POST and charts nothing.
+            state["adhoc_charts_nothing"] = True
+            with pytest.raises(Exception):  # noqa: B017 - the client's read-back finds no slot
+                await original(self, replace(w, client_ref=uuid4()))
+        if len(calls) == 2 and how == "slot":
+            # A second dose slot on the order, not written by this login.
+            _slot(state, w.order_uuid, "AsNeededMedicationRequest", 1793000000)
+        return out
+
+    monkeypatch.setattr(phase4_ipd.BahmniIpdCareClient, "record_adhoc_administration", retry)
+
+
+async def test_adhoc_retry_that_writes_fails(tmp_path, monkeypatch):
+    state = _state()
+    _adhoc_retry(monkeypatch, state, "post")
+    rows = await _rows(state, tmp_path, monkeypatch)
+    _fails("mar_adhoc_marker", rows, "retry_created=False", "retry_writes=1")
+    assert state["adhoc_posts"] == 2
+
+
+async def test_adhoc_retry_leaving_another_dose_slot_fails(tmp_path, monkeypatch):
+    state = _state()
+    _adhoc_retry(monkeypatch, state, "slot")
+    rows = await _rows(state, tmp_path, monkeypatch)
+    _fails("mar_adhoc_marker", rows, "retry_writes=0", "dose_slots_before=1 after=2")
+
+
+async def test_vitals_retry_adding_obs_fails(tmp_path, monkeypatch):
+    rows = await _rows(_state(retry_preread_misses=True), tmp_path, monkeypatch)
+    _fails("vitals_readback", rows, "retry_created=True", "obs_after_retry=6")
+
+
+async def test_vitals_marker_comment_dropped_fails(tmp_path, monkeypatch):
+    rows = await _rows(_state(drop_obs_comment=True), tmp_path, monkeypatch)
+    _fails("vitals_readback", rows, "marker_kept=False")
+
+
+async def test_vitals_encounter_listing_voided_obs_fails(tmp_path, monkeypatch):
+    rows = await _rows(_state(extra_voided_obs=True), tmp_path, monkeypatch)
+    _fails("vitals_readback", rows, "encounter_obs=4")
+
+
+async def test_vitals_value_read_back_wrong_fails(tmp_path, monkeypatch):
+    rows = await _rows(_state(obs_value_off=1), tmp_path, monkeypatch)
+    _fails("vitals_readback", rows, "read_back_by_concept=0")
+
+
+async def test_vitals_concept_unnamed_fails(tmp_path, monkeypatch):
+    rows = await _rows(_state(obs_concept_unnamed=True), tmp_path, monkeypatch)
+    _fails("vitals_readback", rows, "read_back_by_concept=3 concept_named=0")
+
+
+async def test_io_datetime_read_back_shifted_fails(tmp_path, monkeypatch):
+    rows = await _rows(_state(io_datetime_shift_s=19_800), tmp_path, monkeypatch)
+    _fails("io_concepts_present", rows, "datetime_read_back=True", "datetime_matches=False")
+
+
+async def test_discharge_leaving_the_bed_occupied_fails(tmp_path, monkeypatch):
+    rows = await _rows(_state(discharge_keeps_bed=True), tmp_path, monkeypatch)
+    _fails("bed_identity_across_stay", rows, "occupied_by_bed_id=True", "bed_id_kept=False")
+
+
+async def test_layout_without_the_patient_fails(tmp_path, monkeypatch):
+    rows = await _rows(_state(layout_hides_patients=True), tmp_path, monkeypatch)
+    _fails("bed_identity_across_stay", rows, "occupied_by_bed_id=False", "bed_id_kept=True")
+    _fails("ward_layout_occupants", rows, "on_bed_by_id=False")
+
+
+async def test_ward_patients_leaving_out_the_admitted_patient_fails(tmp_path, monkeypatch):
+    rows = await _rows(_state(ward_patients_omit=True), tmp_path, monkeypatch)
+    _fails("ward_layout_occupants", rows, "on_bed_by_id=True", "listed_with_bed_and_visit=False")
+
+
+async def test_patient_on_a_second_bed_fails(tmp_path, monkeypatch):
+    rows = await _rows(_state(layout_patient_on_two_beds=True), tmp_path, monkeypatch)
+    _fails("ward_layout_occupants", rows, "on_other_beds=1", "listed_with_bed_and_visit=True")
+
+
+# ─── a 403 on any call is a privilege finding, never a FAIL ─────────────────
+
+
+@pytest.mark.parametrize(
+    ("check", "forbid"),
+    [
+        ("ipd_module_versions", ("GET", "/module", "")),
+        ("mar_schedule_create", ("GET", "/order/", "")),
+        ("vitals_readback", ("GET", "/encounter/", "")),
+        ("vitals_readback", ("GET", "/obs", "")),
+        ("vitals_readback", ("GET", "/encounter/", "voided")),
+        ("io_concepts_present", ("GET", "/concept/", "")),
+        ("io_concepts_present", ("GET", "/encounter/", "groupMembers")),
+    ],
+)
+async def test_raw_read_403_is_inconclusive_with_name(tmp_path, monkeypatch, check, forbid):
+    rows = await _rows(_state(forbid=[forbid]), tmp_path, monkeypatch)
+    status, detail = rows[check]
+    assert status == "INCONCLUSIVE" and "Get Medication Tasks" in detail, (forbid, detail)
+
+
+async def test_io_write_403_is_inconclusive_not_a_date_switch(tmp_path, monkeypatch):
+    rows = await _rows(_state(io_write_403=True), tmp_path, monkeypatch)
+    status, detail = rows["io_concepts_present"]
+    assert status == "INCONCLUSIVE" and "Get Medication Tasks" in detail, detail
+    assert "_obs_time" not in detail
+
+
+# ─── later checks and cleanup ───────────────────────────────────────────────
+
+
+async def test_as_needed_check_runs_when_the_scheduled_chart_fails(tmp_path, monkeypatch):
+    rows = await _rows(_state(cap_slots=False), tmp_path, monkeypatch)
+    assert rows["mar_schedule_create"][0] == "FAIL"
+    assert rows["mar_administration_idempotent"][0] == "INCONCLUSIVE"
+    assert rows["mar_adhoc_marker"][0] == "PASS", rows["mar_adhoc_marker"]
+
+
+async def test_cleanup_lists_the_medication_chart_rows_left(tmp_path, monkeypatch, capsys):
+    await _rows(_state(), tmp_path, monkeypatch)
+    out = capsys.readouterr().out
+    assert re.search(r"^CLEANUP medication chart \S.* SKIPPED ", out, re.M), out
+    assert "CLEANUP INCOMPLETE" not in out
+
+
+async def test_schedule_create_records_slot_start_time_as_needs_live(tmp_path, monkeypatch):
+    rows = await _rows(_state(), tmp_path, monkeypatch)
+    assert "slotStartTime_ignored=needs_live" in rows["mar_schedule_create"][1]
