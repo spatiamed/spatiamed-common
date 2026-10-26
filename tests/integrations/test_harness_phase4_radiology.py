@@ -34,6 +34,8 @@ DOC_ENC_TYPE = "9d1e2f30-4a5b-4c6d-8e7f-a0b1c2d3e4f5"
 PROC = "b0fb2bb8-5f71-4811-8c87-9616d791dc3f"
 ORDER = "dbdd61b2-6a72-4cb1-aa5b-7a03e0f46ea9"
 OBS = "0d6f1c2e-91a3-4f7b-8e52-3c1a9b7d6e40"
+OTHER_OBS = "7c2d9e41-3b5a-4c8f-9e10-2a4b6c8d0e1f"
+OTHER_VISIT = "a3c5e7f9-1b2d-4e6f-8a0c-2e4f6a8c0e2a"
 DOC_ENC = "2f4e6a8c-1b3d-4f5a-9c7e-0a2b4c6d8e1f"
 PATIENT = "3e6b15ff-0e45-476a-967a-fb78f2aee234"
 VISIT = "bcdf607f-e497-468f-959c-02715c1d9760"
@@ -76,7 +78,7 @@ def _fake(state: dict[str, Any]) -> httpx.MockTransport:
             )
         body = json.loads(req.content) if req.content else None
         if method == "GET" and path == f"{REST}/ordertype/{ORDER_TYPE}":
-            return httpx.Response(200, json={"uuid": ORDER_TYPE, "name": "Radiology Order"})
+            return httpx.Response(200, json={"uuid": ORDER_TYPE, "name": state["order_type_name"]})
         if method == "GET" and path == f"{REST}/concept/{ORDERABLE_SET}":
             source = "PACS Procedure Code" if state["mapped"] else "Other Source"
             return httpx.Response(
@@ -102,6 +104,8 @@ def _fake(state: dict[str, Any]) -> httpx.MockTransport:
             reply: dict[str, Any] = {"encounterUuid": body["encounterUuid"], "orders": []}
             for o in body.get("orders") or []:
                 if o.get("action") == "DISCONTINUE":
+                    if state["discontinue_fails"]:
+                        return httpx.Response(500, json={"error": {}})
                     state["events"].append("discontinue")
                     state["discontinued"].append(o)
                     state["stopped"] = True
@@ -124,9 +128,13 @@ def _fake(state: dict[str, Any]) -> httpx.MockTransport:
             if state["readback_fails"] > 0:
                 state["readback_fails"] -= 1
                 return httpx.Response(500, json={"error": {}})
-            return httpx.Response(200, json=order_row())
+            row = order_row()
+            # The harness's own wait-then-read asks a narrower rep than the client.
+            if state["stopped_at_check"] and "action" not in req.url.params.get("v", ""):
+                row["dateStopped"] = "2026-10-26T10:05:00.000+0000"
+            return httpx.Response(200, json=row)
         if method == "GET" and path == f"{REST}/visit/{VISIT}":
-            orders = [order_row()] if state["placed"] else []
+            orders = [order_row()] if state["placed"] and state["visit_lists_order"] else []
             return httpx.Response(200, json={"encounters": [{"orders": orders}]})
         if method == "GET" and path == f"{REST}/pacs/studies":
             state["pacs_params"] = dict(req.url.params)
@@ -135,25 +143,19 @@ def _fake(state: dict[str, Any]) -> httpx.MockTransport:
             return httpx.Response(200, json=[])
         if method == "GET" and path == f"{REST}/obs":
             state["obs_params"] = dict(req.url.params)
-            return httpx.Response(
-                200,
-                json={
-                    "results": [
-                        {
-                            "uuid": OBS,
-                            "voided": False,
-                            "order": {"uuid": ORDER},
-                            "encounter": {
-                                "uuid": "e1",
-                                "encounterType": {"uuid": REPORT_ENC_TYPE, "name": "RADIOLOGY"},
-                            },
-                        }
-                    ]
-                },
-            )
+            enc = {
+                "uuid": "e1",
+                "encounterType": {"uuid": REPORT_ENC_TYPE, "name": state["report_enc_name"]},
+            }
+            results = [{"uuid": OBS, "voided": False, "order": {"uuid": ORDER}, "encounter": enc}]
+            if state["second_obs"]:
+                results.append(
+                    {"uuid": OTHER_OBS, "voided": False, "order": {"uuid": ORDER}, "encounter": enc}
+                )
+            return httpx.Response(200, json={"results": results})
         if method == "DELETE" and path == f"{REST}/obs/{OBS}":
             state["obs_voids"] += 1
-            state["obs_voided"] = True
+            state["obs_voided"] = state["void_sticks"]
             return httpx.Response(204)
         if method == "GET" and path == f"{REST}/obs/{OBS}":
             return httpx.Response(200, json={"uuid": OBS, "voided": state["obs_voided"]})
@@ -168,8 +170,8 @@ def _fake(state: dict[str, Any]) -> httpx.MockTransport:
                 200,
                 json={
                     "uuid": DOC_ENC,
-                    "visit": {"uuid": VISIT},
-                    "encounterType": {"uuid": DOC_ENC_TYPE, "name": "RADIOLOGY"},
+                    "visit": {"uuid": state["doc_visit"]},
+                    "encounterType": {"uuid": state["doc_enc_type"], "name": "RADIOLOGY"},
                 },
             )
         if method == "DELETE" and path == f"{REST}/encounter/{DOC_ENC}":
@@ -197,6 +199,15 @@ def _state(**over: Any) -> dict[str, Any]:
         "doc_voided": False,
         "patients": [],
         "dropped": [],
+        "order_type_name": "Radiology Order",
+        "visit_lists_order": True,
+        "stopped_at_check": False,
+        "second_obs": False,
+        "report_enc_name": "RADIOLOGY",
+        "void_sticks": True,
+        "doc_visit": VISIT,
+        "doc_enc_type": DOC_ENC_TYPE,
+        "discontinue_fails": False,
     }
     state.update(over)
     return state
@@ -369,3 +380,93 @@ def test_no_host_or_env_literals():
 def test_check_topics_are_slugs(name):
     topic = {n: t for n, t, _f in phase4_radiology.CHECKS}[name]
     assert re.fullmatch(r"[a-z0-9_]+", topic)
+
+
+# ─── each PASS condition also FAILs: one fake variant per guard ─────────────
+
+
+async def _rows(state: dict[str, Any], tmp_path, monkeypatch) -> dict[str, Any]:
+    x = _ctx(state, tmp_path, monkeypatch)
+    return {n: r for n, _t, r in await phase4_radiology.run_checks(x)}
+
+
+async def test_order_missing_from_visit_fails_placement(tmp_path, monkeypatch):
+    rows = await _rows(_state(visit_lists_order=False), tmp_path, monkeypatch)
+    status, detail = rows["radiology_order_placed"]
+    assert status == "FAIL" and "found_by_visit=False" in detail
+
+
+async def test_order_type_with_another_name_fails_resolution(tmp_path, monkeypatch):
+    rows = await _rows(_state(order_type_name="Lab Order"), tmp_path, monkeypatch)
+    status, detail = rows["radiology_order_type_resolved"]
+    assert status == "FAIL" and "'Lab Order'" in detail
+
+
+async def test_order_stopped_before_imaging_wait_ends_fails(tmp_path, monkeypatch):
+    rows = await _rows(_state(stopped_at_check=True), tmp_path, monkeypatch)
+    status, detail = rows["radiology_order_reaches_imaging"]
+    assert status == "FAIL" and "not active" in detail
+
+
+async def test_second_unvoided_report_on_the_order_fails_readback(tmp_path, monkeypatch):
+    rows = await _rows(_state(second_obs=True), tmp_path, monkeypatch)
+    status, detail = rows["radiology_report_readback"]
+    assert status == "FAIL" and "obs_by_order=2" in detail
+
+
+async def test_report_still_unvoided_fails_void(tmp_path, monkeypatch):
+    rows = await _rows(_state(void_sticks=False), tmp_path, monkeypatch)
+    status, detail = rows["radiology_report_void"]
+    assert status == "FAIL" and "voided=False" in detail
+
+
+@pytest.mark.parametrize(
+    "over, shown",
+    [
+        ({"doc_enc_type": REPORT_ENC_TYPE}, "is_configured_type=False"),
+        ({"doc_visit": OTHER_VISIT}, "same_visit=False"),
+    ],
+)
+async def test_document_in_wrong_type_or_visit_fails(tmp_path, monkeypatch, over, shown):
+    rows = await _rows(_state(**over), tmp_path, monkeypatch)
+    status, detail = rows["radiology_document_filed"]
+    assert status == "FAIL" and shown in detail
+
+
+async def test_uuid_in_a_detail_line_is_scrubbed(tmp_path, monkeypatch):
+    # Server text that carries a uuid (here an encounter type named by one) must not
+    # reach a public detail line.
+    rows = await _rows(_state(report_enc_name=OTHER_OBS), tmp_path, monkeypatch)
+    status, detail = rows["radiology_report_readback"]
+    assert status == "PASS"
+    assert OTHER_OBS not in detail and "<uuid>" in detail
+
+
+async def test_failed_discontinue_reports_cleanup_incomplete(tmp_path, monkeypatch, capsys):
+    state = _state(discontinue_fails=True)
+    x = _ctx(state, tmp_path, monkeypatch)
+    await phase4_radiology.run_checks(x)
+    out = capsys.readouterr().out
+    line = next(ln for ln in out.splitlines() if ln.startswith("CLEANUP radiology orders"))
+    assert "FAILED" in line and "still active" in line, line
+    assert "CLEANUP INCOMPLETE" in out
+    assert x.state["rad_cleanup"][0] < x.state["rad_cleanup"][1]
+
+
+async def test_empty_radiology_config_fails_resolution_and_cleans_up(tmp_path, monkeypatch, capsys):
+    state = _state()
+    x = _ctx(state, tmp_path, monkeypatch)
+    x.h["radiology"] = {}
+    rows = {n: r for n, _t, r in await phase4_radiology.run_checks(x)}
+    status, detail = rows["radiology_order_type_resolved"]
+    assert status == "FAIL" and detail.startswith("radiology config missing ")
+    assert "radiology_order_type_uuid" in detail
+    # The study query needs no radiology config; every other check is blocked or fails.
+    assert all(r[0] != "PASS" for n, r in rows.items() if n != "pacs_studies_endpoint"), rows
+    assert not state["placed"], "nothing is ordered without a config"
+    assert state["dropped"] == [PATIENT], "a patient created on the way is still voided"
+    # No order can exist without a config: the order cleanup is skipped, not FAILED.
+    out = capsys.readouterr().out
+    line = next(ln for ln in out.splitlines() if ln.startswith("CLEANUP radiology orders"))
+    assert "SKIPPED" in line and "FAILED" not in line, line
+    assert "CLEANUP INCOMPLETE" not in out

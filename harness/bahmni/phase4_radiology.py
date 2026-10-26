@@ -14,7 +14,8 @@ Shared-box safety:
 - Only this run's ``LT-P4-`` patient is written to. The imaging system is never called
   directly: everything goes through ``/openmrs``. Nothing here seeds or reads the
   imaging bridge's own tables; ``radiology_order_reaches_imaging`` records the order
-  number for an operator to look up there.
+  number for an operator to look up there. Cleanup discontinues that order at the end of
+  the same run, so the operator sees the NEW message followed by a discontinue there.
 - Cleanup runs at the end of ``run_checks`` whatever happened: the filed document
   encounter is voided, every report obs this run wrote is voided, every active
   radiology order on the run's visit is discontinued (found on the visit, so an order
@@ -127,6 +128,10 @@ async def _patient(x: AdtCtx) -> tuple[str, str, str]:
 
 async def _stop_orders(x: AdtCtx, patient: str, visit: str) -> str | None:
     """Discontinue every active radiology order on the run's visit, then confirm."""
+    cfg = _config(x)
+    if any(not getattr(cfg, k) for k in CONFIG_KEYS):
+        # No order can be placed without the config, so none can be left behind.
+        return "SKIPPED radiology config missing"
     client = _client(x, admin=True)
     failed = 0
     for row in await client.find_radiology_orders(visit):
@@ -227,6 +232,7 @@ async def radiology_order_placed(x: AdtCtx) -> Result:
         for r in rows
     )
     size = len(order.order_number.encode())
+    # Second guard only: the client already raises OrderNumberTooLong above this size.
     return passed(
         size <= MAX_ACCESSION_BYTES and found,
         f"order_number_bytes={size} found_by_visit={found} visit_radiology_rows={len(rows)}",
@@ -248,7 +254,9 @@ async def radiology_order_reaches_imaging(x: AdtCtx) -> Result:
     # looks this order number up in the imaging bridge's test_order table.
     return record(
         f"order_number={order.order_number} waited_s={IMAGING_WAIT_S}; "
-        "delivery not visible via the record: look it up in the imaging bridge test_order table"
+        "delivery not visible via the record: look it up in the imaging bridge test_order table "
+        "(cleanup discontinues it at the end of this run, so a discontinue message follows "
+        "the NEW one there)"
     )
 
 
@@ -348,6 +356,8 @@ async def radiology_document_filed(x: AdtCtx) -> Result:
 
 
 # (name, topic, check): run in this order; later checks build on earlier state.
+# Wire this group through run_checks, not by looping over CHECKS: cleanup (discontinuing
+# orders, voiding reports, documents and the patient) runs only in run_checks.
 CHECKS: list[tuple[str, str, RadCheck]] = [
     ("radiology_order_type_resolved", "imaging_order_setup", radiology_order_type_resolved),
     ("radiology_order_placed", "imaging_order_place", radiology_order_placed),
