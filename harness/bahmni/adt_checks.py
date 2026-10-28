@@ -2188,7 +2188,8 @@ MANUAL_CLEANUP = {
 }
 
 
-async def _cleanup(x: AdtCtx) -> tuple[int, int]:
+async def _cleanup(x: AdtCtx, name: str = NAME) -> tuple[int, int]:
+    """Run the cleanups; after 3 transport errors in a row, list what is LEFT by hand."""
     done = 0
     order = sorted(enumerate(x.cleanups), key=lambda p: (p[1].priority, -p[0]))
     streak = 0
@@ -2196,7 +2197,7 @@ async def _cleanup(x: AdtCtx) -> tuple[int, int]:
         if streak >= 3:
             left = [i for _, i in order[pos:]]
             print(
-                f"CLEANUP ABORTED tunnel down: {len(left)} left; find them by the name {NAME} "
+                f"CLEANUP ABORTED tunnel down: {len(left)} left; find them by the name {name} "
                 "and clean them by hand as the admin:",
                 flush=True,
             )

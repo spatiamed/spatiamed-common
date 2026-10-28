@@ -98,6 +98,86 @@ class RecordDrugOrder:
     instructions: str
 
 
+OrderKind = Literal["drug", "lab", "other"]
+CareSetting = Literal["OUTPATIENT", "INPATIENT"]
+# "structured": Bahmni's dose/frequency fields; "administration_json": parsed from
+# the dosing-instructions JSON (our own pushes); "none": neither was usable.
+DosingSource = Literal["structured", "administration_json", "none"]
+# OpenMRS order fulfiller statuses, written through the order's ``fulfillerdetails``
+# sub-resource (platform 2.2+ for status and comment; ``accessionNumber`` needs 2.3+). A mirror for other
+# Bahmni consumers; the caller keeps the authoritative status.
+FulfillerStatus = Literal[
+    "RECEIVED", "IN_PROGRESS", "EXCEPTION", "ON_HOLD", "DECLINED", "COMPLETED"
+]
+
+
+@dataclass(frozen=True)
+class RecordOrder:
+    """One OpenMRS order as read back from the record (drug, lab or other)."""
+
+    order_uuid: str
+    kind: OrderKind
+    # drugNonCoded, else the drug's name, else the concept's display.
+    display_name: str
+    # None for non-coded drugs: their concept is the install's "other drug" concept.
+    concept_uuid: str | None
+    drug_uuid: str | None
+    encounter_uuid: str
+    visit_uuid: str
+    care_setting: CareSetting
+    dose: float | None
+    dose_units: str | None
+    frequency: str | None
+    duration: int | None
+    duration_units: str | None
+    # As recorded; a pushed order carries a placeholder the caller must judge.
+    quantity: float | None
+    quantity_units: str | None
+    instructions: str | None
+    orderer_provider_uuid: str | None
+    orderer_name: str | None
+    date_activated: datetime
+    date_stopped: datetime | None
+    # NEW | REVISE | DISCONTINUE (RENEW on some builds)
+    action: str
+    previous_order_uuid: str | None
+    # Set by the lab feed (= the encounter uuid in Bahmni).
+    accession_number: str | None
+    fulfiller_status: str | None
+    dosing_source: DosingSource
+    # The prescribed dose as text when it came from the JSON (e.g. "1 tab"); ``dose``
+    # is set only when that text is a plain number.
+    dose_text: str | None
+    # Bahmni stamps every encounter order with an expiry (the encounter session
+    # length). Only the duplicate check honours it; "active" above does not.
+    auto_expire_date: datetime | None = None
+
+
+LabUrgency = Literal["ROUTINE", "STAT"]
+
+
+@dataclass(frozen=True)
+class RecordLabTest:
+    """One orderable lab test or panel from the configured orderable concept set."""
+
+    concept_uuid: str
+    name: str
+    is_panel: bool
+    # The name of the "Sample"-class set the test is listed under in the orderable
+    # set, when it is listed under one; None otherwise.
+    sample_type: str | None
+
+
+@dataclass(frozen=True)
+class RecordLabOrder:
+    """A lab test (or panel) to order with the encounter; ``concept_uuid`` is coded."""
+
+    concept_uuid: str
+    urgency: LabUrgency = "ROUTINE"
+    # Sent as the order's comment to the lab (at most 1024 characters).
+    comment: str = ""
+
+
 @dataclass(frozen=True)
 class RecordEncounterInput:
     """One clinical note as an encounter. ``note_id`` is the idempotency key.
@@ -120,12 +200,18 @@ class RecordEncounterInput:
     drug_orders: list[RecordDrugOrder]
     encounter_type_uuid: str | None = None
     encounter_uuid: UUID | None = None
+    # A concept with an unexpired OUTPATIENT lab order active in the visit is not
+    # re-sent; the result's ``skipped_lab_concepts`` names it.
+    lab_orders: list[RecordLabOrder] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
 class RecordEncounterResult:
     encounter_uuid: str
     created: bool
+    # Concepts of ``lab_orders`` not sent because an unexpired order for the same
+    # concept is already active in the visit (input order, each once).
+    skipped_lab_concepts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

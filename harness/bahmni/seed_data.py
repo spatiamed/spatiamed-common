@@ -18,6 +18,11 @@ ONLY: the IPD visit type, the ADMISSION / TRANSFER / DISCHARGE encounter types, 
 location tagged "Visit Location" above the login location (or BAHMNI_VISIT_LOCATION_NAME).
 The tenant's ADT provisioning creates them; when a required one is missing this exits 1.
 It seeds no ward: the ADT harness creates (and cleans up) its own per-run ward.
+
+``--phase3`` also resolves the orders/lab keys (``verify_adapter_live.py --orders|--lab``)
+by name, READ ONLY: the "Drug Order" and "Lab Order" order types and the orderable lab
+concept set (BAHMNI_LAB_ORDERABLE_SET, default "Laboratory orders"). Lab-system settings
+are never written here: ``--lab`` reads them from ELIS_* env at run time.
 """
 
 from __future__ import annotations
@@ -59,6 +64,8 @@ DISCHARGE_SUMMARY_TYPE = "Discharge Summary"
 DISPOSITION_CODES = {"admit": "Admit Patient", "discharge": "Discharge Patient"}
 ADT_NOTE_CONCEPTS = {"disposition_note": "Disposition Note", "adt_notes": "Adt Notes"}
 VISIT_LOCATION_TAG = "visit location"
+ORDER_TYPES = {"drug_order_type_uuid": "Drug Order", "lab_order_type_uuid": "Lab Order"}
+LAB_ORDERABLE_SET = os.environ.get("BAHMNI_LAB_ORDERABLE_SET", "Laboratory orders")
 
 
 class UnresolvedError(RuntimeError):
@@ -379,6 +386,15 @@ def adt_keys(c: httpx.Client, location_uuid: str) -> dict[str, Any]:
     return keys
 
 
+def phase3_keys(c: httpx.Client) -> dict[str, Any]:
+    """Orders/lab field_mapping keys, resolved by name (nothing is created)."""
+    keys = {k: need(_named(c, "ordertype", n), f"order type {n}") for k, n in ORDER_TYPES.items()}
+    keys["lab_orderable_set_uuid"] = need(
+        _named(c, "concept", LAB_ORDERABLE_SET), f"concept set {LAB_ORDERABLE_SET}"
+    )
+    return keys
+
+
 def main() -> int:
     base, user, password, out = env_or_exit(
         "BAHMNI_BASE_URL", "BAHMNI_USER", "BAHMNI_PASS", "BAHMNI_CONFIG_JSON"
@@ -391,6 +407,8 @@ def main() -> int:
                 adt = adt_keys(c, fm["location_uuid"])
                 fm["concept_map"].update(adt.pop("_adt_note_concepts"))
                 fm.update(adt)
+            if "--phase3" in sys.argv[1:]:
+                cfg["field_mapping"].update(phase3_keys(c))
     except UnresolvedError as exc:
         print(f"seed_data: {exc}", file=sys.stderr)
         return 1

@@ -54,6 +54,14 @@ class BahmniConfig:
     # without asNeeded/quantity, and validates quantityUnits against its concepts).
     # Install-specific: required for drug orders, no default.
     drug_quantity_units: str = ""
+    # ─── Orders ──────────────────────────────────────────────────────────────
+    # Order type uuids; when set they decide an order's kind, else the order type
+    # names "Drug Order" / "Lab Order" do.
+    drug_order_type_uuid: str = ""
+    lab_order_type_uuid: str = ""
+    # Concept set whose Test/LabTest/LabSet members (and panels' members) are
+    # orderable lab tests; required by list_lab_tests.
+    lab_orderable_set_uuid: str = ""
     # our doc_type -> Bahmni concept uuid
     document_type_concepts: Mapping[str, str] = field(default_factory=dict)
     # ─── ADT (admission / transfer / discharge) ──────────────────────────────
