@@ -18,9 +18,9 @@ for cleanup and the box-wide probes. HARNESS_ADT_GLOBAL_STATE=1 also runs the th
 that change box-wide state (restored in ``finally``; HARNESS_ADT_STALE_CLOSE=1 as well for
 the irreversible stale-visit close). HARNESS_DEADLINE_S bounds the run (default 1200).
 
-``--orders`` / ``--lab`` run the orders and lab groups instead (``phase3_checks.py``: visit
+``--orders`` / ``--lab`` run the orders and lab groups instead (``orders_lab_checks.py``: visit
 orders, fulfiller mirror, lab catalogue; lab order to sample, guarded verified collect).
-They need the keys ``seed_data.py --phase3`` writes; ``--lab`` also needs the ELIS_* env
+They need the keys ``seed_data.py --orders-lab`` writes; ``--lab`` also needs the ELIS_* env
 and the ``lab`` extra. Synthetic ``LT-P3-`` patients, voided at the end.
 """
 
@@ -751,12 +751,12 @@ async def main() -> int:
             if admin is not None:
                 await admin.aclose()
     if "--orders" in sys.argv[1:] or "--lab" in sys.argv[1:]:
-        import phase3_checks
+        import orders_lab_checks
 
         group = "lab" if "--lab" in sys.argv[1:] else "orders"
         admin = admin_http()
         try:
-            return await phase3_checks.main(group, cfg, adapter._http, adapter._config, admin)
+            return await orders_lab_checks.main(group, cfg, adapter._http, adapter._config, admin)
         finally:
             await adapter._http.aclose()
             if admin is not None:

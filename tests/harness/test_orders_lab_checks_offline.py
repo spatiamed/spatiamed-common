@@ -1,4 +1,4 @@
-"""Offline checks of the Phase 3 live harness groups (``--orders``, ``--lab``).
+"""Offline checks of the orders and lab live harness groups (``--orders``, ``--lab``).
 
 The live run needs a box; these prove, without one, that:
 - every CHECK row is registered with its topic, in the right group;
@@ -45,10 +45,10 @@ from sm_common.integrations.record_types import (
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 HARNESS = ROOT / "harness" / "bahmni"
 sys.path.insert(0, str(HARNESS))
-import phase3_checks  # noqa: E402
+import orders_lab_checks  # noqa: E402
 
 # THE list: every CHECK line the --orders and --lab groups print, with the topic it verifies.
-# Change it only together with harness/bahmni/phase3_checks.py and its README.
+# Change it only together with harness/bahmni/orders_lab_checks.py and its README.
 CHECK_TOPIC = {
     "noncoded_drug_not_in_odoo": "noncoded_drug_no_sale_line",
     "visit_orders_read": "visit_order_read",
@@ -103,7 +103,7 @@ CANCELED = 9
 
 
 def test_checks_map_to_topics() -> None:
-    groups = {"orders": phase3_checks.ORDERS_CHECKS, "lab": phase3_checks.LAB_CHECKS}
+    groups = {"orders": orders_lab_checks.ORDERS_CHECKS, "lab": orders_lab_checks.LAB_CHECKS}
     names = [n for rows in groups.values() for n, _topic, _fn in rows]
     assert len(names) == len(set(names)), "a CHECK is registered twice"
     registered = {n: topic for rows in groups.values() for n, topic, _fn in rows}
@@ -117,7 +117,7 @@ def test_checks_map_to_topics() -> None:
     assert {topic for _n, topic, _f in groups["lab"]} == LAB_TOPICS
     verify = (HARNESS / "verify_adapter_live.py").read_text()
     assert '"--orders"' in verify and '"--lab"' in verify
-    assert '"--phase3"' in (HARNESS / "seed_data.py").read_text()
+    assert '"--orders-lab"' in (HARNESS / "seed_data.py").read_text()
 
 
 # ─── fakes ───────────────────────────────────────────────────────────────────
@@ -201,7 +201,7 @@ def _bahmni_http() -> BahmniHttp:
 
 def _ctx(
     lab: FakeLab, guard: httpx.MockTransport | None = None, odoo: Any = None
-) -> phase3_checks.OrdersLabCtx:
+) -> orders_lab_checks.OrdersLabCtx:
     cfg = {"harness": {"provider_uuid": "", "tag": "LT-ADAPTER"}, "field_mapping": {}}
     config = BahmniConfig(
         location_uuid="loc", identifier_type_uuid="idt", identifier_source_uuid="ids"
@@ -231,7 +231,7 @@ def _ctx(
         return None
 
     extra: dict[str, Any] = {"odoo_proxy": odoo} if odoo is not None else {}
-    return phase3_checks.OrdersLabCtx(
+    return orders_lab_checks.OrdersLabCtx(
         cfg,
         _bahmni_http(),
         config,
@@ -268,14 +268,14 @@ async def test_collect_probe_sends_full_test_list() -> None:
     lab = FakeLab()
     x = _ctx(lab)
     x.state["sample"] = _pending()
-    status, detail = await phase3_checks.collect_verified(x)
+    status, detail = await orders_lab_checks.collect_verified(x)
     assert status == "PASS", detail
     # Exactly one send, and it carried every test of every type read just before it.
     assert _sent_lists(lab) == [FULL_LIST]
     assert lab.events[:2] == ["pre_read", "send"]
     assert x.state["collect"].accession_number == lab.accession
     # The harness itself never builds the destructive call: only the client does.
-    src = (HARNESS / "phase3_checks.py").read_text()
+    src = (HARNESS / "orders_lab_checks.py").read_text()
     assert PROVIDER_COLLECT not in src and "typeAndTestIds" not in src
     assert "collect_params" not in src and "provider_send_once" not in src
 
@@ -294,7 +294,7 @@ async def test_added_test_probe_injects_between_read_and_send() -> None:
         return True
 
     x.add_test_to_sample = add_test  # type: ignore[method-assign]
-    status, detail = await phase3_checks.added_test_not_cancelled(x)
+    status, detail = await orders_lab_checks.added_test_not_cancelled(x)
     assert lab.events[:3] == ["pre_read", "inject", "send"]
     assert status == "PASS", detail
     assert "lab_tests_changed" in detail
@@ -311,7 +311,7 @@ async def test_added_test_probe_fails_when_the_client_misses_the_cancel() -> Non
         return True  # claims success, but the lab cancels nothing: collect succeeds
 
     x.add_test_to_sample = add_nothing  # type: ignore[method-assign]
-    status, _detail = await phase3_checks.added_test_not_cancelled(x)
+    status, _detail = await orders_lab_checks.added_test_not_cancelled(x)
     assert status == "FAIL"
 
 
@@ -324,7 +324,7 @@ async def test_added_test_probe_inconclusive_and_unsent_when_the_test_never_land
         return False
 
     x.add_test_to_sample = never_lands  # type: ignore[method-assign]
-    status, _detail = await phase3_checks.added_test_not_cancelled(x)
+    status, _detail = await orders_lab_checks.added_test_not_cancelled(x)
     assert status == "INCONCLUSIVE"
     assert _sent_lists(lab) == [], "nothing may be sent when the injection did not land"
 
@@ -345,7 +345,7 @@ async def test_guard_probe_never_names_the_write_provider() -> None:
     seen: list[httpx.Request] = []
     x = _ctx(lab, guard=_guard({}, seen))
     x.state["sample"] = _pending()
-    status, detail = await phase3_checks.guard_header_required(x)
+    status, detail = await orders_lab_checks.guard_header_required(x)
     assert status == "PASS", detail
     assert seen, "the guard probe sent nothing without the header"
     assert {r.method for r in seen} >= {"GET", "HEAD"}
@@ -376,7 +376,7 @@ async def test_guard_probe_fails_when_a_headerless_request_gets_through() -> Non
     seen: list[httpx.Request] = []
     x = _ctx(lab, guard=_guard({"HEAD": 200}, seen))
     x.state["sample"] = _pending()
-    status, _detail = await phase3_checks.guard_header_required(x)
+    status, _detail = await orders_lab_checks.guard_header_required(x)
     assert status == "FAIL"
 
 
@@ -386,7 +386,7 @@ async def test_guard_probes_without_header_even_when_no_sample_appeared() -> Non
     lab = FakeLab()
     seen: list[httpx.Request] = []
     x = _ctx(lab, guard=_guard({"HEAD": 200}, seen))
-    status, detail = await phase3_checks.guard_header_required(x)
+    status, detail = await orders_lab_checks.guard_header_required(x)
     assert status == "FAIL", detail
     assert len(seen) == 5
 
@@ -395,7 +395,7 @@ async def test_guard_without_sample_reports_probe_statuses_but_not_pass() -> Non
     lab = FakeLab()
     seen: list[httpx.Request] = []
     x = _ctx(lab, guard=_guard({}, seen))
-    status, detail = await phase3_checks.guard_header_required(x)
+    status, detail = await orders_lab_checks.guard_header_required(x)
     assert status == "INCONCLUSIVE", detail
     assert "GET:403" in detail and "HEAD:403" in detail
     assert len(seen) == 5
@@ -409,7 +409,7 @@ async def test_collect_verified_fails_when_already_recorded() -> None:
     x = _ctx(lab)
     x.state["sample"] = _pending()
     lab.accession = x.accession(1)  # the sample already carries this run's accession
-    status, detail = await phase3_checks.collect_verified(x)
+    status, detail = await orders_lab_checks.collect_verified(x)
     assert status == "FAIL", detail
     assert _sent_lists(lab) == []
     assert "already_recorded=True" in detail
@@ -426,7 +426,7 @@ async def test_added_test_probe_fails_on_another_rejection_code() -> None:
         return True
 
     x.add_test_to_sample = add_test  # type: ignore[method-assign]
-    status, detail = await phase3_checks.added_test_not_cancelled(x)
+    status, detail = await orders_lab_checks.added_test_not_cancelled(x)
     assert status == "FAIL", detail
     assert "lab_not_recorded" in detail
 
@@ -435,7 +435,7 @@ async def test_duplicate_accession_falls_back_to_the_added_sample() -> None:
     lab = FakeLab()
     x = _ctx(lab)
     x.state["sample"] = _pending()
-    status, detail = await phase3_checks.collect_verified(x)
+    status, detail = await orders_lab_checks.collect_verified(x)
     assert status == "PASS", detail
     first = x.state["collect"].accession_number
     # One sample type in the catalogue: no sibling, but the added-test patient's sample.
@@ -452,7 +452,7 @@ async def test_duplicate_accession_falls_back_to_the_added_sample() -> None:
     lab.pending_ids = [other]
     lab.accession = None
     lab.send_status = 400
-    status, detail = await phase3_checks.duplicate_accession(x)
+    status, detail = await orders_lab_checks.duplicate_accession(x)
     assert status == "PASS", detail
     assert "refused" in detail and "lab_collect_http_400" in detail
     dup_sends = [
@@ -467,11 +467,11 @@ async def test_duplicate_accession_skips_an_added_sample_already_collected() -> 
     lab = FakeLab()
     x = _ctx(lab)
     x.state["sample"] = _pending()
-    status, detail = await phase3_checks.collect_verified(x)
+    status, detail = await orders_lab_checks.collect_verified(x)
     assert status == "PASS", detail
     x.state["added_sample"] = _pending()  # the added-test probe collected it since
     sends = len(_sent_lists(lab))
-    status, detail = await phase3_checks.duplicate_accession(x)
+    status, detail = await orders_lab_checks.duplicate_accession(x)
     assert status == "INCONCLUSIVE", detail
     assert len(_sent_lists(lab)) == sends
 
@@ -519,10 +519,10 @@ async def test_harness_sql_needs_a_short_statement_timeout(
 
     monkeypatch.setitem(sys.modules, "asyncpg", type(sys)("asyncpg"))
     sys.modules["asyncpg"].connect = connect  # type: ignore[attr-defined]
-    sql = phase3_checks.HarnessSql(ELIS_ENV["ELIS_RO_DSN"])
+    sql = orders_lab_checks.HarnessSql(ELIS_ENV["ELIS_RO_DSN"])
     if ok:
         assert await sql.fetch("event_row", 51) == [{"id": 51}]
-        assert conn.fetched == [phase3_checks.HARNESS_SQL["event_row"]]
+        assert conn.fetched == [orders_lab_checks.HARNESS_SQL["event_row"]]
     else:
         with pytest.raises(RuntimeError):
             await sql.fetch("event_row", 51)
@@ -598,7 +598,7 @@ def _odoo_line(product: str, ref: str, partner: str) -> dict[str, Any]:
             "order_id": {"partner_id": {"ref": ref, "name": partner}}}
 
 
-def _orders_state(x: phase3_checks.OrdersLabCtx) -> None:
+def _orders_state(x: orders_lab_checks.OrdersLabCtx) -> None:
     x.state["orders"] = {
         "patient": "p", "visit": "v", "encounter": "e", "labs": ["lab"],
         "drug_identifier": DRUG_ID, "written_at": -1e9,
@@ -607,7 +607,7 @@ def _orders_state(x: phase3_checks.OrdersLabCtx) -> None:
 
 @pytest.fixture
 def odoo_env(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> pathlib.Path:
-    for k in phase3_checks.ODOO_ENV:
+    for k in orders_lab_checks.ODOO_ENV:
         monkeypatch.setenv(k, "lt-p3-odoo")
     monkeypatch.setenv("HARNESS_SAMPLES_DIR", str(tmp_path))
     return tmp_path
@@ -616,14 +616,14 @@ def odoo_env(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> pathlib
 async def test_noncoded_drug_line_found_by_patient_not_by_line_name(
     odoo_env: pathlib.Path,
 ) -> None:
-    name = phase3_checks.NAME
+    name = orders_lab_checks.NAME
     odoo = FakeOdoo([
         _odoo_line("LT-P3 Mapped Product", DRUG_ID, f"{name} Drug {name}"),
         _odoo_line("LT-P3 Lab Test", ORDERS_ID, f"{name} Orders {name}"),
     ])
     x = _ctx(FakeLab(), odoo=odoo)
     _orders_state(x)
-    status, detail = await phase3_checks.noncoded_drug_not_in_odoo(x)
+    status, detail = await orders_lab_checks.noncoded_drug_not_in_odoo(x)
     assert status == "FAIL", detail
     assert "sale_order_lines=1" in detail
     saved = "".join(f.read_text() for f in odoo_env.glob("*.json"))
@@ -633,11 +633,11 @@ async def test_noncoded_drug_line_found_by_patient_not_by_line_name(
 async def test_noncoded_drug_ignores_the_orders_patients_lab_line(
     odoo_env: pathlib.Path,
 ) -> None:
-    name = phase3_checks.NAME
+    name = orders_lab_checks.NAME
     odoo = FakeOdoo([_odoo_line("LT-P3 Lab Test", ORDERS_ID, f"{name} Orders {name}")])
     x = _ctx(FakeLab(), odoo=odoo)
     _orders_state(x)
-    status, detail = await phase3_checks.noncoded_drug_not_in_odoo(x)
+    status, detail = await orders_lab_checks.noncoded_drug_not_in_odoo(x)
     assert status == "PASS", detail
     assert "sale_order_lines=0" in detail
 
@@ -661,13 +661,13 @@ async def test_cleanup_aborts_when_the_tunnel_is_down(
         return fn
 
     for i in range(4):
-        x.later(0, "patient", f"{phase3_checks.NAME} P{i}", down(f"P{i}"))
-    done, total = await phase3_checks._cleanup(x)
+        x.later(0, "patient", f"{orders_lab_checks.NAME} P{i}", down(f"P{i}"))
+    done, total = await orders_lab_checks._cleanup(x)
     out = capsys.readouterr().out
     assert (done, total) == (0, 4)
     assert len(ran) == 3, "cleanup kept calling a dead tunnel"
     assert "CLEANUP ABORTED tunnel down: 1 left" in out
-    assert f"find them by the name {phase3_checks.NAME} " in out
+    assert f"find them by the name {orders_lab_checks.NAME} " in out
     assert "LEFT patient" in out and "void the patient" in out
 
 
@@ -677,7 +677,7 @@ async def test_adt_cleanup_incomplete_names_the_run_tag_even_when_no_check_ran(
     # HARNESS_ONLY matching nothing: no check runs, so no loop variable is ever bound.
     # The CLEANUP INCOMPLETE line must still name the synthetic-record tag, and the
     # SUMMARY and exit code must still come out.
-    adt_checks = phase3_checks.adt_checks
+    adt_checks = orders_lab_checks.adt_checks
     monkeypatch.setenv("HARNESS_ONLY", "no_such_check")
     monkeypatch.delenv("HARNESS_SAMPLES_DIR", raising=False)
 
@@ -699,7 +699,7 @@ async def test_adt_cleanup_incomplete_names_the_run_tag_even_when_no_check_ran(
 async def test_adt_cleanup_incomplete_names_the_run_tag_not_the_last_check(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    adt_checks = phase3_checks.adt_checks
+    adt_checks = orders_lab_checks.adt_checks
     only = adt_checks.ADT_CHECKS[0][0]
     monkeypatch.setenv("HARNESS_ONLY", only)
     monkeypatch.delenv("HARNESS_SAMPLES_DIR", raising=False)
@@ -729,14 +729,14 @@ async def test_adt_cleanup_incomplete_names_the_run_tag_not_the_last_check(
 def test_harness_reads_env_only(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in [*ELIS_ENV, "ELIS_CA_PEM", "ELIS_INSECURE_TLS"]:
         monkeypatch.delenv(name, raising=False)
-    assert phase3_checks.missing_lab_env() == list(ELIS_ENV)
-    with pytest.raises(phase3_checks.MissingEnv) as missing:
-        phase3_checks.elis_config_from_env()
+    assert orders_lab_checks.missing_lab_env() == list(ELIS_ENV)
+    with pytest.raises(orders_lab_checks.MissingEnv) as missing:
+        orders_lab_checks.elis_config_from_env()
     assert missing.value.names == list(ELIS_ENV)
     for k, v in ELIS_ENV.items():
         monkeypatch.setenv(k, v)
-    assert phase3_checks.missing_lab_env() == []
-    cfg = phase3_checks.elis_config_from_env()
+    assert orders_lab_checks.missing_lab_env() == []
+    cfg = orders_lab_checks.elis_config_from_env()
     assert (cfg.base_url, cfg.username, cfg.password) == (
         ELIS_ENV["ELIS_BASE_URL"], ELIS_ENV["ELIS_USER"], ELIS_ENV["ELIS_PASS"]
     )
@@ -745,11 +745,11 @@ def test_harness_reads_env_only(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.accession_prefix == ELIS_ENV["ELIS_ACCESSION_PREFIX"]
     assert cfg.verify_tls is True
     # Odoo is optional and all-or-nothing.
-    for k in phase3_checks.ODOO_ENV:
+    for k in orders_lab_checks.ODOO_ENV:
         monkeypatch.delenv(k, raising=False)
-    assert phase3_checks.odoo_env() is None
+    assert orders_lab_checks.odoo_env() is None
 
-    src = (HARNESS / "phase3_checks.py").read_text()
+    src = (HARNESS / "orders_lab_checks.py").read_text()
     # No default for any lab/Odoo setting, no hosts, no uuids, synthetic names only.
     assert not re.search(r"\b(?:get|getenv|setdefault)\(\s*\"(ELIS|ODOO)_[A-Z_]+\"\s*,", src)
     assert not re.search(r"https?://[A-Za-z0-9]", src)

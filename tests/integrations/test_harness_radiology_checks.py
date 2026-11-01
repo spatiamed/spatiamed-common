@@ -23,7 +23,7 @@ from sm_common.integrations.record_types import RecordAddress, RecordPatient, Re
 HARNESS = pathlib.Path(__file__).resolve().parents[2] / "harness" / "bahmni"
 sys.path.insert(0, str(HARNESS))
 import adt_checks  # noqa: E402
-import phase4_radiology  # noqa: E402
+import radiology_checks  # noqa: E402
 
 REST = "/openmrs/ws/rest/v1"
 ORDER_TYPE = "7e3a1c55-2b9d-4f0e-8a61-0c4d2e9b7f13"
@@ -215,7 +215,7 @@ def _state(**over: Any) -> dict[str, Any]:
 
 def _ctx(state: dict[str, Any], tmp_path, monkeypatch) -> adt_checks.AdtCtx:
     monkeypatch.setenv("HARNESS_SAMPLES_DIR", str(tmp_path))
-    monkeypatch.setattr(phase4_radiology, "IMAGING_WAIT_S", 0)
+    monkeypatch.setattr(radiology_checks, "IMAGING_WAIT_S", 0)
     http = BahmniHttp("https://b.test", "u", "p", transport=_fake(state))
     admin = BahmniHttp("https://b.test", "a", "p", transport=_fake(state))
     config = BahmniConfig(
@@ -276,9 +276,9 @@ def _ctx(state: dict[str, Any], tmp_path, monkeypatch) -> adt_checks.AdtCtx:
 async def test_run_checks_returns_one_row_per_check(tmp_path, monkeypatch):
     state = _state()
     x = _ctx(state, tmp_path, monkeypatch)
-    rows = await phase4_radiology.run_checks(x)
+    rows = await radiology_checks.run_checks(x)
     names = [n for n, _topic, _r in rows]
-    assert names == [n for n, _topic, _fn in phase4_radiology.CHECKS]
+    assert names == [n for n, _topic, _fn in radiology_checks.CHECKS]
     assert len(set(names)) == len(names) == 7
     statuses = {n: r[0] for n, _topic, r in rows}
     assert set(statuses.values()) == {"PASS"}, rows
@@ -297,7 +297,7 @@ async def test_run_checks_returns_one_row_per_check(tmp_path, monkeypatch):
 async def test_cleanup_discontinues_orders(tmp_path, monkeypatch):
     state = _state()
     x = _ctx(state, tmp_path, monkeypatch)
-    await phase4_radiology.run_checks(x)
+    await radiology_checks.run_checks(x)
     assert len(state["discontinued"]) == 1
     dc = state["discontinued"][0]
     assert dc["previousOrderUuid"] == ORDER and dc["action"] == "DISCONTINUE"
@@ -313,7 +313,7 @@ async def test_cleanup_discontinues_an_order_whose_read_back_failed(tmp_path, mo
     # finds the order on the visit and discontinues it.
     state = _state(readback_fails=1)
     x = _ctx(state, tmp_path, monkeypatch)
-    rows = await phase4_radiology.run_checks(x)
+    rows = await radiology_checks.run_checks(x)
     statuses = {n: r[0] for n, _t, r in rows}
     assert statuses["radiology_order_placed"] == "FAIL"
     assert state["placed"]
@@ -324,7 +324,7 @@ async def test_cleanup_discontinues_an_order_whose_read_back_failed(tmp_path, mo
 async def test_order_number_over_16_fails_and_is_discontinued(tmp_path, monkeypatch):
     state = _state(order_number="ORD-12345678901234")
     x = _ctx(state, tmp_path, monkeypatch)
-    rows = await phase4_radiology.run_checks(x)
+    rows = await radiology_checks.run_checks(x)
     statuses = {n: r for n, _t, r in rows}
     status, detail = statuses["radiology_order_placed"]
     assert status == "FAIL" and "order_number_too_long" in detail
@@ -334,7 +334,7 @@ async def test_order_number_over_16_fails_and_is_discontinued(tmp_path, monkeypa
 async def test_pacs_501_recorded_as_fail_with_gp_name(tmp_path, monkeypatch):
     state = _state(pacs_status=501)
     x = _ctx(state, tmp_path, monkeypatch)
-    rows = await phase4_radiology.run_checks(x)
+    rows = await radiology_checks.run_checks(x)
     status, detail = {n: r for n, _t, r in rows}["pacs_studies_endpoint"]
     assert status == "FAIL"
     assert "pacs_not_configured" in detail and "pacsquery.pacsConfig" in detail
@@ -343,7 +343,7 @@ async def test_pacs_501_recorded_as_fail_with_gp_name(tmp_path, monkeypatch):
 async def test_unmapped_procedures_fail_resolution_and_block_orders(tmp_path, monkeypatch):
     state = _state(mapped=False)
     x = _ctx(state, tmp_path, monkeypatch)
-    rows = {n: r for n, _t, r in await phase4_radiology.run_checks(x)}
+    rows = {n: r for n, _t, r in await radiology_checks.run_checks(x)}
     assert rows["radiology_order_type_resolved"][0] == "FAIL"
     assert "mapped=0" in rows["radiology_order_type_resolved"][1]
     assert rows["radiology_order_placed"][0] == "INCONCLUSIVE"
@@ -353,20 +353,20 @@ async def test_unmapped_procedures_fail_resolution_and_block_orders(tmp_path, mo
 async def test_patients_are_lt_p4_named(tmp_path, monkeypatch):
     state = _state()
     x = _ctx(state, tmp_path, monkeypatch)
-    await phase4_radiology.run_checks(x)
+    await radiology_checks.run_checks(x)
     assert len(state["patients"]) == 1, "one synthetic patient per run"
     p = state["patients"][0]
     assert p.given.startswith("LT-P4-") and p.family.startswith("LT-P4-")
 
 
 def test_imaging_wait_is_at_least_30_seconds():
-    assert phase4_radiology.IMAGING_WAIT_S >= 30
+    assert radiology_checks.IMAGING_WAIT_S >= 30
 
 
 def test_no_host_or_env_literals():
-    src = (HARNESS / "phase4_radiology.py").read_text()
+    src = (HARNESS / "radiology_checks.py").read_text()
     for bad in ("os.environ", "getenv", "import os", "http://", "https://", "localhost"):
-        assert bad not in src, f"phase4_radiology.py contains {bad!r}"
+        assert bad not in src, f"radiology_checks.py contains {bad!r}"
     assert not re.search(r"\bLT-P2-", src), "radiology checks use LT-P4- names only"
     assert not re.search(r"\bP\d-L[V]-|\bL[V]-\d", src), "no internal check labels"
     hits = adt_checks.UUID_TOKEN.findall(src)
@@ -376,9 +376,9 @@ def test_no_host_or_env_literals():
         assert bad not in src.lower()
 
 
-@pytest.mark.parametrize("name", [n for n, _t, _f in phase4_radiology.CHECKS])
+@pytest.mark.parametrize("name", [n for n, _t, _f in radiology_checks.CHECKS])
 def test_check_topics_are_slugs(name):
-    topic = {n: t for n, t, _f in phase4_radiology.CHECKS}[name]
+    topic = {n: t for n, t, _f in radiology_checks.CHECKS}[name]
     assert re.fullmatch(r"[a-z0-9_]+", topic)
 
 
@@ -387,7 +387,7 @@ def test_check_topics_are_slugs(name):
 
 async def _rows(state: dict[str, Any], tmp_path, monkeypatch) -> dict[str, Any]:
     x = _ctx(state, tmp_path, monkeypatch)
-    return {n: r for n, _t, r in await phase4_radiology.run_checks(x)}
+    return {n: r for n, _t, r in await radiology_checks.run_checks(x)}
 
 
 async def test_order_missing_from_visit_fails_placement(tmp_path, monkeypatch):
@@ -445,7 +445,7 @@ async def test_uuid_in_a_detail_line_is_scrubbed(tmp_path, monkeypatch):
 async def test_failed_discontinue_reports_cleanup_incomplete(tmp_path, monkeypatch, capsys):
     state = _state(discontinue_fails=True)
     x = _ctx(state, tmp_path, monkeypatch)
-    await phase4_radiology.run_checks(x)
+    await radiology_checks.run_checks(x)
     out = capsys.readouterr().out
     line = next(ln for ln in out.splitlines() if ln.startswith("CLEANUP radiology orders"))
     assert "FAILED" in line and "still active" in line, line
@@ -457,7 +457,7 @@ async def test_empty_radiology_config_fails_resolution_and_cleans_up(tmp_path, m
     state = _state()
     x = _ctx(state, tmp_path, monkeypatch)
     x.h["radiology"] = {}
-    rows = {n: r for n, _t, r in await phase4_radiology.run_checks(x)}
+    rows = {n: r for n, _t, r in await radiology_checks.run_checks(x)}
     status, detail = rows["radiology_order_type_resolved"]
     assert status == "FAIL" and detail.startswith("radiology config missing ")
     assert "radiology_order_type_uuid" in detail

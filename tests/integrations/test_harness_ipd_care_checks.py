@@ -38,7 +38,7 @@ from sm_common.integrations.record_types import (
 HARNESS = pathlib.Path(__file__).resolve().parents[2] / "harness" / "bahmni"
 sys.path.insert(0, str(HARNESS))
 import adt_checks  # noqa: E402
-import phase4_ipd  # noqa: E402
+import ipd_care_checks  # noqa: E402
 
 REST = "/openmrs/ws/rest/v1"
 WARD = "5d0c6f2a-8e41-4b37-9a65-1f2e3d4c5b6a"
@@ -514,7 +514,7 @@ def _fake(state: dict[str, Any]) -> httpx.MockTransport:
 
 
 class _Adt:
-    """The Phase 2 ADT calls, applied to the fake's beds."""
+    """The ADT calls, applied to the fake's beds."""
 
     def __init__(self, state: dict[str, Any]):
         self.state = state
@@ -648,7 +648,7 @@ def _ctx(state: dict[str, Any], tmp_path, monkeypatch, *, admin: bool = True) ->
 
 async def _rows(state: dict[str, Any], tmp_path, monkeypatch, **kw: Any) -> dict[str, Any]:
     x = _ctx(state, tmp_path, monkeypatch, **kw)
-    return {n: r for n, _t, r in await phase4_ipd.run_checks(x)}
+    return {n: r for n, _t, r in await ipd_care_checks.run_checks(x)}
 
 
 # ─── the four named tests ────────────────────────────────────────────────────
@@ -657,9 +657,9 @@ async def _rows(state: dict[str, Any], tmp_path, monkeypatch, **kw: Any) -> dict
 async def test_run_checks_returns_one_row_per_check(tmp_path, monkeypatch):
     state = _state()
     x = _ctx(state, tmp_path, monkeypatch)
-    rows = await phase4_ipd.run_checks(x)
+    rows = await ipd_care_checks.run_checks(x)
     names = [n for n, _topic, _r in rows]
-    assert names == [n for n, _topic, _fn in phase4_ipd.CHECKS]
+    assert names == [n for n, _topic, _fn in ipd_care_checks.CHECKS]
     assert len(set(names)) == len(names) == 10
     statuses = {n: r[0] for n, _topic, r in rows}
     assert set(statuses.values()) == {"PASS"}, rows
@@ -670,7 +670,7 @@ async def test_run_checks_returns_one_row_per_check(tmp_path, monkeypatch):
 async def test_cleanup_deletes_beds_by_id(tmp_path, monkeypatch, capsys):
     state = _state()
     x = _ctx(state, tmp_path, monkeypatch)
-    await phase4_ipd.run_checks(x)
+    await ipd_care_checks.run_checks(x)
     created = state["created_bed_uuids"]
     assert len(created) == 3 and all(b["deleted"] for b in state["beds"].values())
     # Every bed held a patient, so every create-time uuid is gone: the delete went to
@@ -697,9 +697,9 @@ async def test_privilege_403_is_inconclusive_with_name(tmp_path, monkeypatch):
 
 
 def test_no_host_or_env_literals():
-    src = (HARNESS / "phase4_ipd.py").read_text()
+    src = (HARNESS / "ipd_care_checks.py").read_text()
     for bad in ("os.environ", "getenv", "import os", "http://", "https://", "localhost"):
-        assert bad not in src, f"phase4_ipd.py contains {bad!r}"
+        assert bad not in src, f"ipd_care_checks.py contains {bad!r}"
     assert not re.search(r"\bLT-P2-", src), "inpatient checks use LT-P4- names only"
     assert not re.search(r"\bP\d-L[V]-|\bL[V]-\d", src), "no internal check labels"
     hits = adt_checks.UUID_TOKEN.findall(src)
@@ -709,16 +709,16 @@ def test_no_host_or_env_literals():
 # ─── hygiene ─────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("name", [n for n, _t, _f in phase4_ipd.CHECKS])
+@pytest.mark.parametrize("name", [n for n, _t, _f in ipd_care_checks.CHECKS])
 def test_check_topics_are_slugs(name):
-    topic = {n: t for n, t, _f in phase4_ipd.CHECKS}[name]
+    topic = {n: t for n, t, _f in ipd_care_checks.CHECKS}[name]
     assert re.fullmatch(r"[a-z0-9_]+", topic)
 
 
 async def test_patients_wards_and_beds_are_lt_p4_named(tmp_path, monkeypatch):
     state = _state()
     x = _ctx(state, tmp_path, monkeypatch)
-    await phase4_ipd.run_checks(x)
+    await ipd_care_checks.run_checks(x)
     assert len(state["patient_inputs"]) == 2
     for p in state["patient_inputs"]:
         assert p.given.startswith("LT-P4-") and p.family.startswith("LT-P4-")
@@ -876,7 +876,7 @@ async def test_placeholder_start_not_the_order_start_fails(tmp_path, monkeypatch
 
 async def test_second_prn_create_that_posts_a_placeholder_fails(tmp_path, monkeypatch):
     # A client that answers the repeat as not created but still sends a placeholder.
-    original = phase4_ipd.BahmniIpdCareClient.create_medication_schedule
+    original = ipd_care_checks.BahmniIpdCareClient.create_medication_schedule
     calls: list[Any] = []
 
     async def reposting(self: Any, w: Any) -> Any:
@@ -887,13 +887,13 @@ async def test_second_prn_create_that_posts_a_placeholder_fails(tmp_path, monkey
             await self._http.request("POST", f"{REST}/ipd/schedule/type/medication", json=body)
         return out
 
-    monkeypatch.setattr(phase4_ipd.BahmniIpdCareClient, "create_medication_schedule", reposting)
+    monkeypatch.setattr(ipd_care_checks.BahmniIpdCareClient, "create_medication_schedule", reposting)
     rows = await _rows(_state(), tmp_path, monkeypatch)
     _fails("mar_schedule_create", rows, "prn_repeat_created=False", "prn_repeat_writes=1")
 
 
 async def test_fresh_chart_answered_not_created_fails(tmp_path, monkeypatch):
-    original = phase4_ipd.BahmniIpdCareClient.create_medication_schedule
+    original = ipd_care_checks.BahmniIpdCareClient.create_medication_schedule
     calls: list[Any] = []
 
     async def not_created(self: Any, w: Any) -> Any:
@@ -901,14 +901,14 @@ async def test_fresh_chart_answered_not_created_fails(tmp_path, monkeypatch):
         calls.append(w)
         return replace(out, created=False) if len(calls) == 1 else out
 
-    monkeypatch.setattr(phase4_ipd.BahmniIpdCareClient, "create_medication_schedule", not_created)
+    monkeypatch.setattr(ipd_care_checks.BahmniIpdCareClient, "create_medication_schedule", not_created)
     rows = await _rows(_state(), tmp_path, monkeypatch)
     _fails("mar_schedule_create", rows, "created=False", "instants_match=True")
 
 
 def _adhoc_retry(monkeypatch: Any, state: dict[str, Any], how: str) -> None:
     """A client whose as-needed retry answers the first dose but did something else too."""
-    original = phase4_ipd.BahmniIpdCareClient.record_adhoc_administration
+    original = ipd_care_checks.BahmniIpdCareClient.record_adhoc_administration
     calls: list[Any] = []
 
     async def retry(self: Any, w: Any) -> Any:
@@ -924,7 +924,7 @@ def _adhoc_retry(monkeypatch: Any, state: dict[str, Any], how: str) -> None:
             _slot(state, w.order_uuid, "AsNeededMedicationRequest", 1793000000)
         return out
 
-    monkeypatch.setattr(phase4_ipd.BahmniIpdCareClient, "record_adhoc_administration", retry)
+    monkeypatch.setattr(ipd_care_checks.BahmniIpdCareClient, "record_adhoc_administration", retry)
 
 
 async def test_adhoc_retry_that_writes_fails(tmp_path, monkeypatch):

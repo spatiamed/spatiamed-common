@@ -19,7 +19,7 @@ location tagged "Visit Location" above the login location (or BAHMNI_VISIT_LOCAT
 The tenant's ADT provisioning creates them; when a required one is missing this exits 1.
 It seeds no ward: the ADT harness creates (and cleans up) its own per-run ward.
 
-``--phase3`` also resolves the orders/lab keys (``verify_adapter_live.py --orders|--lab``)
+``--orders-lab`` also resolves the orders/lab keys (``verify_adapter_live.py --orders|--lab``)
 by name, READ ONLY: the "Drug Order" and "Lab Order" order types and the orderable lab
 concept set (BAHMNI_LAB_ORDERABLE_SET, default "Laboratory orders"). Lab-system settings
 are never written here: ``--lab`` reads them from ELIS_* env at run time.
@@ -386,7 +386,7 @@ def adt_keys(c: httpx.Client, location_uuid: str) -> dict[str, Any]:
     return keys
 
 
-def phase3_keys(c: httpx.Client) -> dict[str, Any]:
+def orders_lab_keys(c: httpx.Client) -> dict[str, Any]:
     """Orders/lab field_mapping keys, resolved by name (nothing is created)."""
     keys = {k: need(_named(c, "ordertype", n), f"order type {n}") for k, n in ORDER_TYPES.items()}
     keys["lab_orderable_set_uuid"] = need(
@@ -407,8 +407,8 @@ def main() -> int:
                 adt = adt_keys(c, fm["location_uuid"])
                 fm["concept_map"].update(adt.pop("_adt_note_concepts"))
                 fm.update(adt)
-            if "--phase3" in sys.argv[1:]:
-                cfg["field_mapping"].update(phase3_keys(c))
+            if "--orders-lab" in sys.argv[1:]:
+                cfg["field_mapping"].update(orders_lab_keys(c))
     except UnresolvedError as exc:
         print(f"seed_data: {exc}", file=sys.stderr)
         return 1

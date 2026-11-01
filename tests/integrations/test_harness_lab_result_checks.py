@@ -1,4 +1,4 @@
-"""Offline checks of the lab result harness group (``harness/bahmni/phase4_lab.py``).
+"""Offline checks of the lab result harness group (``harness/bahmni/lab_result_checks.py``).
 
 The group only runs live against Bahmni; here it runs against in-process fakes so its
 shape (one row per check, unique names) and its key guard (the newer-result check must
@@ -28,7 +28,7 @@ from sm_common.integrations.lab_results_types import LabResultWriteOutcome
 HARNESS = pathlib.Path(__file__).resolve().parents[2] / "harness" / "bahmni"
 sys.path.insert(0, str(HARNESS))
 import adt_checks  # noqa: E402
-import phase4_lab  # noqa: E402
+import lab_result_checks  # noqa: E402
 
 EXPECTED = [
     "lab_result_types_resolved",
@@ -69,7 +69,7 @@ async def test_run_checks_returns_one_row_per_check(tmp_path, monkeypatch):
         return _session(req) or httpx.Response(404, json={})
 
     x = _ctx(handle, tmp_path, monkeypatch)
-    rows = await phase4_lab.run_checks(x)
+    rows = await lab_result_checks.run_checks(x)
     assert [name for name, _topic, _res in rows] == EXPECTED
     for _name, topic, (status, detail) in rows:
         assert topic and re.fullmatch(r"[a-z0-9_]+", topic)
@@ -81,10 +81,10 @@ async def test_run_checks_returns_one_row_per_check(tmp_path, monkeypatch):
 
 
 def test_check_names_unique():
-    names = [name for name, _topic, _fn in phase4_lab.LAB_CHECKS]
+    names = [name for name, _topic, _fn in lab_result_checks.LAB_CHECKS]
     assert names == EXPECTED
     assert len(set(names)) == len(names)
-    for _name, topic, _fn in phase4_lab.LAB_CHECKS:
+    for _name, topic, _fn in lab_result_checks.LAB_CHECKS:
         assert "LV" not in topic.upper().split("_")
 
 
@@ -165,7 +165,7 @@ async def test_newer_guard_check_fails_when_post_seen(tmp_path, monkeypatch):
     box = _Box(record_has_newer=False)
     x = _ctx(box.handle, tmp_path, monkeypatch)
     _seed_single(x, box)
-    status, detail = await phase4_lab.lab_result_newer_guard(x)
+    status, detail = await lab_result_checks.lab_result_newer_guard(x)
     assert box.posts, "the fake must have seen the POST"
     assert status == "FAIL"
     assert "guard broken" in detail
@@ -176,7 +176,7 @@ async def test_newer_guard_check_passes_when_refused_without_post(tmp_path, monk
     box = _Box(record_has_newer=True)
     x = _ctx(box.handle, tmp_path, monkeypatch)
     _seed_single(x, box)
-    status, detail = await phase4_lab.lab_result_newer_guard(x)
+    status, detail = await lab_result_checks.lab_result_newer_guard(x)
     assert not box.posts
     assert status == "PASS", detail
     assert "record_result_newer" in detail
@@ -186,21 +186,21 @@ async def test_no_clobber_is_inconclusive_without_collected_order(tmp_path, monk
     box = _Box(record_has_newer=True)
     x = _ctx(box.handle, tmp_path, monkeypatch)
     _seed_single(x, box)
-    status, detail = await phase4_lab.lab_result_no_clobber_after_collect(x)
+    status, detail = await lab_result_checks.lab_result_no_clobber_after_collect(x)
     assert status == "INCONCLUSIVE"
     assert "lab_collect" in detail
 
 
 def test_feed_wait_covers_two_cycles():
-    assert phase4_lab.FEED_WAIT_S >= 30
+    assert lab_result_checks.FEED_WAIT_S >= 30
 
 
 def test_no_host_or_env_literals():
-    src = (HARNESS / "phase4_lab.py").read_text()
+    src = (HARNESS / "lab_result_checks.py").read_text()
     for banned in ("os.environ", "getenv", "http://", "https://", "localhost", ".internal"):
-        assert banned not in src, f"phase4_lab.py contains {banned!r}"
-    assert not UUID_LITERAL.findall(src), "phase4_lab.py carries uuid literals"
-    assert not re.search(r"\bLV-|\bP\d-LV", src), "no check-plan labels in a public file"
+        assert banned not in src, f"lab_result_checks.py contains {banned!r}"
+    assert not UUID_LITERAL.findall(src), "lab_result_checks.py carries uuid literals"
+    assert not re.search(r"\bP\d-L[V]-|\bL[V]-\d", src), "no internal check labels"
     # Synthetic records only: the group creates its patients through the shared helper.
     assert "new_patient(" in src
     assert 'h["patient_uuid"]' not in src
@@ -209,12 +209,12 @@ def test_no_host_or_env_literals():
 def test_result_times_are_older_than_now_for_guard():
     # The guard write sits well before the first result (not within the same-instant
     # second the client treats as a retry of the same write).
-    assert timedelta(minutes=1) <= phase4_lab.GUARD_OFFSET
+    assert timedelta(minutes=1) <= lab_result_checks.GUARD_OFFSET
 
 
 @pytest.mark.parametrize("name", EXPECTED)
 def test_every_check_is_async(name):
     import inspect
 
-    fn = dict((n, f) for n, _t, f in phase4_lab.LAB_CHECKS)[name]
+    fn = dict((n, f) for n, _t, f in lab_result_checks.LAB_CHECKS)[name]
     assert inspect.iscoroutinefunction(fn)

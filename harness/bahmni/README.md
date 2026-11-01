@@ -188,7 +188,7 @@ count and elapsed seconds.
 
 ## Orders and lab checks (`--orders`, `--lab`)
 
-`verify_adapter_live.py --orders` and `--lab` run the orders and lab groups in `phase3_checks.py`
+`verify_adapter_live.py --orders` and `--lab` run the orders and lab groups in `orders_lab_checks.py`
 instead of the default checks. Lines and statuses are as for `--adt`, plus `INFO` for an
 optional check that was not configured. Exit codes: 0 nothing FAILed or was
 INCONCLUSIVE; 1 otherwise or an early stop; 2 bad env (missing variables, or the `lab`
@@ -224,7 +224,7 @@ probe sends its header-less requests only to the read provider with `sampleId=0`
 
 ```bash
 pip install -e ".[dev,lab]"
-python harness/bahmni/seed_data.py --phase3
+python harness/bahmni/seed_data.py --orders-lab
 python harness/bahmni/verify_adapter_live.py --orders
 # forward the lab DB port as well as 443 for --lab
 read -rs ELIS_PASS; read -rs ELIS_GUARD_KEY; read -rs ELIS_RO_DSN
@@ -235,7 +235,7 @@ python harness/bahmni/verify_adapter_live.py --lab
 
 | Variable | Used by | Meaning |
 |---|---|---|
-| `BAHMNI_LAB_ORDERABLE_SET` | seed `--phase3`, optional | the orderable lab concept set by name (default `Laboratory orders`) |
+| `BAHMNI_LAB_ORDERABLE_SET` | seed `--orders-lab`, optional | the orderable lab concept set by name (default `Laboratory orders`) |
 | `ELIS_BASE_URL`, `ELIS_USER`, `ELIS_PASS` | `--lab` | the lab system through the port-forward, and its login |
 | `ELIS_GUARD_KEY` | `--lab` | the proxy guard header value |
 | `ELIS_RO_DSN` | `--lab` | `postgresql://user:password@host:port/db` for the read-only lab DB role |

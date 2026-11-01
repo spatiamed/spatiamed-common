@@ -10,7 +10,7 @@ One line per check:
 
     CHECK <name> PASS|FAIL|INCONCLUSIVE|INFO <topic> <detail>
 
-- ``PASS``: as the plan expects; a record-only check prints its value after ``record``.
+- ``PASS``: the behaviour holds; a record-only check prints its value after ``record``.
 - ``FAIL``: the expectation does not hold; the client's fallback for that topic applies.
 - ``INCONCLUSIVE``: the probe could not decide (an earlier check did not complete, or a
   precondition on the box is missing).
@@ -564,7 +564,7 @@ async def noncoded_drug_not_in_odoo(x: OrdersLabCtx) -> Result:
         _odoo_sale_lines, env, x.odoo_proxy, f"{NAME} Drug", f["drug_identifier"]
     )
     x.sample(
-        "p3_odoo_drug_patient_lines",
+        "odoo_drug_patient_lines",
         [{"name": r.get("name"), "product": r.get("product_id")} for r in lines],
     )
     return passed(
