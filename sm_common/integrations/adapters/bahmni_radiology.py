@@ -112,6 +112,10 @@ _DOC_UPLOAD = f"{_REST}/bahmnicore/visitDocument/uploadDocument"
 _DOC_FILE = f"{_REST}/bahmnicore/visitDocument"
 _MAX_REPORT_PART = 20_000  # findings, impression: each 1..20,000 chars
 _MAX_VOID_REASON = 255  # obs.void_reason
+# Report look-up: the obs search by patient and report concept. The nested group is last.
+_OBS_SEARCH_REP = "custom:(uuid,voided,value,order:(uuid))"
+# Pages read before the look-up gives up as incomplete (never "not there").
+MAX_REPORT_SEARCH_PAGES = 40
 _MAX_DOC_COMMENT = 1024
 _MAX_FILE_NAME = 255
 _MAX_IDENTIFIER = 64
@@ -200,6 +204,13 @@ def _check_uuid(name: str, value: Any) -> str:
 
 def _ref(v: Any) -> str | None:
     return _str(v.get("uuid")) if isinstance(v, dict) else None
+
+
+def _has_next(body: dict[str, Any]) -> bool:
+    links = body.get("links")
+    return isinstance(links, list) and any(
+        isinstance(link, dict) and link.get("rel") == "next" for link in links
+    )
 
 
 def _pacs_code(mappings: Any) -> str | None:
@@ -812,6 +823,55 @@ class BahmniRadiologyClient:
         )
         if resp.status_code == 404:
             raise NotFound(f"bahmni: obs {obs_uuid} not found (HTTP 404)")
+
+    async def find_radiology_report_obs(
+        self, *, patient_uuid: str, order_uuid: str, text: str
+    ) -> str | None:
+        """The uuid of a live report obs of ``order_uuid`` whose value is exactly ``text``.
+
+        For a caller reconciling a report write whose answer was lost: ``text`` is the
+        full obs value ``write_radiology_report`` sends (headings included). Every page
+        of ``GET obs?patient=&concept=<report concept>`` is read before answering
+        ``None``. A read that cannot be completed (a failed or unreadable page, or more
+        than ``MAX_REPORT_SEARCH_PAGES`` pages) raises ``TransientError``, so a failed
+        look-up is never taken for "not there". Voided obs and obs of other orders are
+        skipped. HTTP 404 on the route is ``NotFound``; bad input is ``ValueError`` and a
+        missing report concept is ``ConfigError``, both before any I/O.
+        """
+        _check_uuid("patient_uuid", patient_uuid)
+        _check_uuid("order_uuid", order_uuid)
+        if not isinstance(text, str) or not text:
+            raise ValueError("radiology: text must be a non-empty string")
+        concept = self._require("report_concept_uuid")
+        base = {"patient": patient_uuid, "concept": concept, "v": _OBS_SEARCH_REP}
+        seen = 0
+        for _ in range(MAX_REPORT_SEARCH_PAGES):
+            params = dict(base, startIndex=str(seen)) if seen else base
+            resp = await self._http.request("GET", _OBS, params=params, expect=(200,))
+            if resp.status_code == 404:
+                raise NotFound("bahmni: obs route not found (HTTP 404)")
+            try:
+                body = resp.json()
+            except ValueError as exc:
+                raise TransientError("bahmni: obs search response is not JSON") from exc
+            rows = body.get("results") if isinstance(body, dict) else None
+            if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+                raise TransientError("bahmni: obs search response carried no results list")
+            for row in rows:
+                obs_uuid = _str(row.get("uuid"))
+                if (
+                    obs_uuid is not None
+                    and row.get("voided") is not True
+                    and _ref(row.get("order")) == order_uuid
+                    and row.get("value") == text
+                ):
+                    return obs_uuid
+            seen += len(rows)
+            if not rows or not _has_next(body):
+                return None
+        raise TransientError(
+            f"bahmni: report obs search exceeds {MAX_REPORT_SEARCH_PAGES} pages (incomplete)"
+        )
 
     # ─── Image studies ───────────────────────────────────────────────────────
 
