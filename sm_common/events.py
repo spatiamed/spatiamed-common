@@ -138,6 +138,7 @@ REFERRAL_CODE_PATTERN: str = r"^[A-Z0-9][A-Z0-9-]{2,31}$"
 ENQUIRY_REF_PATTERN: str = r"^ENQ-[A-Z2-7]{6,8}$"
 
 ReferralCode = Annotated[str, Field(pattern=REFERRAL_CODE_PATTERN)]
+OpaqueId = Annotated[str, Field(min_length=1, max_length=64)]
 EnquiryRef = Annotated[str, Field(pattern=ENQUIRY_REF_PATTERN)]
 
 
@@ -247,7 +248,7 @@ class VisitTokenIssuedPayload(_OmitNoneFieldsMixin):
     _OMIT_WHEN_NONE: ClassVar[frozenset[str]] = frozenset({"referral_code"})
 
 
-class VisitCompletedPayload(EventPayload):
+class VisitCompletedPayload(_OmitNoneFieldsMixin):
     """``visit.completed`` — visit closed; CareLoop revenue attribution.
 
     Source of truth (producer): QueueCare ``server/app/routers/tokens.py``
@@ -302,24 +303,15 @@ class VisitCompletedPayload(EventPayload):
     language: str | None = None
 
     # --- v0.28.0 (Marketing Team OS). Optional; dropped from the wire when None. ---
-    booking_id: str | None = None
+    booking_id: OpaqueId | None = None
     referral_code: ReferralCode | None = None
 
+    # A payload without the optional fields is byte-identical to the release
+    # before they were added, so a consumer pinned to an older sm_common
+    # (``extra="forbid"``) still parses it (serializer: ``_OmitNoneFieldsMixin``).
     _OMIT_WHEN_NONE: ClassVar[frozenset[str]] = frozenset(
         {"patient_name_encrypted", "language", "booking_id", "referral_code"}
     )
-
-    @model_serializer(mode="wrap")
-    def _omit_unset_optional_fields(
-        self, handler: SerializerFunctionWrapHandler, info: SerializationInfo
-    ) -> dict[str, Any]:
-        # A payload without the v0.22.0 fields is byte-identical to v0.21.0, so a
-        # consumer pinned to an older sm_common (``extra="forbid"``) still parses it.
-        data: dict[str, Any] = handler(self)
-        for key in self._OMIT_WHEN_NONE:
-            if key in data and data[key] is None:
-                del data[key]
-        return data
 
 
 class VisitNoShowPayload(_OmitNoneFieldsMixin):
@@ -345,7 +337,7 @@ class VisitNoShowPayload(_OmitNoneFieldsMixin):
     trigger_source: str = "manual"
 
     # --- v0.28.0 (Marketing Team OS). Optional; dropped from the wire when None. ---
-    booking_id: str | None = None
+    booking_id: OpaqueId | None = None
     referral_code: ReferralCode | None = None
 
     _OMIT_WHEN_NONE: ClassVar[frozenset[str]] = frozenset({"booking_id", "referral_code"})
