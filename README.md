@@ -281,8 +281,18 @@ byte-identical to v0.27.0 and consumers pinned to older releases still parse it.
 - `BookingUpdatedPayload`: `referral_code`, `enquiry_ref`, `booking_source` (<= 30 chars).
 - `VisitCompletedPayload` and `VisitNoShowPayload`: `booking_id`, `referral_code`
   (`VisitNoShowPayload` gains the omit-when-None serializer).
-- `VisitTokenIssuedPayload`: `referral_code`.
+- `VisitTokenIssuedPayload`: `referral_code`, `booking_id` (the token's booking, when it has one).
 - Partner codes and opaque refs only; no PHI.
+
+### Added in v0.27.1
+
+- **Radiology**: `BahmniRadiologyClient.find_radiology_report_obs(patient_uuid=, order_uuid=, text=)`
+  answers the uuid of a live report obs of an order whose value is exactly `text`, for a caller
+  reconciling a report write whose answer was lost. It reads every page of the obs search; an
+  incomplete read raises `TransientError`, never `None`. `MAX_REPORT_SEARCH_PAGES` caps the pages.
+- `bahmni_radiology` is held to strict mypy.
+- Live harness: `verify_adapter_live.py --lab-results`, `--radiology` and `--ipd-care` run the lab
+  result, radiology and inpatient care check groups.
 
 ### Added in v0.27.0
 

@@ -242,3 +242,20 @@ python harness/bahmni/verify_adapter_live.py --lab
 | `ELIS_ACCESSION_PREFIX` | `--lab` | 1 to 3 uppercase letters; the run issues `<prefix><yymmdd>9nnn` |
 | `ELIS_CA_PEM`, `ELIS_INSECURE_TLS=1` | `--lab`, optional | as the `BAHMNI_` pair |
 | `ODOO_URL`, `ODOO_DB`, `ODOO_USER`, `ODOO_PASS` | `--orders`, optional | all four set: `noncoded_drug_not_in_odoo` reads sale lines over XML-RPC |
+
+## Lab result, radiology and inpatient care checks (`--lab-results`, `--radiology`, `--ipd-care`)
+
+`verify_adapter_live.py --lab-results`, `--radiology` and `--ipd-care` run the groups in
+`lab_result_checks.py`, `radiology_checks.py` and `ipd_care_checks.py` on the ADT context
+(same env and logins as `--adt`; one flag per run). Each prints one
+`CHECK <name> <status> <topic> <detail>` line per check and a `SUMMARY` line. The groups
+write synthetic `LT-P4-<RUN>` records only and clean them up at the end of the run. Their
+inputs are the `harness.lab`, `harness.radiology` and `harness.nursing` / `harness.ipd`
+mappings of `BAHMNI_CONFIG_JSON` (see each module's docstring). Exit codes: 0 nothing
+FAILed or was INCONCLUSIVE; 1 otherwise; 4 cleanup incomplete.
+
+```bash
+python harness/bahmni/verify_adapter_live.py --lab-results
+python harness/bahmni/verify_adapter_live.py --radiology
+python harness/bahmni/verify_adapter_live.py --ipd-care
+```

@@ -11,6 +11,7 @@ import respx
 
 from sm_common.integrations.adapters.bahmni_http import BahmniHttp
 from sm_common.integrations.adapters.bahmni_radiology import (
+    MAX_REPORT_SEARCH_PAGES,
     BahmniRadiologyClient,
     OrderNumberTooLong,
     RadiologyConfig,
@@ -1091,6 +1092,151 @@ async def test_void_report_bad_input_before_io(obs_uuid: str, reason: str) -> No
     with respx.mock(assert_all_called=False) as mock:
         with pytest.raises(ValueError):
             await _client().void_radiology_report(obs_uuid, reason)
+        assert mock.calls.call_count == 0
+
+
+# --- report reconcile (find a possibly-landed report) -------------------------
+
+REPORT_TEXT = "Findings:\nNo focal lesion.\n\nImpression:\nNormal study."
+OBS_SEARCH_REP = "custom:(uuid,voided,value,order:(uuid))"
+OTHER_OBS = "3c2d1e0f-7a6b-4c5d-9e8f-1a2b3c4d5e6f"
+FIND_KW: dict[str, Any] = {"patient_uuid": PATIENT, "order_uuid": ORDER_XRAY, "text": REPORT_TEXT}
+
+
+def _obs_row(
+    uuid: str, *, order: str | None = ORDER_XRAY, value: str = REPORT_TEXT, voided: bool = False
+) -> dict[str, Any]:
+    return {
+        "uuid": uuid,
+        "voided": voided,
+        "value": value,
+        "order": {"uuid": order} if order else None,
+    }
+
+
+def _page(rows: list[dict[str, Any]], *, more: bool = False) -> httpx.Response:
+    body: dict[str, Any] = {"results": rows}
+    if more:
+        body["links"] = [{"rel": "next", "uri": f"{OBS_URL}?startIndex={len(rows)}"}]
+    return httpx.Response(200, json=body)
+
+
+@respx.mock
+async def test_find_report_obs_matches_order_and_exact_text() -> None:
+    _login()
+    route = respx.get(OBS_URL).mock(
+        return_value=_page(
+            [
+                _obs_row(ORDER_DC, voided=True),
+                _obs_row(ORDER_CT, order=ORDER_CT),
+                _obs_row(OTHER_OBS, value=REPORT_TEXT + " "),
+                _obs_row(REPORT_OBS),
+            ]
+        )
+    )
+    assert await _client().find_radiology_report_obs(**FIND_KW) == REPORT_OBS
+    params = route.calls[0].request.url.params
+    assert params["patient"] == PATIENT
+    assert params["concept"] == CONFIG["report_concept_uuid"]
+    assert params["v"] == OBS_SEARCH_REP
+
+
+@respx.mock
+async def test_find_report_obs_none_only_after_every_page() -> None:
+    _login()
+    route = respx.get(OBS_URL).mock(
+        side_effect=[
+            _page([_obs_row(ORDER_CT, order=ORDER_CT)], more=True),
+            _page([_obs_row(OTHER_OBS, voided=True)]),
+        ]
+    )
+    assert await _client().find_radiology_report_obs(**FIND_KW) is None
+    assert route.call_count == 2
+    assert "startIndex" not in route.calls[0].request.url.params
+    assert route.calls[1].request.url.params["startIndex"] == "1"
+
+
+@respx.mock
+async def test_find_report_obs_reads_past_the_first_page() -> None:
+    _login()
+    respx.get(OBS_URL).mock(
+        side_effect=[
+            _page([_obs_row(ORDER_CT, order=ORDER_CT)], more=True),
+            _page([_obs_row(REPORT_OBS)]),
+        ]
+    )
+    assert await _client().find_radiology_report_obs(**FIND_KW) == REPORT_OBS
+
+
+@respx.mock
+async def test_find_report_obs_failed_later_page_raises_not_none() -> None:
+    _login()
+    respx.get(OBS_URL).mock(
+        side_effect=[_page([_obs_row(ORDER_CT, order=ORDER_CT)], more=True), httpx.Response(500)]
+    )
+    with pytest.raises(TransientError):
+        await _client().find_radiology_report_obs(**FIND_KW)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, content=b"not json"),
+        httpx.Response(200, json={"error": "x"}),
+        httpx.Response(200, json=[]),
+        httpx.Response(200, json={"results": ["x"]}),
+    ],
+)
+async def test_find_report_obs_unreadable_page_is_transient(response: httpx.Response) -> None:
+    with respx.mock:
+        _login()
+        respx.get(OBS_URL).mock(return_value=response)
+        with pytest.raises(TransientError):
+            await _client().find_radiology_report_obs(**FIND_KW)
+
+
+@respx.mock
+async def test_find_report_obs_page_cap_is_transient() -> None:
+    _login()
+    route = respx.get(OBS_URL).mock(
+        side_effect=lambda request: _page([_obs_row(ORDER_CT, order=ORDER_CT)], more=True)
+    )
+    with pytest.raises(TransientError):
+        await _client().find_radiology_report_obs(**FIND_KW)
+    assert route.call_count == MAX_REPORT_SEARCH_PAGES
+
+
+@respx.mock
+async def test_find_report_obs_404_is_not_found() -> None:
+    _login()
+    respx.get(OBS_URL).mock(return_value=httpx.Response(404))
+    with pytest.raises(NotFound):
+        await _client().find_radiology_report_obs(**FIND_KW)
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"patient_uuid": ""},
+        {"patient_uuid": "a/b"},
+        {"order_uuid": "../obs"},
+        {"text": ""},
+        {"text": None},
+    ],
+)
+async def test_find_report_obs_bad_input_before_io(override: dict[str, Any]) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        with pytest.raises(ValueError):
+            await _client().find_radiology_report_obs(**{**FIND_KW, **override})
+        assert mock.calls.call_count == 0
+
+
+async def test_find_report_obs_missing_concept_is_config_error_before_io() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        with pytest.raises(ConfigError, match="report_concept_uuid"):
+            await _client({**CONFIG, "report_concept_uuid": ""}).find_radiology_report_obs(
+                **FIND_KW
+            )
         assert mock.calls.call_count == 0
 
 
