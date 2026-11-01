@@ -14,6 +14,7 @@ from sm_common.identity.dob import age_on
 from sm_common.integrations.adapters.bahmni_adt import _ENCOUNTER, BahmniAdtMixin, _sent_uuid
 from sm_common.integrations.adapters.bahmni_config import BahmniConfig
 from sm_common.integrations.adapters.bahmni_http import BahmniHttp, from_epoch_ms, to_epoch_ms
+from sm_common.integrations.adapters.bahmni_orders import BahmniOrdersMixin
 from sm_common.integrations.adapters.bahmni_parse import birth_date as parse_birth_date
 from sm_common.integrations.adapters.bahmni_parse import flag, gender
 from sm_common.integrations.adapters.bahmni_parse import when as _when
@@ -112,7 +113,7 @@ def _address_body(a: RecordAddress) -> dict[str, str]:
     }
 
 
-class BahmniRecordClient(BahmniAdtMixin):
+class BahmniRecordClient(BahmniAdtMixin, BahmniOrdersMixin):
     def __init__(self, http: BahmniHttp, config: BahmniConfig) -> None:
         self._http = http
         self._config = config
@@ -697,6 +698,12 @@ class BahmniRecordClient(BahmniAdtMixin):
         TRANSFER or DISCHARGE types (those go through the ADT methods), is a
         ``ConfigError`` before any HTTP call. The marker lookup spans the whole visit,
         whatever the type.
+
+        ``e.lab_orders`` need ``lab_order_type_uuid`` (``ConfigError``) and valid
+        orders (``ValueError``), both checked before any HTTP call. After the marker
+        lookup, the visit's active lab orders are read and their concepts dropped; the
+        rest ride in ``orders``. With no lab orders to send, the body has no
+        ``orders`` key and no extra read is made.
         """
         c = self._config
         if not c.note_marker_concept_uuid:
@@ -720,6 +727,7 @@ class BahmniRecordClient(BahmniAdtMixin):
             raise ConfigError("bahmni: drug_other_concept_uuid is required for drug orders")
         if e.drug_orders and not c.drug_quantity_units:
             raise ConfigError("bahmni: drug_quantity_units is required for drug orders")
+        self._check_lab_orders(e)
         observations: list[dict[str, Any]] = []
         for o in e.obs:
             concept = c.concept_map.get(o.key)
@@ -734,8 +742,9 @@ class BahmniRecordClient(BahmniAdtMixin):
                 return RecordEncounterResult(encounter_uuid=found, created=False)
         self._check_in_visit(visit, e.encounter_at)
         observations.append({"concept": {"uuid": c.note_marker_concept_uuid}, "value": marker})
+        lab_orders, skipped_lab = await self._lab_order_bodies(e)
         sent = str(e.encounter_uuid or e.note_id)
-        body = {
+        body: dict[str, Any] = {
             "encounterUuid": sent,
             "patientUuid": e.patient_uuid,
             "visitUuid": e.visit_uuid,
@@ -747,11 +756,17 @@ class BahmniRecordClient(BahmniAdtMixin):
             "bahmniDiagnoses": [self._diagnosis_body(d) for d in e.diagnoses],
             "drugOrders": [self._drug_body(d) for d in e.drug_orders],
         }
+        if lab_orders:
+            body["orders"] = lab_orders
         resp = await self._post_encounter(_ENCOUNTER, body, None, e.encounter_at)
         if resp.status_code == 404:
             raise WriteNotSupported("bahmni: bahmniencounter route not found (HTTP 404)")
         parsed = resp.json() if resp.content else None
-        return RecordEncounterResult(encounter_uuid=_sent_uuid(sent, parsed), created=True)
+        return RecordEncounterResult(
+            encounter_uuid=_sent_uuid(sent, parsed),
+            created=True,
+            skipped_lab_concepts=skipped_lab,
+        )
 
     # ─── Services, allergies, documents ──────────────────────────────────────
 

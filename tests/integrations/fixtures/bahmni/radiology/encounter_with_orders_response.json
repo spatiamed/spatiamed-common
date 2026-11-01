@@ -1,0 +1,40 @@
+{
+  "encounterUuid": "f4bfb76e-226f-4229-ba97-00232ba35908",
+  "visitUuid": "bcdf607f-e497-468f-959c-02715c1d9760",
+  "patientUuid": "3e6b15ff-0e45-476a-967a-fb78f2aee234",
+  "encounterTypeUuid": "77810ccf-5fca-4070-a717-2b8c0765ca23",
+  "observations": [],
+  "drugOrders": [],
+  "orders": [
+    {
+      "uuid": "dbdd61b2-6a72-4cb1-aa5b-7a03e0f46ea9",
+      "concept": {"uuid": "b0fb2bb8-5f71-4811-8c87-9616d791dc3f", "name": "X-ray Chest PA"},
+      "conceptUuid": "b0fb2bb8-5f71-4811-8c87-9616d791dc3f",
+      "orderType": "Radiology Order",
+      "orderTypeUuid": "0f2b1d55-9e0b-4c36-a1f6-0d1c7a0e4b11",
+      "orderNumber": null,
+      "careSetting": "OUTPATIENT",
+      "action": "NEW",
+      "urgency": "ROUTINE",
+      "commentToFulfiller": "synthetic indication",
+      "previousOrderUuid": null,
+      "dateStopped": null,
+      "voided": false
+    },
+    {
+      "uuid": "b14937e2-5df6-41fd-ac7e-9cb38ff3175f",
+      "concept": {"uuid": "f36d8bc7-dec2-42b6-a564-7a641689702d", "name": "CT Head Plain"},
+      "conceptUuid": "f36d8bc7-dec2-42b6-a564-7a641689702d",
+      "orderType": "Radiology Order",
+      "orderTypeUuid": "0f2b1d55-9e0b-4c36-a1f6-0d1c7a0e4b11",
+      "orderNumber": null,
+      "careSetting": "OUTPATIENT",
+      "action": "NEW",
+      "urgency": "STAT",
+      "commentToFulfiller": null,
+      "previousOrderUuid": null,
+      "dateStopped": null,
+      "voided": false
+    }
+  ]
+}

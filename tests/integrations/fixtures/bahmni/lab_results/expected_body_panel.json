@@ -1,0 +1,83 @@
+{
+  "patientUuid": "deeeac16-ad7f-49f6-96b3-cd6f06196e59",
+  "visitUuid": "fc17aded-c4d6-4bd9-890b-a8e684a33ffe",
+  "encounterTypeUuid": "0c061ae4-61b8-47a5-ab53-c21bc95dbb68",
+  "encounterDateTime": 1792488600000,
+  "locationUuid": "4634dde0-2ee1-4e71-b59f-545c4954b00b",
+  "providers": [{"uuid": "f2e6c810-53eb-4c90-ae9d-03f5356e0e28"}],
+  "observations": [
+    {
+      "concept": {"uuid": "79268774-5fe8-4802-bb27-352a2837b9bc"},
+      "orderUuid": "ecc6d325-5533-4c72-8dca-a3a72f4452c8",
+      "observationDateTime": 1792488000000,
+      "groupMembers": [
+        {
+          "concept": {"uuid": "d6193f4c-8ba0-48bb-a705-93f8289ffd4c"},
+          "orderUuid": "ecc6d325-5533-4c72-8dca-a3a72f4452c8",
+          "observationDateTime": 1792487700250,
+          "groupMembers": [
+            {
+              "concept": {"uuid": "d6193f4c-8ba0-48bb-a705-93f8289ffd4c"},
+              "orderUuid": "ecc6d325-5533-4c72-8dca-a3a72f4452c8",
+              "observationDateTime": 1792487700250,
+              "groupMembers": [
+                {
+                  "concept": {"uuid": "d6193f4c-8ba0-48bb-a705-93f8289ffd4c"},
+                  "orderUuid": "ecc6d325-5533-4c72-8dca-a3a72f4452c8",
+                  "observationDateTime": 1792487700250,
+                  "value": 52
+                },
+                {
+                  "concept": {"uuid": "8d542a8a-b673-4c57-8a7d-8ea4ff3235cb"},
+                  "orderUuid": "ecc6d325-5533-4c72-8dca-a3a72f4452c8",
+                  "observationDateTime": 1792487700250,
+                  "value": true
+                },
+                {
+                  "concept": {"uuid": "bad1abd9-40ca-4334-bfe7-e092961aef46"},
+                  "orderUuid": "ecc6d325-5533-4c72-8dca-a3a72f4452c8",
+                  "observationDateTime": 1792487700250,
+                  "value": 5
+                },
+                {
+                  "concept": {"uuid": "ec402d6a-7c24-4a7a-8af0-5dbd9d03b006"},
+                  "orderUuid": "ecc6d325-5533-4c72-8dca-a3a72f4452c8",
+                  "observationDateTime": 1792487700250,
+                  "value": 40
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "concept": {"uuid": "e92d1c4f-aa52-465e-8764-68f3fab3e056"},
+          "orderUuid": "ecc6d325-5533-4c72-8dca-a3a72f4452c8",
+          "observationDateTime": 1792488000000,
+          "groupMembers": [
+            {
+              "concept": {"uuid": "e92d1c4f-aa52-465e-8764-68f3fab3e056"},
+              "orderUuid": "ecc6d325-5533-4c72-8dca-a3a72f4452c8",
+              "observationDateTime": 1792488000000,
+              "groupMembers": [
+                {
+                  "concept": {"uuid": "e92d1c4f-aa52-465e-8764-68f3fab3e056"},
+                  "orderUuid": "ecc6d325-5533-4c72-8dca-a3a72f4452c8",
+                  "observationDateTime": 1792488000000,
+                  "value": "Haemolysed sample"
+                },
+                {
+                  "concept": {"uuid": "19e49acf-8224-4bdf-ab57-d41caee5ebfd"},
+                  "orderUuid": "ecc6d325-5533-4c72-8dca-a3a72f4452c8",
+                  "observationDateTime": 1792488000000,
+                  "value": true
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "orders": [],
+  "drugOrders": []
+}

@@ -270,6 +270,39 @@ mypy sm_common
 - pytz >= 2024.1
 - fastapi >= 0.115 (optional, only for `sm_common.fastapi_guard`)
 
+### Added in v0.27.0
+
+Orders, lab, radiology and inpatient care on Bahmni, each with a live-harness check group that runs
+against a Bahmni standard stack on synthetic data. The new standalone clients take the shared `BahmniHttp` plus their own config and are
+imported by module path.
+
+- **Orders on `BahmniRecordClient`** (`bahmni_orders.BahmniOrdersMixin`): `list_visit_orders`,
+  `list_active_orders`, `set_fulfiller_status` (reads the order first; a repeat is a no-op) and the lab
+  test catalogue `list_lab_tests`. `RecordEncounterInput.lab_orders` (`RecordLabOrder`) rides in
+  `write_encounter`; concepts already actively ordered on the visit are dropped and reported in
+  `RecordEncounterResult.skipped_lab_concepts`. New types `RecordOrder`, `RecordLabTest`,
+  `RecordLabOrder`; new `BahmniConfig` keys `drug_order_type_uuid`, `lab_order_type_uuid`,
+  `lab_orderable_set_uuid`.
+- **Lab system** (`adapters.openelis`): `OpenElisClient` with `sample_tests`, `pending_samples` and
+  `collect` (accession number + collection date, sent at most once and verified against a read-only lab
+  database). `OpenElisConfig`, `OpenElisHttp`, `OpenElisSql`, `AsyncpgLabExecutor`. XML is parsed with
+  `defusedxml` (new dependency); the database transport needs the new `lab` extra (`asyncpg`).
+- **Lab results** (`adapters.bahmni_lab_results`): `BahmniLabResultsClient` with `read_lab_results`,
+  `read_test_definitions`, `write_lab_results` (newer-result guard, retry recovers a landed write) and
+  `void_lab_result`; `LabResultsConfig`, `LabResultConflictError`; types in `lab_results_types`.
+- **Radiology** (`adapters.bahmni_radiology`): `BahmniRadiologyClient` with `list_procedures`,
+  `place_radiology_orders`, `find_radiology_orders`, `discontinue_radiology_order`,
+  `write_radiology_report`, `void_radiology_report`, `list_pacs_studies` and
+  `upload_radiology_document`; `RadiologyConfig`, `OrderNumberTooLong`; types in `radiology_types`.
+- **Inpatient care** (`adapters.bahmni_ipd_care`): `BahmniIpdCareClient` with `ward_layout`,
+  `ward_patients`, `concept_datatypes`, nursing writes `write_vitals`, `write_intake_output`,
+  `write_nursing_note` (retry-safe on a caller `client_ref`, found again by `find_write_by_ref`), and the
+  medication chart `medication_schedule`, `create_medication_schedule`, `record_administration`,
+  `record_adhoc_administration`; `NursingConfig`; types in `ipd_care_types`.
+- **Live harness:** `verify_adapter_live.py --orders` / `--lab` (keys from `seed_data.py --orders-lab`),
+  and check groups `lab_result_checks`, `radiology_checks` and `ipd_care_checks` (each exposes
+  `run_checks`).
+
 ### Changed in v0.26.0
 
 Encounter writes on `BahmniRecordClient`, from behaviour seen on a live Bahmni standard stack with
