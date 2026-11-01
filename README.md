@@ -270,6 +270,16 @@ mypy sm_common
 - pytz >= 2024.1
 - fastapi >= 0.115 (optional, only for `sm_common.fastapi_guard`)
 
+### Added in v0.27.1
+
+- **Radiology**: `BahmniRadiologyClient.find_radiology_report_obs(patient_uuid=, order_uuid=, text=)`
+  answers the uuid of a live report obs of an order whose value is exactly `text`, for a caller
+  reconciling a report write whose answer was lost. It reads every page of the obs search; an
+  incomplete read raises `TransientError`, never `None`. `MAX_REPORT_SEARCH_PAGES` caps the pages.
+- `bahmni_radiology` is held to strict mypy.
+- Live harness: `verify_adapter_live.py --lab-results`, `--radiology` and `--ipd-care` run the lab
+  result, radiology and inpatient care check groups.
+
 ### Added in v0.27.0
 
 Orders, lab, radiology and inpatient care on Bahmni, each with a live-harness check group that runs
