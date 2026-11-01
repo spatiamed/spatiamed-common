@@ -1,6 +1,6 @@
 [project]
 name = "spatiamed-common"
-version = "0.27.0"
+version = "0.27.1"
 description = "Shared utilities for SpatiaMed platform services"
 requires-python = ">=3.12"
 dependencies = [
@@ -91,6 +91,7 @@ module = [
     "sm_common.integrations.adapters.bahmni_ipd_care",
     "sm_common.integrations.adapters.bahmni_lab_results",
     "sm_common.integrations.adapters.bahmni_orders",
+    "sm_common.integrations.adapters.bahmni_radiology",
     "sm_common.integrations.adapters.bahmni_parse",
     "sm_common.integrations.adapters.bahmni_record",
     "sm_common.integrations.adapters.openelis",
