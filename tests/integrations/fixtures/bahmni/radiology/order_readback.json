@@ -1,0 +1,7 @@
+{
+  "uuid": "dbdd61b2-6a72-4cb1-aa5b-7a03e0f46ea9",
+  "orderNumber": "ORD-1234",
+  "action": "NEW",
+  "concept": {"uuid": "b0fb2bb8-5f71-4811-8c87-9616d791dc3f"},
+  "dateStopped": null
+}

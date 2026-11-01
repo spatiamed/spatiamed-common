@@ -1,0 +1,32 @@
+[
+  {
+    "resourceType": "ImagingStudy",
+    "id": "1.2.826.0.1.3680043.8.498.10000000000000000001",
+    "identifier": [
+      {"system": "urn:dicom:uid", "value": "urn:oid:1.2.826.0.1.3680043.8.498.10000000000000000001"},
+      {"system": "urn:bahmni:accession", "value": "urn:oid:ORD-1234"}
+    ],
+    "subject": {"reference": "Patient/LT-P4-0001"},
+    "started": "20261020",
+    "status": null
+  },
+  {
+    "resourceType": "ImagingStudy",
+    "id": "1.2.826.0.1.3680043.8.498.10000000000000000002",
+    "identifier": [
+      {"system": "urn:dicom:uid", "value": "urn:oid:1.2.826.0.1.3680043.8.498.10000000000000000002"}
+    ],
+    "subject": {"reference": "Patient/LT-P4-0001"},
+    "modality": [{"code": "CT"}],
+    "description": "CT Head Plain",
+    "started": "2026-10-21T09:30:00+05:30"
+  },
+  {
+    "resourceType": "ImagingStudy",
+    "identifier": [
+      {"system": "urn:bahmni:accession", "value": "urn:oid:ORD-9999"}
+    ],
+    "subject": {"reference": "Patient/LT-P4-0001"},
+    "started": "20261022"
+  }
+]

@@ -1,0 +1,49 @@
+{
+  "setMembers": [
+    {
+      "uuid": "b0fb2bb8-5f71-4811-8c87-9616d791dc3f",
+      "display": "X-ray Chest PA",
+      "set": false,
+      "mappings": [
+        {
+          "conceptReferenceTerm": {
+            "code": "399208008",
+            "conceptSource": {"name": "SNOMED CT"}
+          }
+        },
+        {
+          "conceptReferenceTerm": {
+            "code": "XR-CHEST-PA",
+            "conceptSource": {"name": "PACS Procedure Code"}
+          }
+        }
+      ]
+    },
+    {
+      "uuid": "f36d8bc7-dec2-42b6-a564-7a641689702d",
+      "display": "CT Head Plain",
+      "set": false,
+      "mappings": [
+        {
+          "conceptReferenceTerm": {
+            "code": "CT-HEAD",
+            "conceptSource": {"name": "PACS Procedure Code"}
+          }
+        }
+      ]
+    },
+    {
+      "uuid": "7bfda07b-121d-4494-a905-7a686252e406",
+      "display": "Ultrasound Abdomen",
+      "set": false,
+      "mappings": [
+        {
+          "conceptReferenceTerm": {
+            "code": "45036003",
+            "conceptSource": {"name": "SNOMED CT"}
+          }
+        }
+      ]
+    }
+  ]
+}
