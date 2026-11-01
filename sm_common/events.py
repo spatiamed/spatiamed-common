@@ -34,7 +34,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, ClassVar, Literal, TypeVar
+from typing import Annotated, Any, ClassVar, Literal, TypeVar
 
 from pydantic import (
     BaseModel,
@@ -47,7 +47,9 @@ from pydantic import (
 
 __all__ = [
     "CURRENT_ENVELOPE_VERSION",
+    "ENQUIRY_REF_PATTERN",
     "EVENT_PAYLOAD_MODELS",
+    "REFERRAL_CODE_PATTERN",
     "BookingLang",
     "BookingUpdatedPayload",
     "ConsultationScheduledPayload",
@@ -125,6 +127,21 @@ NoticeKind = Literal["confirmed", "rescheduled"]
 
 
 # ---------------------------------------------------------------------------
+# Marketing Team OS (v0.28.0) shared value shapes
+# ---------------------------------------------------------------------------
+#: A partner / campaign referral code as stored and sent on the wire: already
+#: normalised (upper-case, ``-`` separators). Producers normalise raw input
+#: first and DROP a code that still does not match; they never send it raw.
+#: QueueCare and CareLoop copy this literal and assert equality in a test.
+REFERRAL_CODE_PATTERN: str = r"^[A-Z0-9][A-Z0-9-]{2,31}$"
+#: CareLoop's pseudonymous enquiry reference (``ENQ-`` + 6..8 base32 chars).
+ENQUIRY_REF_PATTERN: str = r"^ENQ-[A-Z2-7]{6,8}$"
+
+ReferralCode = Annotated[str, Field(pattern=REFERRAL_CODE_PATTERN)]
+EnquiryRef = Annotated[str, Field(pattern=ENQUIRY_REF_PATTERN)]
+
+
+# ---------------------------------------------------------------------------
 # Payload models
 # ---------------------------------------------------------------------------
 class EventPayload(BaseModel):
@@ -171,7 +188,28 @@ class _BookingFormFieldsMixin(EventPayload):
         return data
 
 
-class VisitTokenIssuedPayload(EventPayload):
+class _OmitNoneFieldsMixin(EventPayload):
+    """Drops the fields named in ``_OMIT_WHEN_NONE`` from the wire when None.
+
+    Same serializer as :class:`VisitCompletedPayload` / the booking-form mixin:
+    a payload without the optional fields is byte-identical to the previous
+    release, so a consumer pinned to an older ``sm_common`` still parses it.
+    """
+
+    _OMIT_WHEN_NONE: ClassVar[frozenset[str]] = frozenset()
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_optional_fields(
+        self, handler: SerializerFunctionWrapHandler, info: SerializationInfo
+    ) -> dict[str, Any]:
+        data: dict[str, Any] = handler(self)
+        for key in self._OMIT_WHEN_NONE:
+            if key in data and data[key] is None:
+                del data[key]
+        return data
+
+
+class VisitTokenIssuedPayload(_OmitNoneFieldsMixin):
     """``visit.token_issued`` — QueueCare token created; CareLoop referral-arrival.
 
     Source of truth (producer): QueueCare ``server/app/routers/tokens.py``
@@ -183,6 +221,12 @@ class VisitTokenIssuedPayload(EventPayload):
     emits ``Token.token_number`` (``String(20)``, e.g. ``"CARD-001"``) and
     ``Token.priority`` (``String``, e.g. ``"normal"``), NOT integers. Typing
     them as ``int`` was the XR-05 adoption blocker (#15).
+
+    v0.28.0 (Marketing Team OS): optional ``referral_code`` — the partner /
+    campaign code captured at the desk or on the booking the token came from.
+    A partner code, not PHI. Dropped from the wire when None, so a token without
+    a code serialises byte-for-byte as on v0.27.0. CareLoop attributes a walk-in
+    with a code to the partner (stage ``booked``, source ``walk_in``).
     """
 
     phone_hash: str
@@ -196,6 +240,11 @@ class VisitTokenIssuedPayload(EventPayload):
     visit_id: str
     pre_registration_id: str | None = None
     is_pre_registered: bool = False
+
+    # --- v0.28.0 (Marketing Team OS). Optional; dropped from the wire when None. ---
+    referral_code: ReferralCode | None = None
+
+    _OMIT_WHEN_NONE: ClassVar[frozenset[str]] = frozenset({"referral_code"})
 
 
 class VisitCompletedPayload(EventPayload):
@@ -224,6 +273,12 @@ class VisitCompletedPayload(EventPayload):
     token language). Both are dropped from the wire when None. CareLoop stores
     the name only on a profile that has none, and the language only over the
     column default.
+
+    v0.28.0 (Marketing Team OS): optional ``booking_id`` (QueueCare
+    ``Token.booking_id`` — the booking this visit came from) and
+    ``referral_code`` (the token's code, else the booking's). Both are dropped
+    from the wire when None. No PHI: an opaque id and a partner code. CareLoop
+    derives ``marketing.visit.attended`` from them.
     """
 
     phone_hash: str
@@ -246,7 +301,13 @@ class VisitCompletedPayload(EventPayload):
     # None -> old producer / unknown.
     language: str | None = None
 
-    _OMIT_WHEN_NONE: ClassVar[frozenset[str]] = frozenset({"patient_name_encrypted", "language"})
+    # --- v0.28.0 (Marketing Team OS). Optional; dropped from the wire when None. ---
+    booking_id: str | None = None
+    referral_code: ReferralCode | None = None
+
+    _OMIT_WHEN_NONE: ClassVar[frozenset[str]] = frozenset(
+        {"patient_name_encrypted", "language", "booking_id", "referral_code"}
+    )
 
     @model_serializer(mode="wrap")
     def _omit_unset_optional_fields(
@@ -261,13 +322,19 @@ class VisitCompletedPayload(EventPayload):
         return data
 
 
-class VisitNoShowPayload(EventPayload):
+class VisitNoShowPayload(_OmitNoneFieldsMixin):
     """``visit.no_show`` — patient did not show; CareLoop no-show rescue.
 
     Source of truth (producer): QueueCare ``server/app/routers/tokens.py``
     (``queue_event("visit.no_show", ...)``). Consumer:
     CareLoop ``app/routers/webhooks.py::_handle_visit_no_show`` (reads only
     ``phone_hash``; ``tenant_id`` + ``event_id`` from the envelope).
+
+    v0.28.0 (Marketing Team OS): optional ``booking_id`` (``Token.booking_id``)
+    and ``referral_code`` (token's, else booking's), dropped from the wire when
+    None (this model had no omit serializer before v0.28.0; without the fields
+    it is byte-identical to v0.27.0). No PHI. CareLoop derives
+    ``marketing.visit.no_show``.
     """
 
     phone_hash: str
@@ -276,6 +343,12 @@ class VisitNoShowPayload(EventPayload):
     doctor_name: str = ""
     was_pre_registered: bool = False
     trigger_source: str = "manual"
+
+    # --- v0.28.0 (Marketing Team OS). Optional; dropped from the wire when None. ---
+    booking_id: str | None = None
+    referral_code: ReferralCode | None = None
+
+    _OMIT_WHEN_NONE: ClassVar[frozenset[str]] = frozenset({"booking_id", "referral_code"})
 
 
 class VisitCancelledPayload(EventPayload):
@@ -414,6 +487,14 @@ class BookingUpdatedPayload(_BookingFormFieldsMixin):
 
     v0.21.0 (post-booking AI triage call): optional ``triage_call_enabled`` and
     ``triage_call_consent``, dropped from the wire when None.
+
+    v0.28.0 (Marketing Team OS): optional ``referral_code`` (partner / campaign
+    code stored on the booking), ``enquiry_ref`` (CareLoop's pseudonymous
+    ``ENQ-…`` ref when the booking came from "Convert to booking") and
+    ``booking_source`` (QueueCare ``Booking.source``, e.g. ``web_form``,
+    ``careloop_campaign``). All dropped from the wire when None. No PHI: partner
+    codes and opaque refs only. CareLoop derives ``marketing.booking.confirmed``
+    / ``.cancelled`` from them.
     """
 
     booking_id: str
@@ -450,6 +531,17 @@ class BookingUpdatedPayload(_BookingFormFieldsMixin):
     # when both are True; QC stays the consent authority at dial time.
     triage_call_enabled: bool | None = None
     triage_call_consent: bool | None = None
+
+    # --- Marketing Team OS (v0.28.0). Optional; omitted when None. ---
+    referral_code: ReferralCode | None = None
+    enquiry_ref: EnquiryRef | None = None
+    booking_source: Annotated[str, Field(max_length=30)] | None = None
+
+    _OMIT_WHEN_NONE: ClassVar[frozenset[str]] = _BookingFormFieldsMixin._OMIT_WHEN_NONE | {
+        "referral_code",
+        "enquiry_ref",
+        "booking_source",
+    }
 
 
 class PatientPreRegisteredPayload(EventPayload):

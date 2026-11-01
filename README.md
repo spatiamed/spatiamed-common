@@ -270,6 +270,20 @@ mypy sm_common
 - pytz >= 2024.1
 - fastapi >= 0.115 (optional, only for `sm_common.fastapi_guard`)
 
+### Added in v0.28.0
+
+Marketing Team OS fields on four existing QueueCare -> CareLoop events. No new event types; every
+new field is optional and dropped from the wire when None, so a payload without them is
+byte-identical to v0.27.0 and consumers pinned to older releases still parse it.
+
+- `REFERRAL_CODE_PATTERN` (`^[A-Z0-9][A-Z0-9-]{2,31}$`) and `ENQUIRY_REF_PATTERN`
+  (`^ENQ-[A-Z2-7]{6,8}$`) exported from `sm_common.events`.
+- `BookingUpdatedPayload`: `referral_code`, `enquiry_ref`, `booking_source` (<= 30 chars).
+- `VisitCompletedPayload` and `VisitNoShowPayload`: `booking_id`, `referral_code`
+  (`VisitNoShowPayload` gains the omit-when-None serializer).
+- `VisitTokenIssuedPayload`: `referral_code`.
+- Partner codes and opaque refs only; no PHI.
+
 ### Added in v0.27.0
 
 Orders, lab, radiology and inpatient care on Bahmni, each with a live-harness check group that runs

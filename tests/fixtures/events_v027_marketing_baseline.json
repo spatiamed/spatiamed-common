@@ -1,0 +1,54 @@
+{
+  "booking.updated": {
+    "json": "{\"booking_id\":\"7d3c0f0e-1111-4c6a-9f00-000000000001\",\"phone_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"status\":\"confirmed\",\"slot_start\":\"2026-11-02T04:30:00+00:00\",\"doctor_name\":\"Dr. Rao\",\"updated_at\":\"2026-11-01T10:00:00+00:00\",\"lang\":\"en\"}",
+    "payload": {
+      "booking_id": "7d3c0f0e-1111-4c6a-9f00-000000000001",
+      "doctor_name": "Dr. Rao",
+      "lang": "en",
+      "phone_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "slot_start": "2026-11-02T04:30:00+00:00",
+      "status": "confirmed",
+      "updated_at": "2026-11-01T10:00:00+00:00"
+    }
+  },
+  "visit.completed": {
+    "json": "{\"phone_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"token_number\":\"OPD-012\",\"visit_id\":\"7d3c0f0e-2222-4c6a-9f00-000000000002\",\"revenue_paise\":50000,\"department\":\"Paediatrics\",\"doctor\":\"Dr. Rao\",\"consultation_duration_minutes\":12,\"language\":\"hi\"}",
+    "payload": {
+      "consultation_duration_minutes": 12,
+      "department": "Paediatrics",
+      "doctor": "Dr. Rao",
+      "language": "hi",
+      "phone_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "revenue_paise": 50000,
+      "token_number": "OPD-012",
+      "visit_id": "7d3c0f0e-2222-4c6a-9f00-000000000002"
+    }
+  },
+  "visit.no_show": {
+    "json": "{\"phone_hash\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"token_number\":\"OPD-013\",\"department_code\":\"PAED\",\"doctor_name\":\"Dr. Rao\",\"was_pre_registered\":true,\"trigger_source\":\"miss_timer\"}",
+    "payload": {
+      "department_code": "PAED",
+      "doctor_name": "Dr. Rao",
+      "phone_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "token_number": "OPD-013",
+      "trigger_source": "miss_timer",
+      "was_pre_registered": true
+    }
+  },
+  "visit.token_issued": {
+    "json": "{\"phone_hash\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"token_number\":\"OPD-014\",\"department_code\":\"PAED\",\"department_name\":\"Paediatrics\",\"doctor_name\":\"Dr. Rao\",\"priority\":\"normal\",\"queue_position\":3,\"estimated_wait_minutes\":15,\"visit_id\":\"7d3c0f0e-3333-4c6a-9f00-000000000003\",\"pre_registration_id\":null,\"is_pre_registered\":false}",
+    "payload": {
+      "department_code": "PAED",
+      "department_name": "Paediatrics",
+      "doctor_name": "Dr. Rao",
+      "estimated_wait_minutes": 15,
+      "is_pre_registered": false,
+      "phone_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "pre_registration_id": null,
+      "priority": "normal",
+      "queue_position": 3,
+      "token_number": "OPD-014",
+      "visit_id": "7d3c0f0e-3333-4c6a-9f00-000000000003"
+    }
+  }
+}

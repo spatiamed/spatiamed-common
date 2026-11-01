@@ -418,6 +418,10 @@ def test_booking_updated_contract_fields() -> None:
         # v0.21.0 post-booking AI triage call (optional)
         "triage_call_enabled",
         "triage_call_consent",
+        # v0.28.0 Marketing Team OS (optional, see test_events_marketing.py)
+        "referral_code",
+        "enquiry_ref",
+        "booking_source",
     }
     p = BookingUpdatedPayload.model_validate(BOOKING_UPDATED_SAMPLE)
     assert p.status == "confirmed"
