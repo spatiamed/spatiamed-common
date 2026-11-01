@@ -1105,9 +1105,9 @@ async def test_pacs_studies_parsed_with_accession_stripped() -> None:
     route = respx.get(PACS_URL).mock(
         return_value=httpx.Response(200, json=_fixture("pacs_studies.json"))
     )
-    studies = await _client().list_pacs_studies("LT-P4-0001", date=date(2026, 10, 20))
+    studies = await _client().list_pacs_studies("LT-RAD-0001", date=date(2026, 10, 20))
     params = route.calls[0].request.url.params
-    assert params["patientId"] == "LT-P4-0001"
+    assert params["patientId"] == "LT-RAD-0001"
     assert params["date"] == "20261020"  # DICOM DA
     assert studies == [
         PacsStudy(
@@ -1131,7 +1131,7 @@ async def test_pacs_studies_parsed_with_accession_stripped() -> None:
 async def test_pacs_studies_without_date_sends_no_date_and_empty_list_is_empty() -> None:
     _login()
     route = respx.get(PACS_URL).mock(return_value=httpx.Response(200, json=[]))
-    assert await _client().list_pacs_studies("LT-P4-0001") == []
+    assert await _client().list_pacs_studies("LT-RAD-0001") == []
     assert "date" not in route.calls[0].request.url.params
 
 
@@ -1144,7 +1144,7 @@ async def test_pacs_501_is_config_error() -> None:
         )
     )
     with pytest.raises(ConfigError, match="pacs_not_configured") as info:
-        await _client().list_pacs_studies("LT-P4-0001")
+        await _client().list_pacs_studies("LT-RAD-0001")
     assert info.value.code == "pacs_not_configured"
 
 
@@ -1154,7 +1154,7 @@ async def test_pacs_500_is_transient(status: int) -> None:
     _login()
     respx.get(PACS_URL).mock(return_value=httpx.Response(status))
     with pytest.raises(TransientError) as info:
-        await _client().list_pacs_studies("LT-P4-0001")
+        await _client().list_pacs_studies("LT-RAD-0001")
     assert not isinstance(info.value, ConfigError)
 
 
@@ -1163,7 +1163,7 @@ async def test_pacs_404_is_not_found() -> None:
     _login()
     respx.get(PACS_URL).mock(return_value=httpx.Response(404))
     with pytest.raises(NotFound):
-        await _client().list_pacs_studies("LT-P4-0001")
+        await _client().list_pacs_studies("LT-RAD-0001")
 
 
 @respx.mock
@@ -1171,7 +1171,7 @@ async def test_pacs_non_list_response_is_vendor_rejected() -> None:
     _login()
     respx.get(PACS_URL).mock(return_value=httpx.Response(200, json={"results": []}))
     with pytest.raises(VendorRejected):
-        await _client().list_pacs_studies("LT-P4-0001")
+        await _client().list_pacs_studies("LT-RAD-0001")
 
 
 @pytest.mark.parametrize("identifier", ["", "   ", "x" * 65, "LT\x00P4"])
