@@ -22,17 +22,24 @@ the irreversible stale-visit close). HARNESS_DEADLINE_S bounds the run (default 
 orders, fulfiller mirror, lab catalogue; lab order to sample, guarded verified collect).
 They need the keys ``seed_data.py --orders-lab`` writes; ``--lab`` also needs the ELIS_* env
 and the ``lab`` extra. Synthetic ``LT-P3-`` patients, voided at the end.
+
+``--lab-results`` / ``--radiology`` / ``--ipd-care`` run the lab result, radiology and
+inpatient care groups instead (``lab_result_checks.py``, ``radiology_checks.py``,
+``ipd_care_checks.py``) on the ADT context; one flag per run. Synthetic ``LT-P4-`` records,
+cleaned up at the end of the run.
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 import pathlib
 import sys
 import xml.etree.ElementTree as ET
-from collections.abc import Awaitable, Callable
+from collections import Counter
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -732,6 +739,64 @@ def build(cfg: dict[str, Any]) -> tuple[BahmniAdapter, BahmniRecordClient]:
     return adapter, record
 
 
+# Flag -> check module. Each module exports ``run_checks(ctx: AdtCtx)`` returning rows of
+# ``(name, topic, (status, detail))`` with details already scrubbed.
+GROUPS: dict[str, str] = {
+    "--lab-results": "lab_result_checks",
+    "--radiology": "radiology_checks",
+    "--ipd-care": "ipd_care_checks",
+}
+# Groups whose run_checks cleans up itself and leaves (done, total) in ctx.state; the
+# others leave their cleanups on the context for the runner.
+_SELF_CLEANING: dict[str, str] = {
+    "radiology_checks": "rad_cleanup",
+    "ipd_care_checks": "ipd_cleanup",
+}
+
+
+def group_module(argv: Sequence[str]) -> str | None:
+    """The check module a group flag selects; ``None`` without one; exits on two."""
+    picked = [GROUPS[a] for a in argv if a in GROUPS]
+    if len(picked) > 1:
+        raise SystemExit(f"pass one of {', '.join(GROUPS)}")
+    return picked[0] if picked else None
+
+
+async def run_group(name: str, module: Any, ctx: Any) -> int:
+    """Run one group's checks, print a CHECK line per row, clean up, and exit-code it.
+
+    0 when nothing FAILed or was INCONCLUSIVE and the cleanup finished; 4 when the
+    cleanup left records; 1 otherwise.
+    """
+    import adt_checks
+
+    t0 = datetime.now(UTC)
+    rows: list[Any] = []
+    try:
+        rows = await module.run_checks(ctx)
+    finally:
+        state_key = _SELF_CLEANING.get(name)
+        if state_key is None:
+            done, total = await adt_checks._cleanup(ctx)
+        else:
+            done, total = ctx.state.get(state_key, (0, 0))
+    counts: Counter[str] = Counter()
+    for check, topic, (status, detail) in rows:
+        counts[status] += 1
+        print(f"CHECK {check} {status} {topic} {detail}", flush=True)
+    elapsed = (datetime.now(UTC) - t0).total_seconds()
+    print(
+        f"SUMMARY {name} pass={counts['PASS']} fail={counts['FAIL']} "
+        f"inconclusive={counts['INCONCLUSIVE']} info={counts['INFO']} of={len(rows)} "
+        f"cleanup={done}/{total} http_calls={ctx.calls} writes={ctx.writes} "
+        f"elapsed_s={elapsed:.0f}",
+        flush=True,
+    )
+    if done < total:
+        return 4
+    return 0 if counts["FAIL"] == 0 and counts["INCONCLUSIVE"] == 0 else 1
+
+
 async def main() -> int:
     need = ("BAHMNI_BASE_URL", "BAHMNI_USER", "BAHMNI_PASS", "BAHMNI_CONFIG_JSON")
     missing = [n for n in need if not os.environ.get(n)]
@@ -757,6 +822,19 @@ async def main() -> int:
         admin = admin_http()
         try:
             return await orders_lab_checks.main(group, cfg, adapter._http, adapter._config, admin)
+        finally:
+            await adapter._http.aclose()
+            if admin is not None:
+                await admin.aclose()
+    group = group_module(sys.argv[1:])
+    if group is not None:
+        import adt_checks
+
+        admin = admin_http()
+        try:
+            module = importlib.import_module(group)
+            ctx = adt_checks.AdtCtx(cfg, adapter._http, adapter._config, admin)
+            return await run_group(group, module, ctx)
         finally:
             await adapter._http.aclose()
             if admin is not None:
