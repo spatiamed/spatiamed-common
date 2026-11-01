@@ -1,0 +1,51 @@
+{
+  "encounters": [
+    {
+      "orders": [
+        {
+          "uuid": "dbdd61b2-6a72-4cb1-aa5b-7a03e0f46ea9",
+          "orderNumber": "ORD-1234",
+          "action": "NEW",
+          "dateActivated": "2026-03-02T10:15:00.000+0530",
+          "dateStopped": "2026-03-02T11:00:00.000+0530",
+          "orderType": {"uuid": "0f2b1d55-9e0b-4c36-a1f6-0d1c7a0e4b11"},
+          "concept": {"uuid": "b0fb2bb8-5f71-4811-8c87-9616d791dc3f"}
+        },
+        {
+          "uuid": "a05b5a22-5e4c-40d3-8892-0c02d66ee035",
+          "orderNumber": "ORD-1235",
+          "action": "NEW",
+          "dateActivated": "2026-03-02T10:15:00.000+0530",
+          "dateStopped": null,
+          "orderType": {"uuid": "4e4e16b2-bb71-4e68-a425-b3640f348876"},
+          "concept": {"uuid": "6e67f008-1778-44e6-aafc-d5e729b9f092"}
+        }
+      ]
+    },
+    {
+      "orders": []
+    },
+    {
+      "orders": [
+        {
+          "uuid": "59d1c4b5-8391-44aa-a055-b04fb480e549",
+          "orderNumber": "ORD-1236",
+          "action": "DISCONTINUE",
+          "dateActivated": "2026-03-02T11:00:00.000+0530",
+          "dateStopped": null,
+          "orderType": {"uuid": "0f2b1d55-9e0b-4c36-a1f6-0d1c7a0e4b11"},
+          "concept": {"uuid": "b0fb2bb8-5f71-4811-8c87-9616d791dc3f"}
+        },
+        {
+          "uuid": "b14937e2-5df6-41fd-ac7e-9cb38ff3175f",
+          "orderNumber": "ORD-1237",
+          "action": "NEW",
+          "dateActivated": "2026-03-02T11:05:00.000+0530",
+          "dateStopped": null,
+          "orderType": {"uuid": "0f2b1d55-9e0b-4c36-a1f6-0d1c7a0e4b11"},
+          "concept": {"uuid": "f36d8bc7-dec2-42b6-a564-7a641689702d"}
+        }
+      ]
+    }
+  ]
+}

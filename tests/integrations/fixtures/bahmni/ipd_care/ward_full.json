@@ -1,0 +1,249 @@
+{
+  "ward": {
+    "uuid": "6c3c8e9b-542e-489f-94d5-68de43d2d4f2",
+    "display": "Test Ward",
+    "links": []
+  },
+  "totalBeds": 11,
+  "occupiedBeds": 2,
+  "bedLayouts": [
+    {
+      "rowNumber": 1,
+      "columnNumber": 1,
+      "bedNumber": "TW-101",
+      "bedId": 101,
+      "bedUuid": "dd813058-3f06-41b9-96b1-8c23612cb72a",
+      "status": "OCCUPIED",
+      "location": "Test Ward",
+      "bedType": {
+        "uuid": "db5f14dc-8502-4391-8156-f607d1861894",
+        "name": "general",
+        "displayName": "General",
+        "description": "Synthetic bed type"
+      },
+      "patients": [
+        {
+          "uuid": "7b6e3725-544e-4850-a807-08db11c429ce",
+          "person": {
+            "gender": "F",
+            "age": 50,
+            "preferredName": {
+              "givenName": "Test",
+              "familyName": "Patient"
+            },
+            "preferredAddress": null
+          },
+          "identifiers": [
+            {
+              "identifier": "TEST200001"
+            }
+          ]
+        }
+      ],
+      "bedTagMaps": []
+    },
+    {
+      "rowNumber": 1,
+      "columnNumber": 2,
+      "bedNumber": "TW-102",
+      "bedId": 102,
+      "bedUuid": "48e60953-e48d-42d1-9643-4e230e525766",
+      "status": "AVAILABLE",
+      "location": "Test Ward",
+      "bedType": {
+        "uuid": "db5f14dc-8502-4391-8156-f607d1861894",
+        "name": "general",
+        "displayName": "General",
+        "description": "Synthetic bed type"
+      },
+      "patients": [],
+      "bedTagMaps": []
+    },
+    {
+      "rowNumber": 1,
+      "columnNumber": 3,
+      "bedNumber": "TW-103",
+      "bedId": 103,
+      "bedUuid": "14c9ee09-5b3e-413c-a6aa-7882dd3867be",
+      "status": "AVAILABLE",
+      "location": "Test Ward",
+      "bedType": {
+        "uuid": "db5f14dc-8502-4391-8156-f607d1861894",
+        "name": "general",
+        "displayName": "General",
+        "description": "Synthetic bed type"
+      },
+      "patients": [],
+      "bedTagMaps": []
+    },
+    {
+      "rowNumber": 1,
+      "columnNumber": 4,
+      "bedNumber": "TW-104",
+      "bedId": 104,
+      "bedUuid": null,
+      "status": "AVAILABLE",
+      "location": "Test Ward",
+      "bedType": null,
+      "patients": [],
+      "bedTagMaps": []
+    },
+    {
+      "rowNumber": 2,
+      "columnNumber": 1,
+      "bedNumber": "TW-105",
+      "bedId": 105,
+      "bedUuid": "f3d2aea0-be44-4c86-873e-1565ac589bed",
+      "status": "AVAILABLE",
+      "location": "Test Ward",
+      "bedType": {
+        "uuid": "db5f14dc-8502-4391-8156-f607d1861894",
+        "name": "general",
+        "displayName": "General",
+        "description": "Synthetic bed type"
+      },
+      "patients": [],
+      "bedTagMaps": []
+    },
+    {
+      "rowNumber": 2,
+      "columnNumber": 2,
+      "bedNumber": "TW-106",
+      "bedId": 106,
+      "bedUuid": "f3d2aea0-be44-4c86-873e-1565ac589bed",
+      "status": "OCCUPIED",
+      "location": "Test Ward",
+      "bedType": {
+        "uuid": "db5f14dc-8502-4391-8156-f607d1861894",
+        "name": "general",
+        "displayName": "General",
+        "description": "Synthetic bed type"
+      },
+      "patients": [
+        {
+          "uuid": "4809f4e0-6c38-48f9-97d9-a9d55ad63b84",
+          "person": {
+            "gender": "F",
+            "age": 50,
+            "preferredName": {
+              "givenName": "Sample",
+              "familyName": "Patient"
+            },
+            "preferredAddress": null
+          },
+          "identifiers": [
+            {
+              "identifier": "TEST200002"
+            }
+          ]
+        }
+      ],
+      "bedTagMaps": []
+    },
+    {
+      "rowNumber": 2,
+      "columnNumber": 3,
+      "bedNumber": null,
+      "bedId": null,
+      "bedUuid": null,
+      "status": null,
+      "location": "Test Ward",
+      "bedType": null,
+      "patients": [],
+      "bedTagMaps": null
+    },
+    {
+      "rowNumber": 2,
+      "columnNumber": 4,
+      "bedNumber": "TW-107",
+      "bedId": 107,
+      "bedUuid": "735d3dde-b35a-4d30-b1f0-64fb0b6d7bd4",
+      "status": "AVAILABLE",
+      "location": "Test Ward",
+      "bedType": {
+        "uuid": "db5f14dc-8502-4391-8156-f607d1861894",
+        "name": "general",
+        "displayName": "General",
+        "description": "Synthetic bed type"
+      },
+      "patients": [],
+      "bedTagMaps": []
+    },
+    {
+      "rowNumber": 3,
+      "columnNumber": 1,
+      "bedNumber": "TW-108",
+      "bedId": 108,
+      "bedUuid": "708ae527-7ea0-40f1-b24e-d1ee17bc10c5",
+      "status": "AVAILABLE",
+      "location": "Test Ward",
+      "bedType": {
+        "uuid": "db5f14dc-8502-4391-8156-f607d1861894",
+        "name": "general",
+        "displayName": "General",
+        "description": "Synthetic bed type"
+      },
+      "patients": [],
+      "bedTagMaps": []
+    },
+    {
+      "rowNumber": 3,
+      "columnNumber": 2,
+      "bedNumber": "TW-109",
+      "bedId": 109,
+      "bedUuid": "9661658b-ef60-4b88-acba-2cf639d1d64c",
+      "status": "AVAILABLE",
+      "location": "Test Ward",
+      "bedType": {
+        "uuid": "db5f14dc-8502-4391-8156-f607d1861894",
+        "name": "general",
+        "displayName": "General",
+        "description": "Synthetic bed type"
+      },
+      "patients": [],
+      "bedTagMaps": []
+    },
+    {
+      "rowNumber": 3,
+      "columnNumber": 3,
+      "bedNumber": "TW-110",
+      "bedId": 110,
+      "bedUuid": "39d3ea39-a3d2-46bf-9b40-68763db19aee",
+      "status": "AVAILABLE",
+      "location": "Test Ward",
+      "bedType": {
+        "uuid": "db5f14dc-8502-4391-8156-f607d1861894",
+        "name": "general",
+        "displayName": "General",
+        "description": "Synthetic bed type"
+      },
+      "patients": [],
+      "bedTagMaps": []
+    },
+    {
+      "rowNumber": 3,
+      "columnNumber": 4,
+      "bedNumber": "TW-111",
+      "bedId": 111,
+      "bedUuid": "dd813058-3f06-41b9-96b1-8c23612cb72a",
+      "status": "AVAILABLE",
+      "location": "Test Ward",
+      "bedType": {
+        "uuid": "db5f14dc-8502-4391-8156-f607d1861894",
+        "name": "general",
+        "displayName": "General",
+        "description": "Synthetic bed type"
+      },
+      "patients": [],
+      "bedTagMaps": [
+        {
+          "uuid": "0b5e1f0e-3d7c-4a8e-9a51-2f1d7c9e6b42",
+          "bedTag": {
+            "uuid": "5c2f9a3e-7b1d-4e6a-8c0f-1a2b3c4d5e6f",
+            "name": "Isolation"
+          }
+        }
+      ]
+    }
+  ]
+}

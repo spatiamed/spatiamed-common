@@ -1,0 +1,31 @@
+{
+  "totalPatients": 2,
+  "activePatients": [
+    {
+      "patientDetails": {
+        "uuid": "7b6e3725-544e-4850-a807-08db11c429ce",
+        "display": "TEST200001 - Test Patient",
+        "person": {"uuid": "7b6e3725-544e-4850-a807-08db11c429ce", "display": "Test Patient"}
+      },
+      "visitDetails": {
+        "uuid": "a3f0c2d4-6b1e-4f7a-9c8d-2e5b7a1c3f90",
+        "admissionDateTime": 1792915200000
+      },
+      "bedDetails": {"bedId": 101, "bedNumber": "TW-101"},
+      "careTeam": null
+    },
+    {
+      "patientDetails": {
+        "uuid": "4809f4e0-6c38-48f9-97d9-a9d55ad63b84",
+        "display": "TEST200002 - Sample Patient",
+        "person": {"uuid": "4809f4e0-6c38-48f9-97d9-a9d55ad63b84", "display": "Sample Patient"}
+      },
+      "visitDetails": {
+        "uuid": "c81d5e3a-2f4b-4d6e-8a7c-9b0e1f2a3d45",
+        "admissionDateTime": null
+      },
+      "bedDetails": null,
+      "careTeam": null
+    }
+  ]
+}

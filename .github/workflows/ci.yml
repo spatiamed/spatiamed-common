@@ -35,7 +35,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev,lab]"
 
       - name: Ruff
         run: ruff check .
