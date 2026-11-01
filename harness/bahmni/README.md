@@ -185,3 +185,60 @@ About 300 to 340 HTTP calls, plus the stale-visit task run (up to `HARNESS_ADT_S
 and up to 30 s waiting for it to close the control visit. Through a
 port-forward that is roughly 3 to 8 minutes. The `SUMMARY` line prints the real call
 count and elapsed seconds.
+
+## Orders and lab checks (`--orders`, `--lab`)
+
+`verify_adapter_live.py --orders` and `--lab` run the orders and lab groups in `phase3_checks.py`
+instead of the default checks. Lines and statuses are as for `--adt`, plus `INFO` for an
+optional check that was not configured. Exit codes: 0 nothing FAILed or was
+INCONCLUSIVE; 1 otherwise or an early stop; 2 bad env (missing variables, or the `lab`
+extra is not installed); 4 cleanup incomplete; 130 interrupted.
+
+> **WARNING: `--lab` records sample collections in the lab system, and they cannot be
+> undone.** The lab DB role is read only, so this run's lab samples stay behind (they belong
+> to voided `LT-P3-<RUN>` patients). `added_test_not_cancelled` makes the lab system cancel
+> a synthetic test on purpose, and `duplicate_accession` reuses an accession number. Run it
+> only on a box that holds synthetic data.
+
+| Group | Check | Topic | What it proves |
+|---|---|---|---|
+| `--orders` | `visit_orders_read` | `visit_order_read` | a non-coded drug order and a lab order read back from the visit; `drugNonCoded` on the full rep; concept null |
+| `--orders` | `lab_tests_catalogue` | `lab_test_catalogue` | the orderable set lists tests (counts only) |
+| `--orders` | `fulfiller_details_write` | `fulfiller_status_mirror` | `fulfillerdetails` writes COMPLETED, reads back, and a repeat writes nothing |
+| `--orders` | `medicationdispense_absent` | `fulfiller_status_mirror` | `GET medicationdispense` answers 404 |
+| `--orders` | `noncoded_drug_not_in_odoo` | `noncoded_drug_no_sale_line` | 60 s after the write, a drug-only synthetic patient has no billing-system sale line (found by partner `ref` = patient identifier or by name, not by line name; product names go to samples; INFO without `ODOO_*`) |
+| `--lab` | `elis_login_path` | `lab_login_path` | the form login yields a session |
+| `--lab` | `lab_order_to_sample` | `lab_order_sample` | one uncollected sample per sample type within 30 s |
+| `--lab` | `guard_header_required` | `lab_write_guard` | without the guard header, GET, HEAD and case-varied or encoded `provider` names get 403; with it, the read provider answers (INCONCLUSIVE, with the header-less statuses, when no sample exists for that read) |
+| `--lab` | `collect_verified` | `sample_collect` | the client's collect: 204, accession and date in the lab DB, a new event for this sample |
+| `--lab` | `accession_len` | `sample_collect` | our accession fits 13 characters (note the analyser limit by hand) |
+| `--lab` | `event_record_columns` | `sample_collect` | which `event_records` column names the sample's encounter |
+| `--lab` | `sibling_orders_marked` | `sample_collect` | whether collecting one sample type marks both orders in the record |
+| `--lab` | `full_list_collect_cancels_nothing` | `collect_keeps_orders` | 30 s after the collect, every lab order is still active and no test is gone |
+| `--lab` | `added_test_not_cancelled` | `collect_keeps_orders` | a test added between the client's read and its send makes the client raise `lab_tests_changed` |
+| `--lab` | `duplicate_accession` | `duplicate_accession` | whether the lab system refuses an accession number already in use on the sibling sample, else the added-test sample while still uncollected (record only) |
+
+The harness never builds the collect call: every collect goes through
+`OpenElisClient.collect`, which sends the full test list it read just before. The guard
+probe sends its header-less requests only to the read provider with `sampleId=0`.
+
+```bash
+pip install -e ".[dev,lab]"
+python harness/bahmni/seed_data.py --phase3
+python harness/bahmni/verify_adapter_live.py --orders
+# forward the lab DB port as well as 443 for --lab
+read -rs ELIS_PASS; read -rs ELIS_GUARD_KEY; read -rs ELIS_RO_DSN
+export ELIS_PASS ELIS_GUARD_KEY ELIS_RO_DSN
+export ELIS_BASE_URL=https://localhost:8443 ELIS_USER=<lab login> ELIS_ACCESSION_PREFIX=SM
+python harness/bahmni/verify_adapter_live.py --lab
+```
+
+| Variable | Used by | Meaning |
+|---|---|---|
+| `BAHMNI_LAB_ORDERABLE_SET` | seed `--phase3`, optional | the orderable lab concept set by name (default `Laboratory orders`) |
+| `ELIS_BASE_URL`, `ELIS_USER`, `ELIS_PASS` | `--lab` | the lab system through the port-forward, and its login |
+| `ELIS_GUARD_KEY` | `--lab` | the proxy guard header value |
+| `ELIS_RO_DSN` | `--lab` | `postgresql://user:password@host:port/db` for the read-only lab DB role |
+| `ELIS_ACCESSION_PREFIX` | `--lab` | 1 to 3 uppercase letters; the run issues `<prefix><yymmdd>9nnn` |
+| `ELIS_CA_PEM`, `ELIS_INSECURE_TLS=1` | `--lab`, optional | as the `BAHMNI_` pair |
+| `ODOO_URL`, `ODOO_DB`, `ODOO_USER`, `ODOO_PASS` | `--orders`, optional | all four set: `noncoded_drug_not_in_odoo` reads sale lines over XML-RPC |
