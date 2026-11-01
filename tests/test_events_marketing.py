@@ -191,3 +191,15 @@ def test_old_consumer_parses_new_producer_without_fields() -> None:
         _OldVisitNoShow.model_validate(
             {**_BASELINE["visit.no_show"]["payload"], "referral_code": "RF-1X"}
         )
+
+
+def test_token_issued_carries_optional_booking_id() -> None:
+    """A token for a booking says which (CareLoop must not count the arrival of a
+    referral booking as a second, walk-in booking). Omitted when None."""
+    base = _BASELINE["visit.token_issued"]["payload"]
+    d = VisitTokenIssuedPayload.model_validate({**base, "booking_id": None}).model_dump(mode="json")
+    assert "booking_id" not in d
+    d2 = VisitTokenIssuedPayload.model_validate(
+        {**base, "booking_id": "b-1", "referral_code": "RF-SHETTY"}
+    ).model_dump(mode="json")
+    assert (d2["booking_id"], d2["referral_code"]) == ("b-1", "RF-SHETTY")

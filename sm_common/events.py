@@ -227,7 +227,9 @@ class VisitTokenIssuedPayload(_OmitNoneFieldsMixin):
     campaign code captured at the desk or on the booking the token came from.
     A partner code, not PHI. Dropped from the wire when None, so a token without
     a code serialises byte-for-byte as on v0.27.0. CareLoop attributes a walk-in
-    with a code to the partner (stage ``booked``, source ``walk_in``).
+    with a code to the partner (stage ``booked``, source ``walk_in``). Optional
+    ``booking_id`` (``Token.booking_id``): a token for a booking books THAT booking
+    instead of counting a second, walk-in one. Also dropped when None.
     """
 
     phone_hash: str
@@ -244,8 +246,11 @@ class VisitTokenIssuedPayload(_OmitNoneFieldsMixin):
 
     # --- v0.28.0 (Marketing Team OS). Optional; dropped from the wire when None. ---
     referral_code: ReferralCode | None = None
+    # The booking this token was issued for (QueueCare ``Token.booking_id``), so the
+    # arrival of a booked patient is not counted again as a walk-in booking.
+    booking_id: OpaqueId | None = None
 
-    _OMIT_WHEN_NONE: ClassVar[frozenset[str]] = frozenset({"referral_code"})
+    _OMIT_WHEN_NONE: ClassVar[frozenset[str]] = frozenset({"referral_code", "booking_id"})
 
 
 class VisitCompletedPayload(_OmitNoneFieldsMixin):
