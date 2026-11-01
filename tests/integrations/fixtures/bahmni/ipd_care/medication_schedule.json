@@ -1,0 +1,144 @@
+[
+  {
+    "id": 11,
+    "uuid": "0e1f2a3b-4c5d-4e6f-8a7b-9c0d1e2f3a4b",
+    "serviceType": "MedicationRequest",
+    "comments": null,
+    "startDate": 1772337600,
+    "endDate": null,
+    "slots": [
+      {
+        "id": 1,
+        "uuid": "a1000000-0000-4000-8000-000000000001",
+        "serviceType": "MedicationRequest",
+        "status": "COMPLETED",
+        "startTime": 1772418600,
+        "order": {
+          "uuid": "5d1c7a2e-3b4f-4e6a-9c8d-7f1e2a3b4c5d",
+          "orderNumber": "ORD-T-1",
+          "drug": {
+            "uuid": "1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e",
+            "display": "Test Paracetamol 500 mg"
+          },
+          "action": "NEW",
+          "dateStopped": null
+        },
+        "medicationAdministration": {
+          "uuid": "b1000000-0000-4000-8000-000000000001",
+          "patientUuid": "7b6e3725-544e-4850-a807-08db11c429ce",
+          "encounterUuid": null,
+          "orderUuid": null,
+          "providers": [],
+          "notes": [
+            {
+              "uuid": "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d",
+              "text": "given"
+            }
+          ],
+          "status": "completed",
+          "statusReason": null,
+          "drug": null,
+          "dosingInstructions": null,
+          "dose": 1.0,
+          "doseUnits": null,
+          "route": null,
+          "site": null,
+          "administeredDateTime": 1772419260000
+        },
+        "notes": null
+      },
+      {
+        "id": 1,
+        "uuid": "a1000000-0000-4000-8000-000000000002",
+        "serviceType": "MedicationRequest",
+        "status": "NOT_DONE",
+        "startTime": 1772440200,
+        "order": {
+          "uuid": "5d1c7a2e-3b4f-4e6a-9c8d-7f1e2a3b4c5d",
+          "orderNumber": "ORD-T-1",
+          "drug": {
+            "uuid": "1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e",
+            "display": "Test Paracetamol 500 mg"
+          },
+          "action": "NEW",
+          "dateStopped": null
+        },
+        "medicationAdministration": {
+          "uuid": "b1000000-0000-4000-8000-000000000002",
+          "patientUuid": "7b6e3725-544e-4850-a807-08db11c429ce",
+          "encounterUuid": null,
+          "orderUuid": null,
+          "providers": [],
+          "notes": [],
+          "status": "not-done",
+          "statusReason": null,
+          "drug": null,
+          "dosingInstructions": null,
+          "dose": 1.0,
+          "doseUnits": null,
+          "route": null,
+          "site": null,
+          "administeredDateTime": 1772440500000
+        },
+        "notes": null
+      },
+      {
+        "id": 1,
+        "uuid": "a1000000-0000-4000-8000-000000000003",
+        "serviceType": "MedicationRequest",
+        "status": "SCHEDULED",
+        "startTime": 1772461800,
+        "order": {
+          "uuid": "5d1c7a2e-3b4f-4e6a-9c8d-7f1e2a3b4c5d",
+          "orderNumber": "ORD-T-1",
+          "drug": {
+            "uuid": "1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e",
+            "display": "Test Paracetamol 500 mg"
+          },
+          "action": "NEW",
+          "dateStopped": null
+        },
+        "medicationAdministration": null,
+        "notes": "after food"
+      },
+      {
+        "id": 1,
+        "uuid": "a1000000-0000-4000-8000-000000000004",
+        "serviceType": "MedicationRequest",
+        "status": "MISSED",
+        "startTime": 1772411400,
+        "order": {
+          "uuid": "8e2f1a3b-4c5d-4f6e-a7b8-9c0d1e2f3a4b",
+          "orderNumber": "ORD-T-2",
+          "drug": {
+            "uuid": "2c3d4e5f-6a7b-4c8d-9e0f-1a2b3c4d5e6f",
+            "display": "Test Ceftriaxone 1 g"
+          },
+          "action": "NEW",
+          "dateStopped": null
+        },
+        "medicationAdministration": null,
+        "notes": null
+      },
+      {
+        "id": 1,
+        "uuid": "a1000000-0000-4000-8000-000000000005",
+        "serviceType": "MedicationRequest",
+        "status": "STOPPED",
+        "startTime": 1772454600,
+        "order": {
+          "uuid": "8e2f1a3b-4c5d-4f6e-a7b8-9c0d1e2f3a4b",
+          "orderNumber": "ORD-T-2",
+          "drug": {
+            "uuid": "2c3d4e5f-6a7b-4c8d-9e0f-1a2b3c4d5e6f",
+            "display": "Test Ceftriaxone 1 g"
+          },
+          "action": "NEW",
+          "dateStopped": null
+        },
+        "medicationAdministration": null,
+        "notes": null
+      }
+    ]
+  }
+]

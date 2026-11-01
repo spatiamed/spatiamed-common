@@ -1,0 +1,33 @@
+{
+  "encounterUuid": "2c05f0f9-ba5c-47d4-95d3-f932678fc1a1",
+  "visitUuid": "a3f0c2d4-6b1e-4f7a-9c8d-2e5b7a1c3f90",
+  "patientUuid": "7b6e3725-544e-4850-a807-08db11c429ce",
+  "encounterTypeUuid": "d98c4111-9352-490a-a489-4719915fd5c9",
+  "encounterDateTime": "2026-10-20T06:30:00.000+0000",
+  "observations": [
+    {
+      "uuid": "a8e767b8-b016-41ff-9431-422dc7e1fa88",
+      "concept": {"uuid": "0f1e2d3c-4b5a-4968-8776-655443322110", "name": "Pulse"},
+      "value": 88,
+      "comment": "sm:2c05f0f9-ba5c-47d4-95d3-f932678fc1a1",
+      "groupMembers": []
+    },
+    {
+      "uuid": "9a325bbf-25b5-4b9e-83f7-9592259bb860",
+      "concept": {"uuid": "1a2b3c4d-5e6f-4a1b-8c2d-3e4f5a6b7c8d", "name": "Systolic"},
+      "value": 120,
+      "comment": null,
+      "groupMembers": []
+    },
+    {
+      "uuid": "1dd1f6ae-ee02-4b51-8e1d-4f89a1a0ab6e",
+      "concept": {"uuid": "2b3c4d5e-6f7a-4b2c-9d3e-4f5a6b7c8d9e", "name": "Diastolic"},
+      "value": 80,
+      "comment": null,
+      "groupMembers": []
+    }
+  ],
+  "providers": [{"uuid": "aedd07c0-787b-47e2-ad63-3ea36266f1a1"}],
+  "drugOrders": [],
+  "bahmniDiagnoses": []
+}
