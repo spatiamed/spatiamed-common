@@ -1,0 +1,56 @@
+{
+  "patientUuid": "deeeac16-ad7f-49f6-96b3-cd6f06196e59",
+  "visitUuid": "fc17aded-c4d6-4bd9-890b-a8e684a33ffe",
+  "encounterTypeUuid": "0c061ae4-61b8-47a5-ab53-c21bc95dbb68",
+  "encounterDateTime": 1792488600000,
+  "locationUuid": "4634dde0-2ee1-4e71-b59f-545c4954b00b",
+  "providers": [{"uuid": "f2e6c810-53eb-4c90-ae9d-03f5356e0e28"}],
+  "observations": [
+    {
+      "concept": {"uuid": "6dd34379-e216-49e4-89e8-e9e356cd31d6"},
+      "orderUuid": "5086fb24-30d7-473c-8fb2-9ea6a784a7eb",
+      "observationDateTime": 1792487700250,
+      "groupMembers": [
+        {
+          "concept": {"uuid": "6dd34379-e216-49e4-89e8-e9e356cd31d6"},
+          "orderUuid": "5086fb24-30d7-473c-8fb2-9ea6a784a7eb",
+          "observationDateTime": 1792487700250,
+          "groupMembers": [
+            {
+              "concept": {"uuid": "6dd34379-e216-49e4-89e8-e9e356cd31d6"},
+              "orderUuid": "5086fb24-30d7-473c-8fb2-9ea6a784a7eb",
+              "observationDateTime": 1792487700250,
+              "value": 11.2
+            },
+            {
+              "concept": {"uuid": "8d542a8a-b673-4c57-8a7d-8ea4ff3235cb"},
+              "orderUuid": "5086fb24-30d7-473c-8fb2-9ea6a784a7eb",
+              "observationDateTime": 1792487700250,
+              "value": true
+            },
+            {
+              "concept": {"uuid": "bad1abd9-40ca-4334-bfe7-e092961aef46"},
+              "orderUuid": "5086fb24-30d7-473c-8fb2-9ea6a784a7eb",
+              "observationDateTime": 1792487700250,
+              "value": 13.0
+            },
+            {
+              "concept": {"uuid": "ec402d6a-7c24-4a7a-8af0-5dbd9d03b006"},
+              "orderUuid": "5086fb24-30d7-473c-8fb2-9ea6a784a7eb",
+              "observationDateTime": 1792487700250,
+              "value": 17.0
+            },
+            {
+              "concept": {"uuid": "901f8cac-33a7-44f2-b68d-ab7b7b90b734"},
+              "orderUuid": "5086fb24-30d7-473c-8fb2-9ea6a784a7eb",
+              "observationDateTime": 1792487700250,
+              "value": "Synthetic note: repeat in two weeks"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "orders": [],
+  "drugOrders": []
+}
