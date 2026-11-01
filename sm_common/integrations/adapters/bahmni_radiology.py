@@ -552,16 +552,28 @@ class BahmniRadiologyClient:
             "provider_uuid": provider_uuid,
             "location_uuid": location_uuid,
         }
-        encounter_uuid, parsed = await self._post_encounter(**context, orders=bodies)
+        encounter_uuid, parsed = await self._post_encounter(
+            patient_uuid=patient_uuid,
+            visit_uuid=visit_uuid,
+            encounter_type_uuid=encounter_type_uuid,
+            provider_uuid=provider_uuid,
+            location_uuid=location_uuid,
+            orders=bodies,
+        )
 
         by_concept: dict[str, str] = {}
         for row in parsed.get("orders") or [] if isinstance(parsed, dict) else []:
             if not isinstance(row, dict):
                 continue
-            concept = _ref(row.get("concept")) or _str(row.get("conceptUuid"))
+            row_concept = _ref(row.get("concept")) or _str(row.get("conceptUuid"))
             order_uuid = _str(row.get("uuid"))
-            if concept in concepts and order_uuid and _UUID_SHAPE.fullmatch(order_uuid):
-                by_concept.setdefault(concept, order_uuid)
+            if (
+                row_concept in concepts
+                and row_concept is not None
+                and order_uuid
+                and _UUID_SHAPE.fullmatch(order_uuid)
+            ):
+                by_concept.setdefault(row_concept, order_uuid)
         missing = [c for c in concepts if c not in by_concept]
         if missing:
             raise VendorRejected(
