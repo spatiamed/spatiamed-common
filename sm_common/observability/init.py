@@ -46,13 +46,27 @@ _DISABLED_INTEGRATIONS = (
 # matter reach us through stdlib/structlog (see scrub.py) or uncaught exceptions.
 _LOGURU_INTEGRATION = "sentry_sdk.integrations.loguru.LoguruIntegration"
 
+# Opt-in (init_error_tracking(disable_data_store_integrations=True)). These auto-enable
+# whenever their library is importable and record a breadcrumb for EVERY SQL statement
+# and Redis command, each deep-walked by scrub_breadcrumb. On a single-process API that
+# was ~45% of per-request CPU (QueueCare perf 2026-11-05: 3.84 -> 2.0 ms/request). Off,
+# error events are captured and scrubbed exactly as before; they just carry no SQL/Redis
+# breadcrumbs (a smaller PHI surface) and, if traces are on, no DB/Redis spans.
+_DATA_STORE_INTEGRATIONS = (
+    "sentry_sdk.integrations.sqlalchemy.SqlalchemyIntegration",
+    "sentry_sdk.integrations.asyncpg.AsyncPGIntegration",
+    "sentry_sdk.integrations.redis.RedisIntegration",
+)
 
-def _disabled_integrations() -> list[Any]:
+
+def _disabled_integrations(disable_data_store_integrations: bool = False) -> list[Any]:
     import importlib
 
     paths = list(_DISABLED_INTEGRATIONS)
     if is_enabled("loguru_integration_off"):
         paths.append(_LOGURU_INTEGRATION)
+    if disable_data_store_integrations:
+        paths.extend(_DATA_STORE_INTEGRATIONS)
     out: list[Any] = []
     for path in paths:
         module, _, cls = path.rpartition(".")
@@ -72,6 +86,7 @@ def _build_options(
     transport: Transport | None,
     traces_sample_rate: float,
     trace_propagation_targets: list[str],
+    disable_data_store_integrations: bool = False,
 ) -> dict[str, Any]:
     from sentry_sdk.integrations.logging import LoggingIntegration
 
@@ -92,7 +107,7 @@ def _build_options(
                 sentry_logs_level=None,
             )
         ],
-        "disabled_integrations": _disabled_integrations(),
+        "disabled_integrations": _disabled_integrations(disable_data_store_integrations),
         "enable_logs": False,
         "enable_metrics": False,
         "before_send": scrub_event,
@@ -128,12 +143,16 @@ def init_error_tracking(
     transport: Transport | None = None,
     traces_sample_rate: object = None,
     trace_propagation_targets: str | Iterable[str] | None = None,
+    disable_data_store_integrations: bool = False,
 ) -> bool:
     """Errors at 100%. Traces only when ``traces_sample_rate`` (the raw TRACES_SAMPLE_RATE
     env value is accepted) parses to > 0; clamped to TRACES_SAMPLE_RATE_CEILING (0.25)
     and decided by our own coin. ``trace_propagation_targets`` is the raw
     SENTRY_TRACE_PROPAGATION_TARGETS value: comma-separated host names of our own
-    services; default none, and anything that is not a plain host is ignored."""
+    services; default none, and anything that is not a plain host is ignored.
+    ``disable_data_store_integrations`` (default False, unchanged behaviour) turns off
+    the SQLAlchemy, asyncpg and Redis integrations: no per-query/per-command breadcrumbs
+    or spans, same error capture and scrubbing."""
     if not dsn:
         return False
     import sentry_sdk
@@ -147,6 +166,7 @@ def init_error_tracking(
             transport=transport,
             traces_sample_rate=parse_sample_rate(traces_sample_rate),
             trace_propagation_targets=parse_propagation_targets(trace_propagation_targets),
+            disable_data_store_integrations=disable_data_store_integrations,
         )
     )
     sentry_sdk.get_global_scope().set_tag("service", service_name)
