@@ -37,6 +37,7 @@ from enum import StrEnum
 from typing import Annotated, Any, ClassVar, Literal, TypeVar
 
 from pydantic import (
+    AwareDatetime,
     BaseModel,
     ConfigDict,
     Field,
@@ -50,7 +51,9 @@ __all__ = [
     "ENQUIRY_REF_PATTERN",
     "EVENT_PAYLOAD_MODELS",
     "REFERRAL_CODE_PATTERN",
+    "BookingDisruptedData",
     "BookingLang",
+    "BookingStaffChangedData",
     "BookingUpdatedPayload",
     "ConsultationScheduledPayload",
     "EventEnvelope",
@@ -107,6 +110,8 @@ class EventType(StrEnum):
     REPORT_REVOKED = "report.revoked"
     CONSULTATION_SCHEDULED = "consultation.scheduled"
     BOOKING_UPDATED = "booking.updated"
+    BOOKING_DISRUPTED = "booking.disrupted"
+    BOOKING_STAFF_CHANGED = "booking.staff_changed"
 
     # CareLoop -> QueueCare (reverse)
     PATIENT_PRE_REGISTERED = "patient.pre_registered"
@@ -578,6 +583,55 @@ class PatientAppointmentCancelledPayload(EventPayload):
     appointment_date: str
 
 
+class BookingDisruptedData(EventPayload):
+    """``booking.disrupted`` — a booking was disrupted (leave, closure, change).
+
+    Producer: QueueCare. Consumer: CareLoop (WhatsApp rebooking offer).
+
+    PHI: same contract as ``booking.updated``. No patient name and no PLAINTEXT
+    phone (``extra="forbid"`` rejects ``phone`` / ``patient_first_name``). The
+    patient is identified by ``phone_hash``; ``contact_phone_encrypted`` is a
+    Fernet token under ``WEBHOOK_TRANSPORT_KEY`` (E.164 phone), required so
+    CareLoop can message a patient it has no profile for. Opaque; never log it.
+
+    * ``kind`` — ``doctor_leave`` | ``closure`` | ``doctor_change`` |
+      ``hours_change``.
+    * ``cover_doctor_name`` — covering doctor, when one is arranged.
+    * ``hold_expires_at`` — when the held slot is released, when held.
+    """
+
+    disruption_item_id: uuid.UUID
+    booking_id: uuid.UUID
+    phone_hash: Annotated[str, Field(min_length=1)]
+    contact_phone_encrypted: Annotated[str, Field(min_length=1)]
+    doctor_name: str
+    slot_start: AwareDatetime
+    kind: Literal["doctor_leave", "closure", "doctor_change", "hours_change"]
+    cover_doctor_name: str | None = None
+    hold_expires_at: AwareDatetime | None = None
+
+
+class BookingStaffChangedData(EventPayload):
+    """``booking.staff_changed`` — staff booked, moved or cancelled a booking.
+
+    Producer: QueueCare. Consumer: CareLoop (WhatsApp confirmation, sent only
+    when ``whatsapp_consent`` is true). ``slot_start`` is null when cancelled
+    without a slot.
+
+    PHI: no patient name and no PLAINTEXT phone (``extra="forbid"``). Identity
+    is ``phone_hash``; ``contact_phone_encrypted`` is a Fernet token under
+    ``WEBHOOK_TRANSPORT_KEY``, opaque and never logged.
+    """
+
+    booking_id: uuid.UUID
+    phone_hash: Annotated[str, Field(min_length=1)]
+    contact_phone_encrypted: Annotated[str, Field(min_length=1)]
+    doctor_name: str
+    slot_start: AwareDatetime | None = None
+    change: Literal["booked", "moved", "cancelled"]
+    whatsapp_consent: bool
+
+
 #: Canonical EventType -> payload-model mapping. Building/parsing an envelope
 #: validates ``data`` against the mapped model, so a field mismatch is a
 #: ValidationError rather than a silent no-op.
@@ -590,6 +644,8 @@ EVENT_PAYLOAD_MODELS: dict[EventType, type[EventPayload]] = {
     EventType.REPORT_REVOKED: ReportRevokedPayload,
     EventType.CONSULTATION_SCHEDULED: ConsultationScheduledPayload,
     EventType.BOOKING_UPDATED: BookingUpdatedPayload,
+    EventType.BOOKING_DISRUPTED: BookingDisruptedData,
+    EventType.BOOKING_STAFF_CHANGED: BookingStaffChangedData,
     EventType.PATIENT_PRE_REGISTERED: PatientPreRegisteredPayload,
     EventType.PATIENT_APPOINTMENT_CANCELLED: PatientAppointmentCancelledPayload,
 }

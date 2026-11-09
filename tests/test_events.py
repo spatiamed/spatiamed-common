@@ -34,6 +34,8 @@ from sm_common import (
     payload_model_for,
 )
 from sm_common.events import (
+    BookingDisruptedData,
+    BookingStaffChangedData,
     BookingUpdatedPayload,
     ConsultationScheduledPayload,
     EventPayload,
@@ -141,6 +143,28 @@ BOOKING_UPDATED_SAMPLE = {
     "updated_at": "2026-10-02T09:15:00.123456+00:00",
 }
 
+BOOKING_DISRUPTED_SAMPLE = {
+    "disruption_item_id": str(uuid.uuid4()),
+    "booking_id": str(uuid.uuid4()),
+    "phone_hash": "abc123hash",
+    "contact_phone_encrypted": "gAAAAAB-opaque-fernet-token",
+    "doctor_name": "Dr. Rao",
+    "slot_start": "2026-11-10T04:30:00Z",
+    "kind": "doctor_leave",
+    "cover_doctor_name": "Dr. Iyer",
+    "hold_expires_at": "2026-11-09T04:30:00Z",
+}
+
+BOOKING_STAFF_CHANGED_SAMPLE = {
+    "booking_id": str(uuid.uuid4()),
+    "phone_hash": "abc123hash",
+    "contact_phone_encrypted": "gAAAAAB-opaque-fernet-token",
+    "doctor_name": "Dr. Rao",
+    "slot_start": "2026-11-10T04:30:00Z",
+    "change": "booked",
+    "whatsapp_consent": True,
+}
+
 SAMPLES: dict[EventType, dict] = {
     EventType.VISIT_TOKEN_ISSUED: VISIT_TOKEN_ISSUED_SAMPLE,
     EventType.VISIT_COMPLETED: VISIT_COMPLETED_SAMPLE,
@@ -152,6 +176,8 @@ SAMPLES: dict[EventType, dict] = {
     EventType.PATIENT_PRE_REGISTERED: PATIENT_PRE_REGISTERED_SAMPLE,
     EventType.PATIENT_APPOINTMENT_CANCELLED: PATIENT_APPOINTMENT_CANCELLED_SAMPLE,
     EventType.BOOKING_UPDATED: BOOKING_UPDATED_SAMPLE,
+    EventType.BOOKING_DISRUPTED: BOOKING_DISRUPTED_SAMPLE,
+    EventType.BOOKING_STAFF_CHANGED: BOOKING_STAFF_CHANGED_SAMPLE,
 }
 
 
@@ -170,6 +196,8 @@ def test_event_type_values() -> None:
         "patient.pre_registered",
         "patient.appointment_cancelled",
         "booking.updated",
+        "booking.disrupted",
+        "booking.staff_changed",
     }
 
 
@@ -180,7 +208,7 @@ def test_event_type_is_str() -> None:
 
 def test_every_event_type_has_a_payload_model() -> None:
     assert set(EVENT_PAYLOAD_MODELS) == set(EventType)
-    assert len(EVENT_PAYLOAD_MODELS) == 10
+    assert len(EVENT_PAYLOAD_MODELS) == 12
 
 
 def test_every_sample_covers_every_event() -> None:
@@ -466,6 +494,70 @@ def test_booking_updated_envelope_round_trip() -> None:
     assert parse_payload(parse_envelope(wire)) == payload
 
 
+# --- booking.disrupted / booking.staff_changed (WhatsApp booking) -----------
+
+
+def test_booking_disrupted_round_trip() -> None:
+    payload = BookingDisruptedData.model_validate(BOOKING_DISRUPTED_SAMPLE)
+    env = build_envelope(
+        event_type=EventType.BOOKING_DISRUPTED,
+        payload=payload,
+        source=EventSource.QUEUECARE,
+        tenant_id="tenant-1",
+    )
+    wire = env.model_dump(mode="json")
+    assert wire["event_type"] == "booking.disrupted"
+    assert parse_payload(parse_envelope(wire)) == payload
+    # kind is a closed set; hold/cover are optional.
+    with pytest.raises(ValidationError):
+        BookingDisruptedData.model_validate({**BOOKING_DISRUPTED_SAMPLE, "kind": "meteor"})
+    minimal = {
+        k: v
+        for k, v in BOOKING_DISRUPTED_SAMPLE.items()
+        if k not in {"cover_doctor_name", "hold_expires_at"}
+    }
+    p = BookingDisruptedData.model_validate(minimal)
+    assert p.cover_doctor_name is None
+    assert p.hold_expires_at is None
+
+
+@pytest.mark.parametrize(
+    ("model", "sample"),
+    [
+        (BookingDisruptedData, BOOKING_DISRUPTED_SAMPLE),
+        (BookingStaffChangedData, BOOKING_STAFF_CHANGED_SAMPLE),
+    ],
+)
+@pytest.mark.parametrize("extra", [{"phone": "+919876543210"}, {"patient_first_name": "Asha"}])
+def test_booking_wa_events_reject_plaintext_phi(model, sample, extra) -> None:
+    with pytest.raises(ValidationError):
+        model.model_validate({**sample, **extra})
+    for required in ("phone_hash", "contact_phone_encrypted"):
+        with pytest.raises(ValidationError):
+            model.model_validate({k: v for k, v in sample.items() if k != required})
+
+
+def test_booking_staff_changed_round_trip() -> None:
+    payload = BookingStaffChangedData.model_validate(BOOKING_STAFF_CHANGED_SAMPLE)
+    env = build_envelope(
+        event_type=EventType.BOOKING_STAFF_CHANGED,
+        payload=payload,
+        source=EventSource.QUEUECARE,
+        tenant_id="tenant-1",
+    )
+    wire = env.model_dump(mode="json")
+    assert wire["event_type"] == "booking.staff_changed"
+    assert parse_payload(parse_envelope(wire)) == payload
+    with pytest.raises(ValidationError):
+        BookingStaffChangedData.model_validate({**BOOKING_STAFF_CHANGED_SAMPLE, "change": "lost"})
+    assert (
+        BookingStaffChangedData.model_validate(
+            {**BOOKING_STAFF_CHANGED_SAMPLE, "slot_start": None, "change": "cancelled"}
+        ).slot_start
+        is None
+    )
+
+
 # --- booking form v1 (v0.20.0): status link, OD-6 fields, OD-1 contact phone ---
 
 STATUS_LINK = "https://book.test/book/demohospital/status/BK-7Q2X#t=opaque-capability"
@@ -688,3 +780,33 @@ def test_visit_completed_still_forbids_a_plaintext_name() -> None:
     for bad_key in ("patient_name", "name", "patient_first_name"):
         with pytest.raises(ValidationError):
             VisitCompletedPayload.model_validate({**VISIT_COMPLETED_SAMPLE, bad_key: "Animesh"})
+
+
+# --- v0.30 tightening: aware datetimes, non-empty identity strings -----------
+
+
+@pytest.mark.parametrize(
+    ("model", "sample", "field"),
+    [
+        (BookingDisruptedData, BOOKING_DISRUPTED_SAMPLE, "slot_start"),
+        (BookingDisruptedData, BOOKING_DISRUPTED_SAMPLE, "hold_expires_at"),
+        (BookingStaffChangedData, BOOKING_STAFF_CHANGED_SAMPLE, "slot_start"),
+    ],
+)
+def test_booking_wa_events_reject_naive_datetimes(model, sample, field) -> None:
+    model.model_validate(sample)  # the offset-carrying sample is fine
+    with pytest.raises(ValidationError):
+        model.model_validate({**sample, field: "2026-11-10T04:30:00"})
+
+
+@pytest.mark.parametrize(
+    ("model", "sample"),
+    [
+        (BookingDisruptedData, BOOKING_DISRUPTED_SAMPLE),
+        (BookingStaffChangedData, BOOKING_STAFF_CHANGED_SAMPLE),
+    ],
+)
+@pytest.mark.parametrize("field", ["phone_hash", "contact_phone_encrypted"])
+def test_booking_wa_events_reject_empty_identity_strings(model, sample, field) -> None:
+    with pytest.raises(ValidationError):
+        model.model_validate({**sample, field: ""})
