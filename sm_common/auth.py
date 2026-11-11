@@ -119,11 +119,13 @@ def roles_epoch_key(staff_id: str) -> str:
 def roles_revoked(iat: Any, epoch: Any) -> bool:
     """True when a token issued at ``iat`` predates the staff member's role epoch.
 
-    ``epoch`` is the raw Redis value (bytes / str / int / None). ``None`` or an
-    unparseable value means no revocation recorded -> False. A token whose ``iat``
-    is missing or unparseable while an epoch exists is treated as revoked (cannot
-    prove it postdates the revoke). Strict ``<``: a token minted in the same second
-    as the revoke is kept (platform-api revokes first, the re-minted token follows).
+    ``epoch`` is the raw Redis value (bytes / str / int / None). ``None`` means no
+    revocation recorded -> False. A value that is present but NOT an integer is
+    treated as revoked (fail closed: a corrupt revoke marker must never let an old
+    token through). A token whose ``iat`` is missing or unparseable while an epoch
+    exists is also treated as revoked (cannot prove it postdates the revoke).
+    Strict ``<``: a token minted in the same second as the revoke is kept
+    (platform-api revokes first, the re-minted token follows).
     """
     if epoch is None:
         return False
@@ -132,7 +134,7 @@ def roles_revoked(iat: Any, epoch: Any) -> bool:
             epoch = epoch.decode()
         epoch_i = int(epoch)
     except (ValueError, TypeError):
-        return False
+        return True
     try:
         iat_i = int(iat)
     except (ValueError, TypeError):
