@@ -8,12 +8,19 @@ secret-rotation grace-window semantics. Callers translate the raised
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 import jwt
 
-__all__ = ["decode_jwt_with_grace"]
+__all__ = [
+    "ROLES_EPOCH_KEY_PREFIX",
+    "decode_jwt_with_grace",
+    "has_any_role",
+    "roles_epoch_key",
+    "roles_from_claims",
+    "roles_revoked",
+]
 
 _DEFAULT_ALGORITHMS = ("HS256",)
 
@@ -69,3 +76,65 @@ def decode_jwt_with_grace(
             return jwt.decode(token, previous_secret, algorithms=algs, **decode_kwargs)
         except jwt.InvalidTokenError:
             raise primary_exc from None
+
+
+# --- multi-role claims (staff module access) --------------------------------
+# platform-api mints ``roles`` (primary ``platform_role`` first, then extra module
+# roles) next to the legacy single ``platform_role`` claim. Consumers must accept
+# BOTH shapes: tokens minted before the change carry only ``platform_role``.
+
+ROLES_EPOCH_KEY_PREFIX = "staff_roles_epoch:"
+
+
+def roles_from_claims(payload: Mapping[str, Any]) -> frozenset[str]:
+    """Roles a decoded token holds.
+
+    Uses the ``roles`` claim when it is a non-empty list; non-string / blank items
+    are ignored. A missing, empty, or wholly malformed ``roles`` falls back to the
+    legacy ``platform_role`` claim, so old tokens behave exactly as before. The
+    legacy primary role is always included when present (fail toward today's
+    behaviour, never toward less). Returns an empty set when neither is usable.
+    """
+    found: set[str] = set()
+    raw = payload.get("roles")
+    if isinstance(raw, (list, tuple)):
+        found.update(r for r in raw if isinstance(r, str) and r)
+    primary = payload.get("platform_role")
+    if isinstance(primary, str) and primary:
+        found.add(primary)
+    return frozenset(found)
+
+
+def has_any_role(roles: Iterable[str], allowed: Iterable[str]) -> bool:
+    """True when ``roles`` and ``allowed`` share at least one role."""
+    return not frozenset(roles).isdisjoint(frozenset(allowed))
+
+
+def roles_epoch_key(staff_id: str) -> str:
+    """Redis key platform-api writes (unix seconds) when it revokes a staff member's
+    roles. Tokens issued before that instant must stop working immediately."""
+    return f"{ROLES_EPOCH_KEY_PREFIX}{staff_id}"
+
+
+def roles_revoked(iat: Any, epoch: Any) -> bool:
+    """True when a token issued at ``iat`` predates the staff member's role epoch.
+
+    ``epoch`` is the raw Redis value (bytes / str / int / None). ``None`` or an
+    unparseable value means no revocation recorded -> False. A token whose ``iat``
+    is missing or unparseable while an epoch exists is treated as revoked (cannot
+    prove it postdates the revoke). Strict ``<``: a token minted in the same second
+    as the revoke is kept (platform-api revokes first, the re-minted token follows).
+    """
+    if epoch is None:
+        return False
+    try:
+        if isinstance(epoch, (bytes, bytearray)):
+            epoch = epoch.decode()
+        epoch_i = int(epoch)
+    except (ValueError, TypeError):
+        return False
+    try:
+        iat_i = int(iat)
+    except (ValueError, TypeError):
+        return True
+    return iat_i < epoch_i
