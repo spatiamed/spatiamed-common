@@ -41,6 +41,7 @@ from sm_common.events import (
     EventPayload,
     PatientAppointmentCancelledPayload,
     PatientPreRegisteredPayload,
+    PatientSmsConsentRecordedData,
     ReportReadyPayload,
     ReportRevokedPayload,
     VisitCancelledPayload,
@@ -165,6 +166,14 @@ BOOKING_STAFF_CHANGED_SAMPLE = {
     "whatsapp_consent": True,
 }
 
+SMS_CONSENT_SAMPLE = {
+    "phone_hash": "abc123hash",
+    "contact_phone_encrypted": "gAAAAAB-opaque-fernet-token",
+    "source": "kiosk",
+    "notice_version": "kiosk-sms-v1",
+    "consent_granted_at": "2026-11-11T04:30:00Z",
+}
+
 SAMPLES: dict[EventType, dict] = {
     EventType.VISIT_TOKEN_ISSUED: VISIT_TOKEN_ISSUED_SAMPLE,
     EventType.VISIT_COMPLETED: VISIT_COMPLETED_SAMPLE,
@@ -178,6 +187,7 @@ SAMPLES: dict[EventType, dict] = {
     EventType.BOOKING_UPDATED: BOOKING_UPDATED_SAMPLE,
     EventType.BOOKING_DISRUPTED: BOOKING_DISRUPTED_SAMPLE,
     EventType.BOOKING_STAFF_CHANGED: BOOKING_STAFF_CHANGED_SAMPLE,
+    EventType.PATIENT_SMS_CONSENT_RECORDED: SMS_CONSENT_SAMPLE,
 }
 
 
@@ -198,6 +208,7 @@ def test_event_type_values() -> None:
         "booking.updated",
         "booking.disrupted",
         "booking.staff_changed",
+        "patient.sms_consent_recorded",
     }
 
 
@@ -208,7 +219,7 @@ def test_event_type_is_str() -> None:
 
 def test_every_event_type_has_a_payload_model() -> None:
     assert set(EVENT_PAYLOAD_MODELS) == set(EventType)
-    assert len(EVENT_PAYLOAD_MODELS) == 12
+    assert len(EVENT_PAYLOAD_MODELS) == 13
 
 
 def test_every_sample_covers_every_event() -> None:
@@ -810,3 +821,20 @@ def test_booking_wa_events_reject_naive_datetimes(model, sample, field) -> None:
 def test_booking_wa_events_reject_empty_identity_strings(model, sample, field) -> None:
     with pytest.raises(ValidationError):
         model.model_validate({**sample, field: ""})
+
+
+def test_sms_consent_recorded_round_trip_and_forbids_plain_phone() -> None:
+    payload = PatientSmsConsentRecordedData.model_validate(SMS_CONSENT_SAMPLE)
+    env = build_envelope(
+        event_type=EventType.PATIENT_SMS_CONSENT_RECORDED,
+        payload=payload,
+        source=EventSource.QUEUECARE,
+        tenant_id="tenant-1",
+    )
+    wire = env.model_dump(mode="json")
+    assert wire["event_type"] == "patient.sms_consent_recorded"
+    assert parse_payload(parse_envelope(wire)) == payload
+    with pytest.raises(ValidationError):
+        PatientSmsConsentRecordedData.model_validate({**SMS_CONSENT_SAMPLE, "phone": "9876543210"})
+    with pytest.raises(ValidationError):
+        PatientSmsConsentRecordedData.model_validate({**SMS_CONSENT_SAMPLE, "source": "web"})

@@ -63,6 +63,7 @@ __all__ = [
     "NoticeKind",
     "PatientAppointmentCancelledPayload",
     "PatientPreRegisteredPayload",
+    "PatientSmsConsentRecordedData",
     "ReportReadyPayload",
     "ReportRevokedPayload",
     "VisitCancelledPayload",
@@ -112,6 +113,7 @@ class EventType(StrEnum):
     BOOKING_UPDATED = "booking.updated"
     BOOKING_DISRUPTED = "booking.disrupted"
     BOOKING_STAFF_CHANGED = "booking.staff_changed"
+    PATIENT_SMS_CONSENT_RECORDED = "patient.sms_consent_recorded"
 
     # CareLoop -> QueueCare (reverse)
     PATIENT_PRE_REGISTERED = "patient.pre_registered"
@@ -632,6 +634,31 @@ class BookingStaffChangedData(EventPayload):
     whatsapp_consent: bool
 
 
+class PatientSmsConsentRecordedData(EventPayload):
+    """``patient.sms_consent_recorded`` — a patient ticked "Send me health reminders and
+    updates by SMS" at registration (kiosk or front desk).
+
+    Producer: QueueCare. Consumer: CareLoop, which records an EXPLICIT SMS grant
+    (``consent_records`` channel ``sms``, source ``kiosk`` / ``desk``) unless a
+    withdrawal was recorded after ``consent_granted_at``.
+
+    PHI: no patient name and no PLAINTEXT phone (``extra="forbid"``). Identity is
+    ``phone_hash``; ``contact_phone_encrypted`` is a Fernet token under
+    ``WEBHOOK_TRANSPORT_KEY`` (phone), so CareLoop can create a profile for a
+    patient it has none for. Opaque; never log it.
+
+    * ``source`` — where the tick happened: ``kiosk`` | ``desk``.
+    * ``notice_version`` — the versioned notice the patient agreed to
+      (``kiosk-sms-v1`` on the kiosk, ``desk-sms-v1`` at the desk).
+    """
+
+    phone_hash: Annotated[str, Field(min_length=1)]
+    contact_phone_encrypted: Annotated[str, Field(min_length=1)]
+    source: Literal["kiosk", "desk"]
+    notice_version: Annotated[str, Field(min_length=1, max_length=64)]
+    consent_granted_at: AwareDatetime
+
+
 #: Canonical EventType -> payload-model mapping. Building/parsing an envelope
 #: validates ``data`` against the mapped model, so a field mismatch is a
 #: ValidationError rather than a silent no-op.
@@ -648,6 +675,7 @@ EVENT_PAYLOAD_MODELS: dict[EventType, type[EventPayload]] = {
     EventType.BOOKING_STAFF_CHANGED: BookingStaffChangedData,
     EventType.PATIENT_PRE_REGISTERED: PatientPreRegisteredPayload,
     EventType.PATIENT_APPOINTMENT_CANCELLED: PatientAppointmentCancelledPayload,
+    EventType.PATIENT_SMS_CONSENT_RECORDED: PatientSmsConsentRecordedData,
 }
 
 
