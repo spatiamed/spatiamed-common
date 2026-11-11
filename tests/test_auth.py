@@ -138,8 +138,9 @@ class TestRolesRevoked:
         assert roles_revoked(100, 100) is False
         assert roles_revoked(101, b"100") is False
 
-    def test_garbage_epoch_ignored(self):
-        assert roles_revoked(1, b"nope") is False
+    @pytest.mark.parametrize("garbage", [b"nope", "", b"1.5", b"\xff\xfe", object()])
+    def test_unparseable_epoch_fails_closed(self, garbage):
+        assert roles_revoked(10**12, garbage) is True
 
     def test_missing_iat_with_epoch_is_revoked(self):
         assert roles_revoked(None, 100) is True
