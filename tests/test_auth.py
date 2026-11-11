@@ -3,7 +3,13 @@ import time
 import jwt
 import pytest
 
-from sm_common.auth import decode_jwt_with_grace
+from sm_common.auth import (
+    decode_jwt_with_grace,
+    has_any_role,
+    roles_epoch_key,
+    roles_from_claims,
+    roles_revoked,
+)
 
 CURRENT = "current-secret"
 PREVIOUS = "previous-secret"
@@ -85,3 +91,60 @@ class TestDecodeJwtWithGrace:
             options={"require": ["jti"]},
         )
         assert payload["jti"] == "abc"
+
+
+class TestRolesFromClaims:
+    def test_legacy_token_only_platform_role(self):
+        assert roles_from_claims({"platform_role": "doctor"}) == {"doctor"}
+
+    def test_new_token_roles_plus_primary(self):
+        got = roles_from_claims({"platform_role": "doctor", "roles": ["doctor", "marketing_staff"]})
+        assert got == {"doctor", "marketing_staff"}
+
+    def test_primary_always_included(self):
+        assert roles_from_claims({"platform_role": "admin", "roles": ["billing"]}) == {
+            "admin",
+            "billing",
+        }
+
+    @pytest.mark.parametrize("bad", [None, [], "doctor", 5, {"a": 1}, [None, 3, ""]])
+    def test_malformed_roles_fall_back(self, bad):
+        assert roles_from_claims({"platform_role": "nurse", "roles": bad}) == {"nurse"}
+
+    def test_nothing_usable(self):
+        assert roles_from_claims({}) == frozenset()
+        assert roles_from_claims({"platform_role": "", "roles": []}) == frozenset()
+
+    def test_non_string_items_ignored(self):
+        assert roles_from_claims({"roles": ["billing", 1, None]}) == {"billing"}
+
+
+def test_has_any_role():
+    assert has_any_role(["a", "b"], ("b", "c"))
+    assert not has_any_role(["a"], ("b",))
+    assert not has_any_role([], ("b",))
+    assert not has_any_role(["a"], [])
+
+
+class TestRolesRevoked:
+    def test_no_epoch(self):
+        assert roles_revoked(100, None) is False
+
+    def test_token_before_epoch_revoked(self):
+        assert roles_revoked(99, b"100") is True
+        assert roles_revoked(99, "100") is True
+
+    def test_token_at_or_after_epoch_ok(self):
+        assert roles_revoked(100, 100) is False
+        assert roles_revoked(101, b"100") is False
+
+    def test_garbage_epoch_ignored(self):
+        assert roles_revoked(1, b"nope") is False
+
+    def test_missing_iat_with_epoch_is_revoked(self):
+        assert roles_revoked(None, 100) is True
+        assert roles_revoked("x", 100) is True
+
+
+def test_epoch_key():
+    assert roles_epoch_key("abc") == "staff_roles_epoch:abc"
