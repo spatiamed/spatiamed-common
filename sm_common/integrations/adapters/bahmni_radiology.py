@@ -342,6 +342,14 @@ class BahmniRadiologyClient:
         matched = [p for p in await self._all_procedures() if needle in p.name.casefold()]
         return matched[:limit]
 
+    async def all_procedures(self) -> list[RadiologyProcedure]:
+        """The whole orderable set, uncapped, for order validation.
+
+        Unlike list_procedures (limit <= 200) this never truncates. It adds no cache of its
+        own: it reads the concept set each call, exactly as _all_procedures does.
+        """
+        return await self._all_procedures()
+
     async def _all_procedures(self) -> list[RadiologyProcedure]:
         """Every orderable procedure, uncapped (the order check must see the whole set)."""
         root = self._require("orderable_set_uuid")
