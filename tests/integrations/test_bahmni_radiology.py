@@ -1502,3 +1502,15 @@ async def test_upload_step_one_without_url_files_nothing() -> None:
         await _client().upload_radiology_document(**UPLOAD_KW)
     assert not isinstance(info.value, DocumentFilingFailed)
     assert filed.call_count == 0
+
+
+@respx.mock
+async def test_all_procedures_is_uncapped_while_list_procedures_stays_capped() -> None:
+    _login()
+    members = [_member(f"00000000-0000-4000-8000-{i:012d}", f"Proc {i}") for i in range(250)]
+    respx.get(f"{REST}/concept/{ORDERABLE_SET}").mock(
+        return_value=httpx.Response(200, json={"setMembers": members})
+    )
+    client = _client()
+    assert len(await client.all_procedures()) == 250
+    assert len(await client.list_procedures(limit=200)) == 200
